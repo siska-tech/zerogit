@@ -1,0 +1,17 @@
+[package]
+name = "zerogit"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.70"
+description = "A lightweight, pure Rust Git client library"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/siska-tech/zerogit"
+readme = "README.md"
+keywords = ["git", "vcs", "pure-rust"]
+categories = ["development-tools"]
+
+[dependencies]
+miniz_oxide = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

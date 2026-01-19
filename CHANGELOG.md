@@ -3,6 +3,17 @@
 このプロジェクトは [Keep a Changelog](https://keepachangelog.com/ja/1.0.0/) に準拠し、
 [Semantic Versioning](https://semver.org/lang/ja/) を採用しています。
 
+## [0.3.6] - 2026-01-20
+
+### Fixed
+
+#### ログのパスフィルタリング改善
+- `log_with_options()`のパスフィルタリングがサブディレクトリ内のファイルを正しく検出するように修正
+- ディレクトリプレフィックス指定（`src/`や`src`）で配下の全ファイルの変更を検出可能に
+- ネストされたパス（`src/utils/helpers/mod.rs`など）のフィルタリングに対応
+
+---
+
 ## [0.3.5] - 2026-01-20
 
 ### Added
@@ -164,6 +175,7 @@ Phase 1: Repository Layer（読み取り操作）の完全実装。
 - 対応プラットフォーム: Linux, macOS, Windows
 - テストカバレッジ: 94%以上
 
+[0.3.6]: https://github.com/siska-tech/zerogit/releases/tag/v0.3.6
 [0.3.5]: https://github.com/siska-tech/zerogit/releases/tag/v0.3.5
 [0.3.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.3.0
 [0.2.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.2.0

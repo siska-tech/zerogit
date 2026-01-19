@@ -385,79 +385,105 @@ impl LogIterator {
         Tree::parse(raw)
     }
 
-    /// Gets the OID of an entry at a given path in a tree.
+    /// Flattens a tree into a map of path -> OID.
     ///
-    /// Returns None if the path doesn't exist.
-    fn get_entry_oid_at_path(&self, tree: &Tree, path: &Path) -> Option<Oid> {
-        let mut components = path.components().peekable();
-        let mut current_tree = tree.clone();
+    /// Recursively traverses the tree structure to get all file paths.
+    fn flatten_tree_for_diff(
+        &self,
+        tree: &Tree,
+        prefix: PathBuf,
+    ) -> Result<std::collections::HashMap<PathBuf, Oid>> {
+        let mut result = std::collections::HashMap::new();
 
-        while let Some(component) = components.next() {
-            let name = component.as_os_str().to_str()?;
-            let entry = current_tree.get(name)?;
-
-            if components.peek().is_none() {
-                // Last component - return the OID
-                return Some(*entry.oid());
+        for entry in tree.entries() {
+            let path = if prefix.as_os_str().is_empty() {
+                PathBuf::from(entry.name())
             } else {
-                // Not the last component - must be a directory
-                if !entry.is_directory() {
-                    return None;
-                }
-                // Read the subtree
-                current_tree = self.read_tree(entry.oid()).ok()?;
+                prefix.join(entry.name())
+            };
+
+            if entry.is_directory() {
+                // Recursively flatten subtree
+                let subtree = self.read_tree(entry.oid())?;
+                result.extend(self.flatten_tree_for_diff(&subtree, path)?);
+            } else {
+                // File entry
+                result.insert(path, *entry.oid());
             }
         }
 
-        None
+        Ok(result)
+    }
+
+    /// Checks if a path matches any of the configured filter paths.
+    ///
+    /// A path matches if:
+    /// - It exactly matches a filter path
+    /// - It starts with a filter path (filter path is a directory prefix)
+    fn path_matches_filter(&self, path: &Path) -> bool {
+        let path_str = path.to_string_lossy();
+        for filter_path in &self.options.paths {
+            let filter_str = filter_path.to_string_lossy();
+            // Normalize to forward slashes for comparison
+            let path_normalized = path_str.replace('\\', "/");
+            let filter_normalized = filter_str.replace('\\', "/");
+
+            // Exact match
+            if path_normalized == filter_normalized {
+                return true;
+            }
+
+            // Directory prefix match: filter ends with "/" or path starts with filter + "/"
+            if filter_normalized.ends_with('/') {
+                if path_normalized.starts_with(&filter_normalized) {
+                    return true;
+                }
+            } else {
+                // Check if filter is a directory prefix (path starts with filter/)
+                let prefix = format!("{}/", filter_normalized);
+                if path_normalized.starts_with(&prefix) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Checks if a commit touches any of the configured filter paths.
     ///
-    /// A commit "touches" a path if the entry at that path differs between
-    /// the commit's tree and its parent's tree.
+    /// A commit "touches" a path if any file under that path differs between
+    /// the commit's tree and its parent's tree. This properly handles:
+    /// - Exact file paths (e.g., "src/lib.rs")
+    /// - Directory prefixes (e.g., "src/" matches all files under src)
+    /// - Nested subdirectories (e.g., "src/utils/helpers/mod.rs")
     fn commit_touches_paths(&self, commit: &Commit) -> Result<bool> {
         let current_tree = self.read_tree(commit.tree())?;
+        let current_map = self.flatten_tree_for_diff(&current_tree, PathBuf::new())?;
 
-        // Get parent tree (empty if no parent)
-        let parent_tree = if let Some(parent_oid) = commit.parents().first() {
+        // Get parent tree map (empty if no parent)
+        let parent_map = if let Some(parent_oid) = commit.parents().first() {
             let parent_commit = self.read_commit(parent_oid)?;
-            Some(self.read_tree(parent_commit.tree())?)
+            let parent_tree = self.read_tree(parent_commit.tree())?;
+            self.flatten_tree_for_diff(&parent_tree, PathBuf::new())?
         } else {
-            None
+            std::collections::HashMap::new()
         };
 
-        for path in &self.options.paths {
-            let current_oid = self.get_entry_oid_at_path(&current_tree, path);
-            let parent_oid = parent_tree
-                .as_ref()
-                .and_then(|t| self.get_entry_oid_at_path(t, path));
+        // Collect all paths from both trees
+        let mut all_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        all_paths.extend(current_map.keys().cloned());
+        all_paths.extend(parent_map.keys().cloned());
 
-            // Check if the path changed
+        // Check if any changed path matches our filter
+        for path in all_paths {
+            let current_oid = current_map.get(&path);
+            let parent_oid = parent_map.get(&path);
+
+            // If the path changed (added, deleted, or modified)
             if current_oid != parent_oid {
-                return Ok(true);
-            }
-
-            // Also check if any file under a directory path changed
-            // by comparing directory OIDs
-            if current_oid.is_none() && parent_oid.is_none() {
-                // Path doesn't exist in either - check if it's a prefix of any changed path
-                // For simplicity, we check if the path as a directory entry exists
-                let path_str = path.to_string_lossy();
-                for entry in current_tree.entries() {
-                    if entry.name().starts_with(&*path_str)
-                        || path_str.starts_with(entry.name())
-                    {
-                        // Entry might be relevant - do a deeper check
-                        let current_entry_oid = Some(*entry.oid());
-                        let parent_entry_oid = parent_tree
-                            .as_ref()
-                            .and_then(|t| t.get(entry.name()))
-                            .map(|e| *e.oid());
-                        if current_entry_oid != parent_entry_oid {
-                            return Ok(true);
-                        }
-                    }
+                // Check if this path matches any of our filter paths
+                if self.path_matches_filter(&path) {
+                    return Ok(true);
                 }
             }
         }
@@ -1285,5 +1311,180 @@ mod tests {
         assert_eq!(commits.len(), 2);
         assert_eq!(commits[0].summary(), "Add b.txt");
         assert_eq!(commits[1].summary(), "Add a.txt");
+    }
+
+    /// Helper to create a tree with nested directory structure.
+    fn create_nested_tree(
+        objects_dir: &std::path::Path,
+        files: &[(&str, &[u8])],
+    ) -> Oid {
+        use std::collections::BTreeMap;
+
+        // Build directory structure
+        let mut root_entries: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        let mut subdirs: BTreeMap<String, BTreeMap<String, Vec<u8>>> = BTreeMap::new();
+
+        for (path, content) in files {
+            let parts: Vec<&str> = path.split('/').collect();
+            if parts.len() == 1 {
+                // Root level file
+                let blob_oid = create_loose_object(objects_dir, content, "blob");
+                let mut entry = Vec::new();
+                entry.extend_from_slice(b"100644 ");
+                entry.extend_from_slice(parts[0].as_bytes());
+                entry.push(0);
+                entry.extend_from_slice(blob_oid.as_bytes());
+                root_entries.insert(parts[0].to_string(), entry);
+            } else {
+                // Nested file - for simplicity, handle one level of nesting
+                let dir_name = parts[0];
+                let file_name = parts[1..].join("/");
+                let blob_oid = create_loose_object(objects_dir, content, "blob");
+
+                let subdir = subdirs.entry(dir_name.to_string()).or_default();
+                let mut entry = Vec::new();
+                entry.extend_from_slice(b"100644 ");
+                entry.extend_from_slice(file_name.as_bytes());
+                entry.push(0);
+                entry.extend_from_slice(blob_oid.as_bytes());
+                subdir.insert(file_name, entry);
+            }
+        }
+
+        // Create subtrees and add them to root
+        for (dir_name, entries) in subdirs {
+            let mut subtree_content = Vec::new();
+            for (_, entry) in entries {
+                subtree_content.extend(entry);
+            }
+            let subtree_oid = create_loose_object(objects_dir, &subtree_content, "tree");
+
+            let mut entry = Vec::new();
+            entry.extend_from_slice(b"40000 ");
+            entry.extend_from_slice(dir_name.as_bytes());
+            entry.push(0);
+            entry.extend_from_slice(subtree_oid.as_bytes());
+            root_entries.insert(dir_name, entry);
+        }
+
+        // Build root tree
+        let mut tree_content = Vec::new();
+        for (_, entry) in root_entries {
+            tree_content.extend(entry);
+        }
+        create_loose_object(objects_dir, &tree_content, "tree")
+    }
+
+    // LO-011: path filter with subdirectory file
+    #[test]
+    fn test_log_options_path_filter_subdirectory_file() {
+        let temp = TempDir::new().unwrap();
+        let objects_dir = temp.path().join("objects");
+        fs::create_dir_all(&objects_dir).unwrap();
+
+        // Create trees with files in src/ directory
+        let tree1 = create_nested_tree(&objects_dir, &[("README.md", b"v1")]);
+        let tree2 = create_nested_tree(&objects_dir, &[("README.md", b"v1"), ("src/lib.rs", b"v1")]);
+        let tree3 = create_nested_tree(&objects_dir, &[("README.md", b"v2"), ("src/lib.rs", b"v1")]);
+        let tree4 = create_nested_tree(&objects_dir, &[("README.md", b"v2"), ("src/lib.rs", b"v2")]);
+
+        let c1 = make_commit_content_with_time(&tree1.to_hex(), None, "Add README", 1000);
+        let c1_oid = create_loose_object(&objects_dir, c1.as_bytes(), "commit");
+
+        let c2 = make_commit_content_with_time(&tree2.to_hex(), Some(&c1_oid.to_hex()), "Add src/lib.rs", 2000);
+        let c2_oid = create_loose_object(&objects_dir, c2.as_bytes(), "commit");
+
+        let c3 = make_commit_content_with_time(&tree3.to_hex(), Some(&c2_oid.to_hex()), "Update README", 3000);
+        let c3_oid = create_loose_object(&objects_dir, c3.as_bytes(), "commit");
+
+        let c4 = make_commit_content_with_time(&tree4.to_hex(), Some(&c3_oid.to_hex()), "Update src/lib.rs", 4000);
+        let c4_oid = create_loose_object(&objects_dir, c4.as_bytes(), "commit");
+
+        // Filter by src/lib.rs - should return commits 2 and 4
+        let log = LogIterator::with_options(
+            objects_dir,
+            c4_oid,
+            LogOptions::new().path("src/lib.rs"),
+        ).unwrap();
+        let commits: Vec<_> = log.filter_map(Result::ok).collect();
+
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].summary(), "Update src/lib.rs");
+        assert_eq!(commits[1].summary(), "Add src/lib.rs");
+    }
+
+    // LO-012: path filter with directory prefix
+    #[test]
+    fn test_log_options_path_filter_directory_prefix() {
+        let temp = TempDir::new().unwrap();
+        let objects_dir = temp.path().join("objects");
+        fs::create_dir_all(&objects_dir).unwrap();
+
+        // Create trees with files in src/ directory
+        let tree1 = create_nested_tree(&objects_dir, &[("README.md", b"v1")]);
+        let tree2 = create_nested_tree(&objects_dir, &[("README.md", b"v1"), ("src/lib.rs", b"v1")]);
+        let tree3 = create_nested_tree(&objects_dir, &[("README.md", b"v2"), ("src/lib.rs", b"v1")]);
+        let tree4 = create_nested_tree(&objects_dir, &[("README.md", b"v2"), ("src/lib.rs", b"v1"), ("src/main.rs", b"v1")]);
+
+        let c1 = make_commit_content_with_time(&tree1.to_hex(), None, "Add README", 1000);
+        let c1_oid = create_loose_object(&objects_dir, c1.as_bytes(), "commit");
+
+        let c2 = make_commit_content_with_time(&tree2.to_hex(), Some(&c1_oid.to_hex()), "Add src/lib.rs", 2000);
+        let c2_oid = create_loose_object(&objects_dir, c2.as_bytes(), "commit");
+
+        let c3 = make_commit_content_with_time(&tree3.to_hex(), Some(&c2_oid.to_hex()), "Update README only", 3000);
+        let c3_oid = create_loose_object(&objects_dir, c3.as_bytes(), "commit");
+
+        let c4 = make_commit_content_with_time(&tree4.to_hex(), Some(&c3_oid.to_hex()), "Add src/main.rs", 4000);
+        let c4_oid = create_loose_object(&objects_dir, c4.as_bytes(), "commit");
+
+        // Filter by "src/" - should return commits 2 and 4 (not 3 which only changed README)
+        let log = LogIterator::with_options(
+            objects_dir,
+            c4_oid,
+            LogOptions::new().path("src/"),
+        ).unwrap();
+        let commits: Vec<_> = log.filter_map(Result::ok).collect();
+
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].summary(), "Add src/main.rs");
+        assert_eq!(commits[1].summary(), "Add src/lib.rs");
+    }
+
+    // LO-013: path filter with directory (without trailing slash)
+    #[test]
+    fn test_log_options_path_filter_directory_no_slash() {
+        let temp = TempDir::new().unwrap();
+        let objects_dir = temp.path().join("objects");
+        fs::create_dir_all(&objects_dir).unwrap();
+
+        let tree1 = create_nested_tree(&objects_dir, &[("README.md", b"v1")]);
+        let tree2 = create_nested_tree(&objects_dir, &[("README.md", b"v1"), ("src/lib.rs", b"v1")]);
+        let tree3 = create_nested_tree(&objects_dir, &[("README.md", b"v2"), ("src/lib.rs", b"v1")]);
+        let tree4 = create_nested_tree(&objects_dir, &[("README.md", b"v2"), ("src/lib.rs", b"v2")]);
+
+        let c1 = make_commit_content_with_time(&tree1.to_hex(), None, "Add README", 1000);
+        let c1_oid = create_loose_object(&objects_dir, c1.as_bytes(), "commit");
+
+        let c2 = make_commit_content_with_time(&tree2.to_hex(), Some(&c1_oid.to_hex()), "Add src/lib.rs", 2000);
+        let c2_oid = create_loose_object(&objects_dir, c2.as_bytes(), "commit");
+
+        let c3 = make_commit_content_with_time(&tree3.to_hex(), Some(&c2_oid.to_hex()), "Update README only", 3000);
+        let c3_oid = create_loose_object(&objects_dir, c3.as_bytes(), "commit");
+
+        let c4 = make_commit_content_with_time(&tree4.to_hex(), Some(&c3_oid.to_hex()), "Update src/lib.rs", 4000);
+        let c4_oid = create_loose_object(&objects_dir, c4.as_bytes(), "commit");
+
+        // Filter by "src" (without slash) - should also match files under src/
+        let log = LogIterator::with_options(
+            objects_dir,
+            c4_oid,
+            LogOptions::new().path("src"),
+        ).unwrap();
+        let commits: Vec<_> = log.filter_map(Result::ok).collect();
+
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].summary(), "Update src/lib.rs");
+        assert_eq!(commits[1].summary(), "Add src/lib.rs");
     }
 }

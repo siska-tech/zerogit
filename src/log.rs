@@ -341,7 +341,7 @@ impl LogIterator {
 
         // Read the initial commit to get its timestamp
         let raw = store.read(&start_oid)?;
-        let commit = Commit::parse(raw)?;
+        let commit = Commit::parse(start_oid, raw)?;
 
         pending.push(PendingCommit {
             oid: start_oid,
@@ -368,7 +368,7 @@ impl LogIterator {
             });
         }
 
-        Commit::parse(raw)
+        Commit::parse(*oid, raw)
     }
 
     /// Reads a tree by its OID.

@@ -124,6 +124,8 @@ fn parse_timezone(s: &str) -> Result<i32> {
 /// the tree, parent commits, author, committer, and message.
 #[derive(Debug, Clone)]
 pub struct Commit {
+    /// The OID (SHA-1 hash) of this commit.
+    oid: Oid,
     /// The tree object this commit points to.
     tree: Oid,
     /// Parent commit(s). Empty for root commits.
@@ -137,7 +139,7 @@ pub struct Commit {
 }
 
 impl Commit {
-    /// Parses a Commit from a RawObject.
+    /// Parses a Commit from a RawObject with its OID.
     ///
     /// Commit format:
     /// ```text
@@ -148,7 +150,12 @@ impl Commit {
     ///
     /// <message>
     /// ```
-    pub fn parse(raw: RawObject) -> Result<Self> {
+    ///
+    /// # Arguments
+    ///
+    /// * `oid` - The OID (SHA-1 hash) of this commit.
+    /// * `raw` - The raw object data.
+    pub fn parse(oid: Oid, raw: RawObject) -> Result<Self> {
         if raw.object_type != ObjectType::Commit {
             return Err(Error::TypeMismatch {
                 expected: "commit",
@@ -208,12 +215,18 @@ impl Commit {
         })?;
 
         Ok(Commit {
+            oid,
             tree,
             parents,
             author,
             committer,
             message,
         })
+    }
+
+    /// Returns the OID (SHA-1 hash) of this commit.
+    pub fn oid(&self) -> &Oid {
+        &self.oid
     }
 
     /// Returns the tree object ID.
@@ -282,6 +295,11 @@ mod tests {
 
     const TREE_SHA: &str = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
     const PARENT_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+    const COMMIT_SHA: &str = "abcdef0123456789abcdef0123456789abcdef01";
+
+    fn dummy_oid() -> Oid {
+        Oid::from_hex(COMMIT_SHA).unwrap()
+    }
 
     fn simple_commit() -> String {
         format!(
@@ -312,15 +330,23 @@ mod tests {
     #[test]
     fn test_parse_commit() {
         let raw = make_commit(&simple_commit());
-        let commit = Commit::parse(raw).unwrap();
+        let commit = Commit::parse(dummy_oid(), raw).unwrap();
         assert_eq!(commit.tree().to_hex(), TREE_SHA);
+    }
+
+    // CM-OID: oid() returns the commit's OID
+    #[test]
+    fn test_oid() {
+        let raw = make_commit(&simple_commit());
+        let commit = Commit::parse(dummy_oid(), raw).unwrap();
+        assert_eq!(commit.oid().to_hex(), COMMIT_SHA);
     }
 
     // CM-002: Parse returns TypeMismatch for non-commit
     #[test]
     fn test_parse_type_mismatch() {
         let raw = make_blob();
-        let result = Commit::parse(raw);
+        let result = Commit::parse(dummy_oid(), raw);
         assert!(matches!(
             result,
             Err(Error::TypeMismatch {
@@ -334,7 +360,7 @@ mod tests {
     #[test]
     fn test_parse_with_parent() {
         let raw = make_commit(&commit_with_parent());
-        let commit = Commit::parse(raw).unwrap();
+        let commit = Commit::parse(dummy_oid(), raw).unwrap();
 
         assert_eq!(commit.parents().len(), 1);
         assert_eq!(commit.parent().unwrap().to_hex(), PARENT_SHA);
@@ -346,7 +372,7 @@ mod tests {
     #[test]
     fn test_parse_root_commit() {
         let raw = make_commit(&simple_commit());
-        let commit = Commit::parse(raw).unwrap();
+        let commit = Commit::parse(dummy_oid(), raw).unwrap();
 
         assert!(commit.parents().is_empty());
         assert!(commit.parent().is_none());
@@ -368,7 +394,7 @@ mod tests {
             TREE_SHA, PARENT_SHA, parent2
         );
         let raw = make_commit(&content);
-        let commit = Commit::parse(raw).unwrap();
+        let commit = Commit::parse(dummy_oid(), raw).unwrap();
 
         assert_eq!(commit.parents().len(), 2);
         assert!(commit.is_merge());
@@ -378,7 +404,7 @@ mod tests {
     #[test]
     fn test_parse_signatures() {
         let raw = make_commit(&simple_commit());
-        let commit = Commit::parse(raw).unwrap();
+        let commit = Commit::parse(dummy_oid(), raw).unwrap();
 
         let author = commit.author();
         assert_eq!(author.name(), "John Doe");
@@ -412,7 +438,7 @@ mod tests {
     #[test]
     fn test_message() {
         let raw = make_commit(&simple_commit());
-        let commit = Commit::parse(raw).unwrap();
+        let commit = Commit::parse(dummy_oid(), raw).unwrap();
 
         let msg = commit.message();
         assert!(msg.contains("Initial commit"));
@@ -423,7 +449,7 @@ mod tests {
     #[test]
     fn test_summary() {
         let raw = make_commit(&simple_commit());
-        let commit = Commit::parse(raw).unwrap();
+        let commit = Commit::parse(dummy_oid(), raw).unwrap();
 
         assert_eq!(commit.summary(), "Initial commit");
     }
@@ -439,7 +465,7 @@ mod tests {
             TREE_SHA
         );
         let raw = make_commit(&content);
-        let commit = Commit::parse(raw).unwrap();
+        let commit = Commit::parse(dummy_oid(), raw).unwrap();
 
         assert_eq!(commit.message(), "");
         assert_eq!(commit.summary(), "");
@@ -457,7 +483,7 @@ mod tests {
             TREE_SHA
         );
         let raw = make_commit(&content);
-        let commit = Commit::parse(raw).unwrap();
+        let commit = Commit::parse(dummy_oid(), raw).unwrap();
 
         assert_eq!(commit.message(), "Single line");
         assert_eq!(commit.summary(), "Single line");
@@ -471,7 +497,7 @@ mod tests {
              \n\
              Message";
         let raw = make_commit(content);
-        let result = Commit::parse(raw);
+        let result = Commit::parse(dummy_oid(), raw);
         assert!(matches!(result, Err(Error::InvalidObject { .. })));
     }
 

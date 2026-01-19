@@ -136,6 +136,10 @@ mod tests {
         }
     }
 
+    fn dummy_oid() -> Oid {
+        Oid::from_hex("0123456789abcdef0123456789abcdef01234567").unwrap()
+    }
+
     // O-001: Object::Blob can be created from Blob
     #[test]
     fn test_object_from_blob() {
@@ -155,7 +159,7 @@ mod tests {
     // O-003: Object::Commit can be created from Commit
     #[test]
     fn test_object_from_commit() {
-        let commit = Commit::parse(make_commit_raw()).unwrap();
+        let commit = Commit::parse(dummy_oid(), make_commit_raw()).unwrap();
         let obj = Object::from(commit);
         assert!(matches!(obj, Object::Commit(_)));
     }
@@ -169,7 +173,7 @@ mod tests {
         let tree = Object::from(Tree::parse(make_tree_raw()).unwrap());
         assert_eq!(tree.kind(), ObjectType::Tree);
 
-        let commit = Object::from(Commit::parse(make_commit_raw()).unwrap());
+        let commit = Object::from(Commit::parse(dummy_oid(), make_commit_raw()).unwrap());
         assert_eq!(commit.kind(), ObjectType::Commit);
     }
 
@@ -194,7 +198,7 @@ mod tests {
     // O-007: as_commit() returns Some for Commit, None for others
     #[test]
     fn test_as_commit() {
-        let commit_obj = Object::from(Commit::parse(make_commit_raw()).unwrap());
+        let commit_obj = Object::from(Commit::parse(dummy_oid(), make_commit_raw()).unwrap());
         assert!(commit_obj.as_commit().is_some());
         assert!(commit_obj.as_blob().is_none());
         assert!(commit_obj.as_tree().is_none());
@@ -227,7 +231,7 @@ mod tests {
     // O-010: into_commit() returns Some for Commit, None for others
     #[test]
     fn test_into_commit() {
-        let commit_obj = Object::from(Commit::parse(make_commit_raw()).unwrap());
+        let commit_obj = Object::from(Commit::parse(dummy_oid(), make_commit_raw()).unwrap());
         let commit = commit_obj.into_commit();
         assert!(commit.is_some());
         assert_eq!(commit.unwrap().summary(), "Test commit");

@@ -282,7 +282,7 @@ impl Repository {
             });
         }
 
-        Commit::parse(raw)
+        Commit::parse(oid, raw)
     }
 
     /// Retrieves a tree by its OID.
@@ -404,7 +404,7 @@ impl Repository {
         match raw.object_type {
             ObjectType::Blob => Ok(Object::Blob(Blob::parse(raw)?)),
             ObjectType::Tree => Ok(Object::Tree(Tree::parse(raw)?)),
-            ObjectType::Commit => Ok(Object::Commit(Commit::parse(raw)?)),
+            ObjectType::Commit => Ok(Object::Commit(Commit::parse(oid, raw)?)),
             ObjectType::Tag => Err(Error::InvalidObject {
                 oid: oid.to_hex(),
                 reason: "tag objects are not yet supported".to_string(),

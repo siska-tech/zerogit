@@ -48,6 +48,7 @@
 //! - [`index`] - Index (staging area) operations
 //! - [`status`] - Working tree status
 
+pub mod config;
 pub mod diff;
 pub mod error;
 pub mod index;
@@ -61,6 +62,7 @@ pub mod status;
 pub(crate) mod infra;
 
 // Re-export primary types for convenient access
+pub use config::{Config, ConfigLevel};
 pub use error::{Error, Result};
 pub use repository::Repository;
 

@@ -305,6 +305,43 @@ impl Repository {
         &self.git_dir
     }
 
+    /// Returns the repository configuration.
+    ///
+    /// This loads configuration from all levels (system, global, local) with
+    /// proper precedence (local overrides global, global overrides system).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::repository::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// let config = repo.config().unwrap();
+    ///
+    /// if let Some(name) = config.get("user", "name") {
+    ///     println!("User: {}", name);
+    /// }
+    /// ```
+    pub fn config(&self) -> Result<crate::config::Config> {
+        crate::config::load_config(&self.git_dir)
+    }
+
+    /// Returns only the repository-local configuration.
+    ///
+    /// This loads only the `.git/config` file, ignoring global and system configs.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::repository::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// let config = repo.config_local().unwrap();
+    /// ```
+    pub fn config_local(&self) -> Result<crate::config::Config> {
+        crate::config::Config::from_file(self.git_dir.join("config"))
+    }
+
     /// Returns a reference to the loose object store.
     fn object_store(&self) -> LooseObjectStore {
         LooseObjectStore::new(self.git_dir.join("objects"))

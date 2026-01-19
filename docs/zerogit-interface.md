@@ -9,7 +9,8 @@ pub mod zerogit {
     // コアAPI
     pub struct Repository;
     pub struct Oid;
-    
+    pub struct Config;
+
     // オブジェクト
     pub enum Object;
     pub struct Blob;
@@ -17,23 +18,34 @@ pub mod zerogit {
     pub struct TreeEntry;
     pub struct Commit;
     pub struct Signature;
-    
+
     // 参照
     pub enum Head;
     pub struct Branch;
-    
+    pub struct RemoteBranch;
+    pub struct Tag;
+
     // ステータス
     pub struct StatusEntry;
     pub enum FileStatus;
-    
+
     // インデックス
     pub struct Index;
     pub struct IndexEntry;
-    
+
+    // 差分
+    pub struct TreeDiff;
+    pub struct DiffDelta;
+    pub enum DiffStatus;
+    pub struct DiffStats;
+
+    // ログ
+    pub struct LogOptions;
+
     // エラー
     pub enum Error;
     pub type Result<T> = std::result::Result<T, Error>;
-    
+
     // 定数
     pub enum FileMode;
 }
@@ -41,24 +53,32 @@ pub mod zerogit {
 
 ### 1.2 公開要素サマリー
 
-| カテゴリ     | 名前          | 種別   | Phase |
-| ------------ | ------------- | ------ | ----- |
-| コア         | `Repository`  | struct | 1     |
-| コア         | `Oid`         | struct | 1     |
-| オブジェクト | `Object`      | enum   | 1     |
-| オブジェクト | `Blob`        | struct | 1     |
-| オブジェクト | `Tree`        | struct | 1     |
-| オブジェクト | `TreeEntry`   | struct | 1     |
-| オブジェクト | `Commit`      | struct | 1     |
-| オブジェクト | `Signature`   | struct | 1     |
-| 参照         | `Head`        | enum   | 1     |
-| 参照         | `Branch`      | struct | 1     |
-| ステータス   | `StatusEntry` | struct | 1     |
-| ステータス   | `FileStatus`  | enum   | 1     |
-| インデックス | `Index`       | struct | 1     |
-| インデックス | `IndexEntry`  | struct | 1     |
-| エラー       | `Error`       | enum   | 1     |
-| 定数         | `FileMode`    | enum   | 1     |
+| カテゴリ     | 名前           | 種別   | Phase |
+| ------------ | -------------- | ------ | ----- |
+| コア         | `Repository`   | struct | 1     |
+| コア         | `Oid`          | struct | 1     |
+| コア         | `Config`       | struct | 2.5   |
+| オブジェクト | `Object`       | enum   | 1     |
+| オブジェクト | `Blob`         | struct | 1     |
+| オブジェクト | `Tree`         | struct | 1     |
+| オブジェクト | `TreeEntry`    | struct | 1     |
+| オブジェクト | `Commit`       | struct | 1     |
+| オブジェクト | `Signature`    | struct | 1     |
+| 参照         | `Head`         | enum   | 1     |
+| 参照         | `Branch`       | struct | 1     |
+| 参照         | `RemoteBranch` | struct | 2.5   |
+| 参照         | `Tag`          | struct | 2.5   |
+| ステータス   | `StatusEntry`  | struct | 1     |
+| ステータス   | `FileStatus`   | enum   | 1     |
+| インデックス | `Index`        | struct | 1     |
+| インデックス | `IndexEntry`   | struct | 1     |
+| 差分         | `TreeDiff`     | struct | 2.5   |
+| 差分         | `DiffDelta`    | struct | 2.5   |
+| 差分         | `DiffStatus`   | enum   | 2.5   |
+| 差分         | `DiffStats`    | struct | 2.5   |
+| ログ         | `LogOptions`   | struct | 2.5   |
+| エラー       | `Error`        | enum   | 1     |
+| 定数         | `FileMode`     | enum   | 1     |
 
 ---
 
@@ -101,6 +121,19 @@ pub fn discover<P: AsRef<Path>>(path: P) -> Result<Repository>
 | 戻り値 | `Ok(Repository)` - 成功時                                |
 | エラー | `Error::NotARepository` - ルートまで遡っても見つからない |
 | エラー | `Error::Io` - ファイルアクセスエラー                     |
+
+##### `Repository::init`（Phase 2.5）
+
+```rust
+pub fn init<P: AsRef<Path>>(path: P) -> Result<Repository>
+```
+
+| 項目   | 説明                                      |
+| ------ | ----------------------------------------- |
+| 概要   | 指定パスに新しいGitリポジトリを初期化     |
+| 引数   | `path` - リポジトリを作成するパス         |
+| 戻り値 | `Ok(Repository)` - 作成されたリポジトリ   |
+| エラー | `Error::Io` - ディレクトリ作成エラー      |
 
 #### メソッド（読み取り - Phase 1）
 
@@ -171,6 +204,19 @@ pub fn log_from(&self, id: &str) -> Result<LogIterator<'_>>
 | 戻り値 | `Ok(LogIterator)` - コミットを遅延取得するイテレータ |
 | エラー | `Error::InvalidOid` - 不正なハッシュ形式             |
 | エラー | `Error::ObjectNotFound` - 開始コミットが存在しない   |
+
+##### `Repository::log_with_options`（Phase 2.5）
+
+```rust
+pub fn log_with_options(&self, options: LogOptions) -> Result<LogIterator<'_>>
+```
+
+| 項目   | 説明                                                 |
+| ------ | ---------------------------------------------------- |
+| 概要   | フィルタリングオプション付きでコミット履歴を取得     |
+| 引数   | `options` - フィルタリングオプション                 |
+| 戻り値 | `Ok(LogIterator)` - コミットを遅延取得するイテレータ |
+| エラー | `Error::RefNotFound` - HEADが存在しない              |
 
 ##### `Repository::status`
 
@@ -370,6 +416,113 @@ pub fn checkout(&self, name: &str) -> Result<()>
 | 戻り値 | `Ok(())` - 成功時                                  |
 | エラー | `Error::RefNotFound` - ブランチが存在しない        |
 | エラー | `Error::DirtyWorkingTree` - 未コミットの変更がある |
+
+#### メソッド（Phase 2.5 追加）
+
+##### `Repository::remote_branches`
+
+```rust
+pub fn remote_branches(&self) -> Result<Vec<RemoteBranch>>
+```
+
+| 項目   | 説明                                      |
+| ------ | ----------------------------------------- |
+| 概要   | リモートブランチ一覧を取得                |
+| 引数   | なし                                      |
+| 戻り値 | `Ok(Vec<RemoteBranch>)` - リモートブランチのリスト |
+| エラー | `Error::Io` - refs/remotes読み取りエラー  |
+
+##### `Repository::tags`
+
+```rust
+pub fn tags(&self) -> Result<Vec<Tag>>
+```
+
+| 項目   | 説明                                |
+| ------ | ----------------------------------- |
+| 概要   | タグ一覧を取得                      |
+| 引数   | なし                                |
+| 戻り値 | `Ok(Vec<Tag>)` - タグのリスト       |
+| エラー | `Error::Io` - refs/tags読み取りエラー |
+
+##### `Repository::diff_trees`
+
+```rust
+pub fn diff_trees(&self, old_tree: Option<&Tree>, new_tree: &Tree) -> Result<TreeDiff>
+```
+
+| 項目   | 説明                                           |
+| ------ | ---------------------------------------------- |
+| 概要   | 2つのTree間の差分を計算                        |
+| 引数   | `old_tree` - 比較元Tree（Noneで空Tree扱い）    |
+| 引数   | `new_tree` - 比較先Tree                        |
+| 戻り値 | `Ok(TreeDiff)` - 差分情報                      |
+| エラー | `Error::Io` - ファイルアクセスエラー           |
+
+##### `Repository::commit_diff`
+
+```rust
+pub fn commit_diff(&self, commit: &Commit) -> Result<TreeDiff>
+```
+
+| 項目   | 説明                                           |
+| ------ | ---------------------------------------------- |
+| 概要   | コミットの変更ファイル一覧を取得               |
+| 引数   | `commit` - 対象コミット                        |
+| 戻り値 | `Ok(TreeDiff)` - 親コミットとの差分            |
+| エラー | `Error::ObjectNotFound` - Treeが見つからない   |
+
+##### `Repository::diff_index_to_workdir`
+
+```rust
+pub fn diff_index_to_workdir(&self) -> Result<TreeDiff>
+```
+
+| 項目   | 説明                                           |
+| ------ | ---------------------------------------------- |
+| 概要   | IndexとワーキングツリーのDiff（git diff相当）  |
+| 引数   | なし                                           |
+| 戻り値 | `Ok(TreeDiff)` - 未ステージの変更              |
+| エラー | `Error::Io` - ファイルアクセスエラー           |
+
+##### `Repository::diff_head_to_index`
+
+```rust
+pub fn diff_head_to_index(&self) -> Result<TreeDiff>
+```
+
+| 項目   | 説明                                              |
+| ------ | ------------------------------------------------- |
+| 概要   | HEADとIndexのDiff（git diff --staged相当）        |
+| 引数   | なし                                              |
+| 戻り値 | `Ok(TreeDiff)` - ステージ済みの変更               |
+| エラー | `Error::RefNotFound` - HEADが存在しない           |
+
+##### `Repository::diff_head_to_workdir`
+
+```rust
+pub fn diff_head_to_workdir(&self) -> Result<TreeDiff>
+```
+
+| 項目   | 説明                                              |
+| ------ | ------------------------------------------------- |
+| 概要   | HEADとワーキングツリーのDiff（git diff HEAD相当） |
+| 引数   | なし                                              |
+| 戻り値 | `Ok(TreeDiff)` - 全変更                           |
+| エラー | `Error::RefNotFound` - HEADが存在しない           |
+
+##### `Repository::config`
+
+```rust
+pub fn config(&self) -> Result<Config>
+```
+
+| 項目   | 説明                                  |
+| ------ | ------------------------------------- |
+| 概要   | リポジトリの設定を取得                |
+| 引数   | なし                                  |
+| 戻り値 | `Ok(Config)` - 設定情報               |
+| エラー | `Error::Io` - configファイル読み取りエラー |
 
 ---
 
@@ -923,7 +1076,126 @@ pub fn is_head(&self) -> bool
 
 ---
 
-### 2.11 StatusEntry
+### 2.11 RemoteBranch（Phase 2.5）
+
+リモートブランチ情報を表す構造体。
+
+```rust
+#[derive(Debug, Clone)]
+pub struct RemoteBranch {
+    remote: String,
+    name: String,
+    oid: Oid,
+}
+```
+
+#### メソッド
+
+##### `RemoteBranch::remote`
+
+```rust
+pub fn remote(&self) -> &str
+```
+
+| 項目 | 説明                            |
+| ---- | ------------------------------- |
+| 概要 | リモート名を取得（例: "origin"） |
+
+##### `RemoteBranch::name`
+
+```rust
+pub fn name(&self) -> &str
+```
+
+| 項目 | 説明                          |
+| ---- | ----------------------------- |
+| 概要 | ブランチ名を取得（例: "main"） |
+
+##### `RemoteBranch::full_name`
+
+```rust
+pub fn full_name(&self) -> String
+```
+
+| 項目 | 説明                                   |
+| ---- | -------------------------------------- |
+| 概要 | 完全名を取得（例: "origin/main"）      |
+
+##### `RemoteBranch::oid`
+
+```rust
+pub fn oid(&self) -> &Oid
+```
+
+---
+
+### 2.12 Tag（Phase 2.5）
+
+タグ情報を表す構造体。軽量タグと注釈付きタグの両方をサポート。
+
+```rust
+#[derive(Debug, Clone)]
+pub struct Tag {
+    name: String,
+    target: Oid,
+    message: Option<String>,
+    tagger: Option<Signature>,
+}
+```
+
+#### メソッド
+
+##### `Tag::name`
+
+```rust
+pub fn name(&self) -> &str
+```
+
+##### `Tag::target`
+
+```rust
+pub fn target(&self) -> &Oid
+```
+
+| 項目 | 説明                     |
+| ---- | ------------------------ |
+| 概要 | タグが指すオブジェクトID |
+
+##### `Tag::message`
+
+```rust
+pub fn message(&self) -> Option<&str>
+```
+
+| 項目   | 説明                                       |
+| ------ | ------------------------------------------ |
+| 概要   | 注釈付きタグのメッセージを取得             |
+| 戻り値 | `Some(&str)` - 注釈付きタグ、`None` - 軽量タグ |
+
+##### `Tag::tagger`
+
+```rust
+pub fn tagger(&self) -> Option<&Signature>
+```
+
+| 項目   | 説明                                     |
+| ------ | ---------------------------------------- |
+| 概要   | 注釈付きタグの作成者を取得               |
+| 戻り値 | `Some(&Signature)` - 注釈付きタグの場合   |
+
+##### `Tag::is_annotated`
+
+```rust
+pub fn is_annotated(&self) -> bool
+```
+
+| 項目 | 説明                       |
+| ---- | -------------------------- |
+| 概要 | 注釈付きタグかどうかを判定 |
+
+---
+
+### 2.13 StatusEntry
 
 ステータスのエントリを表す構造体。
 
@@ -1127,7 +1399,318 @@ impl<'a> Iterator for LogIterator<'a> {
 
 ---
 
-### 2.17 Error
+### 2.17 LogOptions（Phase 2.5）
+
+ログ取得オプションのビルダー。
+
+```rust
+#[derive(Debug, Clone, Default)]
+pub struct LogOptions {
+    paths: Vec<PathBuf>,
+    max_count: Option<usize>,
+    since: Option<i64>,
+    until: Option<i64>,
+    first_parent: bool,
+    author: Option<String>,
+    from: Option<Oid>,
+}
+```
+
+#### コンストラクタ
+
+##### `LogOptions::new`
+
+```rust
+pub fn new() -> Self
+```
+
+#### ビルダーメソッド
+
+##### `LogOptions::path`
+
+```rust
+pub fn path<P: AsRef<Path>>(self, path: P) -> Self
+```
+
+| 項目 | 説明                               |
+| ---- | ---------------------------------- |
+| 概要 | 特定パスの変更を含むコミットのみ   |
+
+##### `LogOptions::paths`
+
+```rust
+pub fn paths<I, P>(self, paths: I) -> Self
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+```
+
+| 項目 | 説明                     |
+| ---- | ------------------------ |
+| 概要 | 複数パスを一度に指定     |
+
+##### `LogOptions::max_count`
+
+```rust
+pub fn max_count(self, n: usize) -> Self
+```
+
+| 項目 | 説明                 |
+| ---- | -------------------- |
+| 概要 | 最大取得件数を指定   |
+
+##### `LogOptions::since`
+
+```rust
+pub fn since(self, date: &str) -> Self
+```
+
+| 項目 | 説明                               |
+| ---- | ---------------------------------- |
+| 概要 | この日時以降のコミットのみ         |
+| 引数 | `date` - "YYYY-MM-DD"形式の日付    |
+
+##### `LogOptions::until`
+
+```rust
+pub fn until(self, date: &str) -> Self
+```
+
+| 項目 | 説明                           |
+| ---- | ------------------------------ |
+| 概要 | この日時以前のコミットのみ     |
+
+##### `LogOptions::first_parent`
+
+```rust
+pub fn first_parent(self, enabled: bool) -> Self
+```
+
+| 項目 | 説明                                 |
+| ---- | ------------------------------------ |
+| 概要 | マージコミットの最初の親のみを辿る   |
+
+##### `LogOptions::author`
+
+```rust
+pub fn author(self, name: &str) -> Self
+```
+
+| 項目 | 説明                         |
+| ---- | ---------------------------- |
+| 概要 | 作者名でフィルタ（部分一致） |
+
+##### `LogOptions::from`
+
+```rust
+pub fn from(self, oid: Oid) -> Self
+```
+
+| 項目 | 説明                               |
+| ---- | ---------------------------------- |
+| 概要 | 開始コミットを指定（デフォルトHEAD） |
+
+---
+
+### 2.18 TreeDiff（Phase 2.5）
+
+Tree間の差分を表す構造体。
+
+```rust
+#[derive(Debug, Clone)]
+pub struct TreeDiff {
+    deltas: Vec<DiffDelta>,
+}
+```
+
+#### メソッド
+
+##### `TreeDiff::deltas`
+
+```rust
+pub fn deltas(&self) -> &[DiffDelta]
+```
+
+| 項目 | 説明             |
+| ---- | ---------------- |
+| 概要 | 差分エントリ一覧 |
+
+##### `TreeDiff::stats`
+
+```rust
+pub fn stats(&self) -> DiffStats
+```
+
+| 項目 | 説明                       |
+| ---- | -------------------------- |
+| 概要 | 差分の統計情報を取得       |
+
+##### `TreeDiff::is_empty`
+
+```rust
+pub fn is_empty(&self) -> bool
+```
+
+| 項目 | 説明                   |
+| ---- | ---------------------- |
+| 概要 | 差分がないかどうか     |
+
+#### トレイト実装
+
+```rust
+impl IntoIterator for TreeDiff { /* ... */ }
+impl<'a> IntoIterator for &'a TreeDiff { /* ... */ }
+```
+
+---
+
+### 2.19 DiffDelta（Phase 2.5）
+
+差分の各エントリを表す構造体。
+
+```rust
+#[derive(Debug, Clone)]
+pub struct DiffDelta {
+    status: DiffStatus,
+    path: PathBuf,
+    old_path: Option<PathBuf>,
+    old_oid: Option<Oid>,
+    new_oid: Option<Oid>,
+    old_mode: Option<FileMode>,
+    new_mode: Option<FileMode>,
+}
+```
+
+#### メソッド
+
+##### `DiffDelta::status`
+
+```rust
+pub fn status(&self) -> DiffStatus
+```
+
+##### `DiffDelta::path`
+
+```rust
+pub fn path(&self) -> &Path
+```
+
+| 項目 | 説明                                       |
+| ---- | ------------------------------------------ |
+| 概要 | ファイルパス（新しい方、またはリネーム後） |
+
+##### `DiffDelta::old_path`
+
+```rust
+pub fn old_path(&self) -> Option<&Path>
+```
+
+| 項目 | 説明                         |
+| ---- | ---------------------------- |
+| 概要 | リネーム/コピー元のパス      |
+
+##### `DiffDelta::old_oid`
+
+```rust
+pub fn old_oid(&self) -> Option<&Oid>
+```
+
+##### `DiffDelta::new_oid`
+
+```rust
+pub fn new_oid(&self) -> Option<&Oid>
+```
+
+##### `DiffDelta::status_char`
+
+```rust
+pub fn status_char(&self) -> char
+```
+
+| 項目   | 説明                                     |
+| ------ | ---------------------------------------- |
+| 概要   | git status形式の1文字ステータス          |
+| 戻り値 | `'A'`, `'D'`, `'M'`, `'R'`, `'C'` のいずれか |
+
+---
+
+### 2.20 DiffStatus（Phase 2.5）
+
+差分のステータスを表す列挙型。
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffStatus {
+    /// 新規追加
+    Added,
+    /// 削除
+    Deleted,
+    /// 変更
+    Modified,
+    /// リネーム
+    Renamed,
+    /// コピー
+    Copied,
+}
+```
+
+---
+
+### 2.21 DiffStats（Phase 2.5）
+
+差分の統計情報を表す構造体。
+
+```rust
+#[derive(Debug, Clone, Default)]
+pub struct DiffStats {
+    pub added: usize,
+    pub deleted: usize,
+    pub modified: usize,
+    pub renamed: usize,
+    pub copied: usize,
+}
+```
+
+---
+
+### 2.22 Config（Phase 2.5）
+
+Git設定を表す構造体。
+
+```rust
+#[derive(Debug, Clone)]
+pub struct Config {
+    entries: HashMap<String, String>,
+}
+```
+
+#### メソッド
+
+##### `Config::get`
+
+```rust
+pub fn get(&self, key: &str) -> Option<&str>
+```
+
+| 項目   | 説明                                       |
+| ------ | ------------------------------------------ |
+| 概要   | 設定値を取得                               |
+| 引数   | `key` - "section.key"形式（例: "user.name"） |
+| 戻り値 | `Some(&str)` - 値が存在する場合            |
+
+##### `Config::get_or`
+
+```rust
+pub fn get_or(&self, key: &str, default: &str) -> &str
+```
+
+| 項目   | 説明                                 |
+| ------ | ------------------------------------ |
+| 概要   | 設定値を取得、なければデフォルト値   |
+
+---
+
+### 2.23 Error
 
 エラー型。
 
@@ -1372,7 +1955,7 @@ fn main() {
 
 fn run() -> Result<()> {
     let repo = Repository::discover(".")?;
-    
+
     match repo.commit("nonexistent") {
         Ok(commit) => println!("{}", commit.summary()),
         Err(Error::ObjectNotFound(oid)) => {
@@ -1383,7 +1966,146 @@ fn run() -> Result<()> {
         }
         Err(e) => return Err(e),
     }
-    
+
+    Ok(())
+}
+```
+
+### 3.9 リポジトリの初期化（Phase 2.5）
+
+```rust
+use zerogit::{Repository, Result};
+
+fn main() -> Result<()> {
+    // 新しいGitリポジトリを初期化
+    let repo = Repository::init("./my-project")?;
+
+    println!("Initialized empty Git repository in {}", repo.git_dir().display());
+    Ok(())
+}
+```
+
+### 3.10 リモートブランチとタグ一覧（Phase 2.5）
+
+```rust
+use zerogit::{Repository, Result};
+
+fn main() -> Result<()> {
+    let repo = Repository::discover(".")?;
+
+    // リモートブランチ一覧
+    println!("Remote branches:");
+    for rb in repo.remote_branches()? {
+        println!("  {}/{}", rb.remote(), rb.name());
+    }
+
+    // タグ一覧
+    println!("\nTags:");
+    for tag in repo.tags()? {
+        println!("  {} -> {}", tag.name(), tag.target().short());
+        if let Some(message) = tag.message() {
+            println!("    {}", message);
+        }
+    }
+
+    Ok(())
+}
+```
+
+### 3.11 ログフィルタリング（Phase 2.5）
+
+```rust
+use zerogit::{Repository, LogOptions, Result};
+
+fn main() -> Result<()> {
+    let repo = Repository::discover(".")?;
+
+    // 特定ファイルの変更履歴を最大10件取得
+    let log = repo.log_with_options(
+        LogOptions::new()
+            .path("src/main.rs")
+            .max_count(10)
+    )?;
+
+    for commit in log {
+        let commit = commit?;
+        println!("{} {}", commit.oid().short(), commit.summary());
+    }
+
+    Ok(())
+}
+```
+
+### 3.12 Tree Diff（Phase 2.5）
+
+```rust
+use zerogit::{Repository, Result};
+
+fn main() -> Result<()> {
+    let repo = Repository::discover(".")?;
+
+    // 直近のコミットの変更ファイル一覧
+    let head = repo.head()?;
+    let commit = repo.commit(&head.oid().to_hex())?;
+    let diff = repo.commit_diff(&commit)?;
+
+    println!("Changes in {}:", commit.oid().short());
+    for delta in diff.deltas() {
+        println!("  {} {}", delta.status_char(), delta.path().display());
+    }
+
+    let stats = diff.stats();
+    println!("\n{} added, {} deleted, {} modified",
+        stats.added, stats.deleted, stats.modified);
+
+    Ok(())
+}
+```
+
+### 3.13 Working Tree Diff（Phase 2.5）
+
+```rust
+use zerogit::{Repository, Result};
+
+fn main() -> Result<()> {
+    let repo = Repository::discover(".")?;
+
+    // 未ステージの変更（git diff 相当）
+    let unstaged = repo.diff_index_to_workdir()?;
+    if !unstaged.is_empty() {
+        println!("Unstaged changes:");
+        for delta in unstaged.deltas() {
+            println!("  {} {}", delta.status_char(), delta.path().display());
+        }
+    }
+
+    // ステージ済みの変更（git diff --staged 相当）
+    let staged = repo.diff_head_to_index()?;
+    if !staged.is_empty() {
+        println!("\nStaged changes:");
+        for delta in staged.deltas() {
+            println!("  {} {}", delta.status_char(), delta.path().display());
+        }
+    }
+
+    Ok(())
+}
+```
+
+### 3.14 Git設定の読み取り（Phase 2.5）
+
+```rust
+use zerogit::{Repository, Result};
+
+fn main() -> Result<()> {
+    let repo = Repository::discover(".")?;
+    let config = repo.config()?;
+
+    let name = config.get("user.name").unwrap_or("Unknown");
+    let email = config.get("user.email").unwrap_or("unknown@example.com");
+
+    println!("Author: {} <{}>", name, email);
+
     Ok(())
 }
 ```

@@ -3,6 +3,17 @@
 このプロジェクトは [Keep a Changelog](https://keepachangelog.com/ja/1.0.0/) に準拠し、
 [Semantic Versioning](https://semver.org/lang/ja/) を採用しています。
 
+## [0.3.7] - 2026-01-20
+
+### Added
+
+#### Git Config読み取り
+- `Repository::config()`: リポジトリの設定を取得
+- `Config::get()`: 設定値をキーで取得（`user.name`, `user.email`など）
+- ローカル設定（`.git/config`）の読み取りに対応
+
+---
+
 ## [0.3.6] - 2026-01-20
 
 ### Fixed
@@ -175,6 +186,7 @@ Phase 1: Repository Layer（読み取り操作）の完全実装。
 - 対応プラットフォーム: Linux, macOS, Windows
 - テストカバレッジ: 94%以上
 
+[0.3.7]: https://github.com/siska-tech/zerogit/releases/tag/v0.3.7
 [0.3.6]: https://github.com/siska-tech/zerogit/releases/tag/v0.3.6
 [0.3.5]: https://github.com/siska-tech/zerogit/releases/tag/v0.3.5
 [0.3.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.3.0

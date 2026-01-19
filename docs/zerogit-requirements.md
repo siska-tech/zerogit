@@ -106,14 +106,69 @@ StatusEntryの状態：
 | `branch_delete(name)` | ブランチ名 | `Result<()>`     |
 | `checkout(branch)`    | ブランチ名 | `Result<()>`     |
 
+### Phase 2.5: 拡張読み取り機能（✅ 完了）
+
+実際の利用で必要となった追加機能。
+
+#### 2.2.5.1 リポジトリ初期化
+
+| 機能           | 入力       | 出力                 |
+| -------------- | ---------- | -------------------- |
+| `init(path)`   | ディレクトリパス | `Result<Repository>` |
+
+#### 2.2.5.2 リモートブランチ・タグ
+
+| 機能               | 入力 | 出力                     |
+| ------------------ | ---- | ------------------------ |
+| `remote_branches()` | -    | `Result<Vec<RemoteBranch>>` |
+| `tags()`           | -    | `Result<Vec<Tag>>`       |
+
+#### 2.2.5.3 ログフィルタリング
+
+| 機能                         | 入力           | 出力                 |
+| ---------------------------- | -------------- | -------------------- |
+| `log_with_options(options)`  | `LogOptions`   | `Result<LogIterator>` |
+
+LogOptionsでサポートするフィルタ:
+- パス指定（複数可）
+- 件数制限
+- 日付範囲（since/until）
+- first-parent
+- 作者フィルタ
+
+#### 2.2.5.4 Tree Diff
+
+| 機能                       | 入力                    | 出力              |
+| -------------------------- | ----------------------- | ----------------- |
+| `diff_trees(old, new)`     | 2つのTree               | `Result<TreeDiff>` |
+| `commit_diff(commit)`      | コミット                | `Result<TreeDiff>` |
+| `diff_index_to_workdir()`  | -                       | `Result<TreeDiff>` |
+| `diff_head_to_index()`     | -                       | `Result<TreeDiff>` |
+| `diff_head_to_workdir()`   | -                       | `Result<TreeDiff>` |
+
+#### 2.2.5.5 Commit OID・branches API
+
+| 機能              | 入力 | 出力               |
+| ----------------- | ---- | ------------------ |
+| `Commit::oid()`   | -    | `&Oid`             |
+| `Oid::short()`    | -    | `String`（7文字）  |
+| `branches()`      | -    | `Result<Vec<Branch>>` |
+
+#### 2.2.5.6 Git Config読み取り
+
+| 機能               | 入力              | 出力             |
+| ------------------ | ----------------- | ---------------- |
+| `config()`         | -                 | `Result<Config>` |
+| `Config::get(key)` | "section.key"形式 | `Option<&str>`   |
+
 ### Phase 3: 差分・マージ（将来）
 
-| 機能                  | 入力                  | 出力         | 優先度 |
-| --------------------- | --------------------- | ------------ | ------ |
-| `diff()`              | 2つのコミット or tree | 差分情報     | 中     |
-| merge（fast-forward） | ブランチ名            | `Result<()>` | 低     |
-| merge（3-way）        | ブランチ名            | `Result<()>` | 低     |
-| packfile読み取り      | -                     | -            | 中     |
+| 機能                  | 入力                  | 出力         | 優先度 | 状態      |
+| --------------------- | --------------------- | ------------ | ------ | --------- |
+| `diff()`              | 2つのコミット or tree | 差分情報     | 中     | ✅ 完了   |
+| merge（fast-forward） | ブランチ名            | `Result<()>` | 低     | 未着手    |
+| merge（3-way）        | ブランチ名            | `Result<()>` | 低     | 未着手    |
+| packfile読み取り      | -                     | -            | 中     | 未着手    |
 
 ### Phase 4: リモート操作（将来・別crate検討）
 
@@ -231,16 +286,26 @@ repo.commit("Add new issue")?;
 
 ## 7. 開発順序（推奨）
 
-1. SHA-1実装
-2. オブジェクト読み取り（blob → tree → commit）
-3. refs解決
-4. log機能
-5. index読み取り
-6. status機能
-7. --- MVP完了 ---
-8. index書き込み
-9. add/commit機能
-10. ブランチ操作
+1. ✅ SHA-1実装
+2. ✅ オブジェクト読み取り（blob → tree → commit）
+3. ✅ refs解決
+4. ✅ log機能
+5. ✅ index読み取り
+6. ✅ status機能
+7. --- MVP完了 (Phase 1) ---
+8. ✅ index書き込み
+9. ✅ add/commit機能
+10. ✅ ブランチ操作
+11. --- Phase 2 完了 ---
+12. ✅ リモートブランチ・タグ一覧
+13. ✅ ログフィルタリング（パス、件数、日付）
+14. ✅ Tree Diff実装
+15. ✅ Working Tree / Index Diff
+16. ✅ Repository::init()
+17. ✅ Commit::oid() / Oid::short()
+18. ✅ Repository::branches()
+19. ✅ Config読み取り
+20. --- Phase 2.5 完了 (v0.3.7) ---
 
 ---
 

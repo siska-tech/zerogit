@@ -3,6 +3,52 @@
 このプロジェクトは [Keep a Changelog](https://keepachangelog.com/ja/1.0.0/) に準拠し、
 [Semantic Versioning](https://semver.org/lang/ja/) を採用しています。
 
+## [0.3.0] - 2026-01-20
+
+### Added
+
+Phase 2.5: 参照拡張・ログフィルタリング・差分機能の完全実装。
+
+#### リモートブランチ・タグ対応
+- `Repository::remote_branches()`: リモートブランチ（refs/remotes/*）の一覧取得
+- `Repository::tags()`: タグ（refs/tags/*）の一覧取得
+- `RemoteBranch` 型: リモート名とブランチ名を分離して取得可能
+- `Tag` 型: 軽量タグ・注釈付きタグ両対応、メッセージ・tagger情報取得可能
+- 注釈付きタグオブジェクト（tag object）のパース対応
+
+#### ログフィルタリング
+- `Repository::log_with_options()`: フィルタリング付きログ取得
+- `LogOptions` ビルダー: 柔軟なオプション指定
+  - `path()` / `paths()`: 特定ファイル・ディレクトリの変更履歴
+  - `max_count()`: 最大取得件数
+  - `since()` / `until()`: 日付範囲フィルタ
+  - `first_parent()`: マージの片側のみを辿る
+  - `author()`: 作者名でフィルタ
+  - `from()`: 開始コミット指定
+
+#### Tree Diff
+- `Repository::diff_trees()`: 2つのTree間の差分計算
+- `TreeDiff` 型: 差分結果のコンテナ
+- `DiffDelta` 型: 各変更エントリ（パス、ステータス、OID）
+- `DiffStatus` enum: Added, Deleted, Modified, Renamed, Copied
+- `DiffStats` 型: 変更ファイル数の統計
+- 完全一致リネーム検出対応
+
+#### コミット変更一覧
+- `Repository::commit_diff()`: コミットの変更ファイル一覧取得
+- 初期コミット（親なし）対応
+- マージコミット対応（最初の親との差分）
+
+#### ワーキングツリー・Index差分
+- `Repository::diff_index_to_workdir()`: git diff 相当
+- `Repository::diff_head_to_index()`: git diff --staged 相当
+- `Repository::diff_head_to_workdir()`: git diff HEAD 相当
+
+### Changed
+- `LogIterator` 内部構造をフィルタリング対応に拡張
+
+---
+
 ## [0.2.0] - 2026-01-18
 
 ### Added
@@ -96,5 +142,6 @@ Phase 1: Repository Layer（読み取り操作）の完全実装。
 - 対応プラットフォーム: Linux, macOS, Windows
 - テストカバレッジ: 94%以上
 
+[0.3.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.3.0
 [0.2.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.2.0
 [0.1.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.1.0

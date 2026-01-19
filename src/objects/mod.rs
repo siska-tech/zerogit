@@ -4,12 +4,14 @@ pub mod blob;
 pub mod commit;
 pub mod oid;
 pub mod store;
+pub mod tag_object;
 pub mod tree;
 
 pub use blob::Blob;
 pub use commit::{Commit, Signature};
 pub use oid::Oid;
 pub use store::{LooseObjectStore, ObjectType, RawObject};
+pub use tag_object::TagObject;
 pub use tree::{FileMode, Tree, TreeEntry};
 
 /// A unified enum representing any Git object type.

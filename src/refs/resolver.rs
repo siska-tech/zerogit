@@ -221,6 +221,77 @@ impl RefStore {
         Ok(tags)
     }
 
+    /// Lists all remote names in the repository.
+    ///
+    /// # Returns
+    ///
+    /// A vector of remote names (e.g., "origin", "upstream").
+    pub fn remotes(&self) -> Result<Vec<String>> {
+        let remotes_dir = self.git_dir.join("refs/remotes");
+
+        if !remotes_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut remotes = Vec::new();
+        let entries = fs::read_dir(&remotes_dir).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Error::PathNotFound(remotes_dir.clone())
+            } else {
+                Error::Io(e)
+            }
+        })?;
+
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                remotes.push(entry.file_name().to_string_lossy().to_string());
+            }
+        }
+
+        remotes.sort();
+        Ok(remotes)
+    }
+
+    /// Lists all remote branches in the repository.
+    ///
+    /// # Returns
+    ///
+    /// A vector of tuples (remote_name, branch_name) without the `refs/remotes/` prefix.
+    /// For example: `[("origin", "main"), ("origin", "develop"), ("upstream", "main")]`
+    pub fn remote_branches(&self) -> Result<Vec<(String, String)>> {
+        let remotes_dir = self.git_dir.join("refs/remotes");
+
+        if !remotes_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut result = Vec::new();
+
+        // Iterate over each remote directory
+        let remotes = self.remotes()?;
+        for remote in remotes {
+            let remote_dir = remotes_dir.join(&remote);
+            if remote_dir.is_dir() {
+                let mut branches = Vec::new();
+                Self::collect_refs_recursive(&remote_dir, "", &mut branches)?;
+
+                for branch in branches {
+                    result.push((remote.clone(), branch));
+                }
+            }
+        }
+
+        // Sort by full name (remote/branch)
+        result.sort_by(|a, b| {
+            let a_full = format!("{}/{}", a.0, a.1);
+            let b_full = format!("{}/{}", b.0, b.1);
+            a_full.cmp(&b_full)
+        });
+
+        Ok(result)
+    }
+
     /// Resolves a reference by name.
     ///
     /// This handles both full ref names (e.g., "refs/heads/main") and

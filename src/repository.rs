@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 use crate::index::{self, Index, IndexEntry};
 use crate::infra::{read_file, write_file_atomic};
-use crate::log::LogIterator;
+use crate::log::{LogIterator, LogOptions};
 use crate::objects::tree::FileMode;
-use crate::objects::{Blob, Commit, LooseObjectStore, Object, ObjectType, Oid, Tree};
-use crate::refs::{Branch, Head, RefStore};
+use crate::objects::{Blob, Commit, LooseObjectStore, Object, ObjectType, Oid, TagObject, Tree};
+use crate::refs::{Branch, Head, RefStore, RemoteBranch, Tag};
 use crate::status::{compute_status, flatten_tree, StatusEntry};
 
 use std::fs;
@@ -518,6 +518,46 @@ impl Repository {
     /// ```
     pub fn log_from(&self, start_oid: Oid) -> Result<LogIterator> {
         LogIterator::new(self.git_dir.join("objects"), start_oid)
+    }
+
+    /// Returns an iterator over the commit history with filtering options.
+    ///
+    /// This allows filtering commits by path, date, author, and more.
+    ///
+    /// # Arguments
+    ///
+    /// * `options` - The filtering options to apply.
+    ///
+    /// # Returns
+    ///
+    /// A `LogIterator` that yields only commits matching the filter criteria.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::repository::Repository;
+    /// use zerogit::log::LogOptions;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    ///
+    /// // Get last 10 commits that modified src/
+    /// let log = repo.log_with_options(
+    ///     LogOptions::new()
+    ///         .path("src/")
+    ///         .max_count(10)
+    /// ).unwrap();
+    ///
+    /// for commit in log {
+    ///     println!("{}", commit.unwrap().summary());
+    /// }
+    /// ```
+    pub fn log_with_options(&self, options: LogOptions) -> Result<LogIterator> {
+        let start_oid = if let Some(oid) = options.get_from() {
+            *oid
+        } else {
+            *self.head()?.oid()
+        };
+        LogIterator::with_options(self.git_dir.join("objects"), start_oid, options)
     }
 
     /// Returns the status of the working tree.
@@ -1520,6 +1560,96 @@ impl Repository {
         self.write_index(&idx)?;
 
         Ok(())
+    }
+
+    /// Lists all remote-tracking branches in the repository.
+    ///
+    /// Returns a vector of `RemoteBranch` objects representing all branches
+    /// in `refs/remotes/`.
+    ///
+    /// # Returns
+    ///
+    /// A vector of remote branches, sorted by full name (remote/branch).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::repository::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    ///
+    /// for rb in repo.remote_branches().unwrap() {
+    ///     println!("{}/{}", rb.remote(), rb.name());
+    /// }
+    /// ```
+    pub fn remote_branches(&self) -> Result<Vec<RemoteBranch>> {
+        let store = self.ref_store();
+        let remote_branch_tuples = store.remote_branches()?;
+
+        let mut result = Vec::new();
+        for (remote, branch) in remote_branch_tuples {
+            let ref_name = format!("refs/remotes/{}/{}", remote, branch);
+            if let Ok(resolved) = store.resolve_recursive(&ref_name) {
+                result.push(RemoteBranch::new(remote, branch, resolved.oid));
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Lists all tags in the repository.
+    ///
+    /// Returns a vector of `Tag` objects representing all tags in `refs/tags/`.
+    /// For annotated tags, the message and tagger information are included.
+    ///
+    /// # Returns
+    ///
+    /// A vector of tags, sorted by name.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::repository::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    ///
+    /// for tag in repo.tags().unwrap() {
+    ///     println!("{} -> {}", tag.name(), tag.target().short());
+    ///     if let Some(message) = tag.message() {
+    ///         println!("  {}", message);
+    ///     }
+    /// }
+    /// ```
+    pub fn tags(&self) -> Result<Vec<Tag>> {
+        let ref_store = self.ref_store();
+        let object_store = self.object_store();
+        let tag_names = ref_store.tags()?;
+
+        let mut result = Vec::new();
+        for name in tag_names {
+            let ref_name = format!("refs/tags/{}", name);
+            if let Ok(resolved) = ref_store.resolve_recursive(&ref_name) {
+                // Check if this is a tag object (annotated) or direct commit (lightweight)
+                if let Ok(raw) = object_store.read(&resolved.oid) {
+                    if raw.object_type == ObjectType::Tag {
+                        // Annotated tag - parse tag object
+                        if let Ok(tag_obj) = TagObject::parse(raw) {
+                            result.push(Tag::annotated(
+                                name,
+                                *tag_obj.object(),
+                                tag_obj.message().to_string(),
+                                tag_obj.tagger().clone(),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                // Lightweight tag or failed to parse - just use the resolved OID
+                result.push(Tag::lightweight(name, resolved.oid));
+            }
+        }
+
+        Ok(result)
     }
 }
 

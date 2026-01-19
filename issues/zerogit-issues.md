@@ -774,6 +774,127 @@ Looseオブジェクトの書き込み機能を実装する。
 
 ---
 
+## Phase 2.5: 参照拡張・ログフィルタリング・差分機能
+
+### Issue #027: リモートブランチ・タグ一覧対応 ✅
+
+**説明:**
+refs/remotes/* と refs/tags/* の読み取りに対応し、branches機能を完全にする。
+
+**タスク:**
+- [x] `src/refs/remote_branch.rs` を作成
+- [x] `RemoteBranch` 型を定義（remote名 + branch名）
+- [x] `Repository::remote_branches()` を実装
+- [x] `src/refs/tag.rs` を作成
+- [x] `Tag` 型を定義（軽量タグ / 注釈付きタグ対応）
+- [x] `Repository::tags()` を実装
+- [x] `RefStore` にremotes/tags走査を追加
+- [x] 注釈付きタグ（tag object）のパースを実装
+- [x] 統合テストを作成
+
+**受け入れ条件:**
+- [x] `git branch -r` 相当の出力が得られる
+- [x] `git tag` 相当の出力が得られる
+- [x] 注釈付きタグのメッセージを取得できる
+
+**依存:** #013, #014
+
+---
+
+### Issue #028: ログフィルタリング・オプション対応 ✅
+
+**説明:**
+log機能を拡張し、パス指定やコミット数制限などのフィルタリングに対応する。
+
+**タスク:**
+- [x] `src/log.rs` に `LogOptions` ビルダーを追加
+- [x] `Repository::log_with_options()` を実装
+- [x] パスフィルタリングを実装
+- [x] 件数制限を実装
+- [x] 日付範囲フィルタを実装（since/until）
+- [x] `--first-parent` 相当を実装
+- [x] 作者フィルタを実装
+- [x] 統合テストを作成
+
+**受け入れ条件:**
+- [x] 特定ファイルの変更履歴を取得できる
+- [x] 件数制限が機能する
+- [x] 日付範囲でフィルタできる
+- [x] first-parentモードが機能する
+
+**依存:** #018
+
+---
+
+### Issue #029: Tree Diff実装 ✅
+
+**説明:**
+2つのTree間の差分を計算する機能を実装。diff機能全体の基盤。
+
+**タスク:**
+- [x] `src/diff/mod.rs` を作成
+- [x] `TreeDiff` 構造体を定義
+- [x] `DiffDelta` 構造体を定義
+- [x] `DiffStatus` enumを定義
+- [x] Treeフラット化ユーティリティを実装
+- [x] `diff_trees()` コア関数を実装
+- [x] `Repository::diff_trees()` を実装
+- [x] リネーム検出を実装
+- [x] 統合テストを作成
+
+**受け入れ条件:**
+- [x] 追加・削除・変更ファイルを正しく検出できる
+- [x] `git diff --name-status` 相当の出力が得られる
+- [x] 空Tree（初期コミット）との比較ができる
+
+**依存:** #010, #017
+
+---
+
+### Issue #030: コミット変更ファイル一覧 ✅
+
+**説明:**
+Commitから直接変更ファイル一覧を取得できるようにする。
+
+**タスク:**
+- [x] `Repository::commit_diff()` を実装
+- [x] 親コミットとのTree差分を計算
+- [x] 初期コミット（親なし）の処理
+- [x] マージコミット（複数親）の処理
+- [x] 統合テストを作成
+
+**受け入れ条件:**
+- [x] 通常のコミットで変更ファイル一覧を取得できる
+- [x] 初期コミットで全ファイルがAddedとして表示される
+- [x] `git log --name-status` 相当の出力が得られる
+
+**依存:** #029
+
+---
+
+### Issue #031: Working Tree / Index Diff ✅
+
+**説明:**
+ワーキングツリーとIndex、IndexとHEADの差分を取得する機能。
+
+**タスク:**
+- [x] `Repository::diff_index_to_workdir()` を実装
+- [x] `Repository::diff_head_to_index()` を実装
+- [x] `Repository::diff_head_to_workdir()` を実装
+- [x] ワーキングツリーファイルのハッシュ計算
+- [x] 仮想Tree（Index/Workdirから）の構築
+- [x] `status()` との整合性を確保
+- [x] 統合テストを作成
+
+**受け入れ条件:**
+- [x] `git diff` 相当（未ステージ変更）が取得できる
+- [x] `git diff --staged` 相当（ステージ済み変更）が取得できる
+- [x] `git diff HEAD` 相当（全変更）が取得できる
+
+**依存:** #015, #029
+
+---
+
 ## マイルストーン
 
 ### Milestone 1: MVP（Phase 1完了）✅
@@ -785,6 +906,13 @@ Looseオブジェクトの書き込み機能を実装する。
 - Issue #022〜#026
 - add/commit/branch機能の完成
 - v0.2.0 リリース
+
+### Milestone 3: 参照拡張・差分機能（Phase 2.5完了）✅
+- Issue #027〜#031
+- リモートブランチ・タグ対応
+- ログフィルタリング
+- Tree diff・Working Tree diff
+- v0.3.0 リリース
 
 ---
 
@@ -813,8 +941,20 @@ Looseオブジェクトの書き込み機能を実装する。
 | #019 | 高 | 高 | 5h |
 | #020 | 中 | 低 | 2h |
 | #021 | 中 | 中 | 4h |
+| #022 | 高 | 中 | 3h |
+| #023 | 高 | 中 | 2h |
+| #024 | 高 | 中 | 3h |
+| #025 | 高 | 高 | 4h |
+| #026 | 高 | 中 | 3h |
+| #027 | 高 | 低 | 3h |
+| #028 | 中 | 中 | 4h |
+| #029 | 高 | 中 | 5h |
+| #030 | 高 | 低 | 2h |
+| #031 | 中 | 中 | 3h |
 
-**MVP合計推定時間:** 約53時間
+**Phase 1 合計推定時間:** 約53時間
+**Phase 2 合計推定時間:** 約15時間
+**Phase 2.5 合計推定時間:** 約17時間
 
 ---
 
@@ -853,11 +993,20 @@ Looseオブジェクトの書き込み機能を実装する。
                           │
                           ├─> #017 オブジェクト取得
                           │     │
-                          │     ├─> #018 LogIterator
+                          │     ├─> #018 LogIterator ──> #028 LogOptions
                           │     │
-                          │     └─> #019 Status
+                          │     ├─> #019 Status
+                          │     │
+                          │     └─> #029 Tree Diff ──> #030 Commit Diff
+                          │                       └─> #031 Workdir Diff
                           │
-                          └─> #020 公開API
-                                │
-                                └─> #021 MVP完了
+                          ├─> #020 公開API
+                          │     │
+                          │     └─> #021 MVP完了
+                          │
+                          ├─> #022 Index書き込み ──> #024 add
+                          │                           │
+                          │                           └─> #025 commit ──> #026 branch
+                          │
+                          └─> #027 RemoteBranch/Tag
 ```

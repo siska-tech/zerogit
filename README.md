@@ -19,7 +19,7 @@ Pure Rust製の軽量Gitクライアントライブラリ。最小限の依存�
 
 ```toml
 [dependencies]
-zerogit = "0.2"
+zerogit = "0.3"
 ```
 
 ### 必要環境
@@ -98,7 +98,8 @@ use zerogit::{Repository, Result};
 fn main() -> Result<()> {
     let repo = Repository::discover(".")?;
     let head = repo.head()?;
-    
+
+    // ローカルブランチ
     for branch in repo.branches()? {
         let marker = if head.branch().map(|b| b.name()) == Some(branch.name()) {
             "* "
@@ -107,7 +108,33 @@ fn main() -> Result<()> {
         };
         println!("{}{}", marker, branch.name());
     }
-    
+
+    // リモートブランチ
+    for rb in repo.remote_branches()? {
+        println!("  remotes/{}/{}", rb.remote(), rb.name());
+    }
+
+    Ok(())
+}
+```
+
+### タグ一覧
+
+```rust
+use zerogit::{Repository, Result};
+
+fn main() -> Result<()> {
+    let repo = Repository::discover(".")?;
+
+    for tag in repo.tags()? {
+        println!("{} -> {}", tag.name(), tag.target().short());
+
+        // 注釈付きタグの場合はメッセージも取得可能
+        if let Some(message) = tag.message() {
+            println!("  {}", message);
+        }
+    }
+
     Ok(())
 }
 ```
@@ -116,15 +143,20 @@ fn main() -> Result<()> {
 
 ### 主要な型
 
-| 型           | 説明                                       |
-| ------------ | ------------------------------------------ |
-| `Repository` | リポジトリ操作のエントリーポイント         |
-| `Commit`     | コミット情報（author, message, parents等） |
-| `Tree`       | ディレクトリ構造                           |
-| `Blob`       | ファイル内容                               |
-| `Oid`        | オブジェクトID（SHA-1ハッシュ）            |
-| `Branch`     | ブランチ情報                               |
-| `Head`       | HEAD参照（ブランチまたはdetached）         |
+| 型             | 説明                                       |
+| -------------- | ------------------------------------------ |
+| `Repository`   | リポジトリ操作のエントリーポイント         |
+| `Commit`       | コミット情報（author, message, parents等） |
+| `Tree`         | ディレクトリ構造                           |
+| `Blob`         | ファイル内容                               |
+| `Oid`          | オブジェクトID（SHA-1ハッシュ）            |
+| `Branch`       | ブランチ情報                               |
+| `RemoteBranch` | リモートブランチ情報                       |
+| `Tag`          | タグ情報（軽量/注釈付き）                  |
+| `Head`         | HEAD参照（ブランチまたはdetached）         |
+| `TreeDiff`     | Tree間の差分                               |
+| `DiffDelta`    | 差分の各エントリ                           |
+| `LogOptions`   | ログ取得オプション                         |
 
 ### Repository メソッド
 
@@ -135,13 +167,23 @@ Repository::discover(path)?;  // 親ディレクトリを探索
 
 // 読み取り操作
 repo.head()?;                 // HEAD取得
-repo.branches()?;             // ブランチ一覧
+repo.branches()?;             // ローカルブランチ一覧
+repo.remote_branches()?;      // リモートブランチ一覧
+repo.tags()?;                 // タグ一覧
 repo.log()?;                  // コミット履歴（Iterator）
+repo.log_with_options(opts)?; // フィルタリング付きログ
 repo.status()?;               // ワーキングツリー状態
 repo.commit("sha")?;          // コミット取得
 repo.tree("sha")?;            // ツリー取得
 repo.blob("sha")?;            // Blob取得
 repo.index()?;                // インデックス取得
+
+// 差分操作
+repo.diff_trees(old, new)?;       // Tree間の差分
+repo.commit_diff(&commit)?;       // コミットの変更ファイル一覧
+repo.diff_index_to_workdir()?;    // git diff 相当
+repo.diff_head_to_index()?;       // git diff --staged 相当
+repo.diff_head_to_workdir()?;     // git diff HEAD 相当
 
 // 書き込み操作
 repo.add(path)?;              // ファイルをステージ
@@ -171,18 +213,76 @@ if let Some(entry) = tree.get("README.md") {
 }
 ```
 
-### コミット間の差分ファイル一覧
+### コミットの変更ファイル一覧
 
 ```rust
-let repo = Repository::discover(".")?;
-let commits: Vec<_> = repo.log()?.take(2).collect::<Result<_, _>>()?;
+use zerogit::{Repository, Result};
 
-if commits.len() == 2 {
-    let tree1 = repo.tree(&commits[0].tree().to_hex())?;
-    let tree2 = repo.tree(&commits[1].tree().to_hex())?;
+fn main() -> Result<()> {
+    let repo = Repository::discover(".")?;
 
-    // ツリーを比較して差分を検出
-    // ...
+    // 最新コミットの変更ファイルを表示
+    for commit in repo.log()?.take(5) {
+        let commit = commit?;
+        let diff = repo.commit_diff(&commit)?;
+
+        println!("{} {}", commit.oid().short(), commit.summary());
+        for delta in diff.deltas() {
+            println!("  {} {}", delta.status_char(), delta.path().display());
+        }
+    }
+
+    Ok(())
+}
+```
+
+### ログフィルタリング
+
+```rust
+use zerogit::{Repository, LogOptions, Result};
+
+fn main() -> Result<()> {
+    let repo = Repository::discover(".")?;
+
+    // 特定ファイルの変更履歴を取得
+    let log = repo.log_with_options(
+        LogOptions::new()
+            .path("src/main.rs")
+            .max_count(10)
+    )?;
+
+    for commit in log {
+        let commit = commit?;
+        println!("{} {}", commit.oid().short(), commit.summary());
+    }
+
+    Ok(())
+}
+```
+
+### ワーキングツリーの差分
+
+```rust
+use zerogit::{Repository, Result};
+
+fn main() -> Result<()> {
+    let repo = Repository::discover(".")?;
+
+    // git diff 相当（未ステージの変更）
+    let unstaged = repo.diff_index_to_workdir()?;
+    println!("Unstaged changes:");
+    for delta in unstaged.deltas() {
+        println!("  {} {}", delta.status_char(), delta.path().display());
+    }
+
+    // git diff --staged 相当（ステージ済みの変更）
+    let staged = repo.diff_head_to_index()?;
+    println!("Staged changes:");
+    for delta in staged.deltas() {
+        println!("  {} {}", delta.status_char(), delta.path().display());
+    }
+
+    Ok(())
 }
 ```
 
@@ -248,7 +348,7 @@ fn main() -> Result<()> {
 - [x] ワーキングツリーステータス
 - [x] インデックス読み取り
 
-### Phase 2: 書き込み操作
+### Phase 2: 書き込み操作 ✅
 
 ローカルリポジトリへの書き込み機能を提供します。
 
@@ -257,13 +357,23 @@ fn main() -> Result<()> {
 - [x] `branch` - ブランチ作成・削除
 - [x] `checkout` - ブランチ切り替え
 
-### Phase 3: 差分・マージ・Packfile
+### Phase 2.5: 参照拡張・ログフィルタリング・差分機能 ✅
 
-差分計算とPackfile対応を提供します。
+リモートブランチ、タグ、ログフィルタリング、Tree diff機能を提供します。
+
+- [x] リモートブランチ一覧（`remote_branches()`）
+- [x] タグ一覧（`tags()`）- 軽量タグ・注釈付きタグ両対応
+- [x] ログフィルタリング（`log_with_options()`）- パス、件数、日付、作者
+- [x] Tree diff（`diff_trees()`）- リネーム検出対応
+- [x] コミット変更一覧（`commit_diff()`）
+- [x] ワーキングツリー差分（`diff_index_to_workdir()`, `diff_head_to_index()`）
+
+### Phase 3: Packfile・行単位差分・マージ
+
+Packfile対応と行単位差分を提供します。
 
 | 機能                 | 説明                                  | 難易度 |
 | -------------------- | ------------------------------------- | ------ |
-| Tree diff            | 2つのTree間の差分計算                 | 中     |
 | Blob diff            | ファイル内容の行単位差分（Myers算法） | 高     |
 | Packfile読み取り     | `.git/objects/pack/*.pack` の読み取り | 高     |
 | Packfileインデックス | `.idx` ファイルによる高速検索         | 中     |
@@ -272,14 +382,14 @@ fn main() -> Result<()> {
 
 **想定API:**
 ```rust
-// 差分取得
-let diff = repo.diff_trees(&tree1, &tree2)?;
-for delta in diff.deltas() {
-    println!("{:?} {}", delta.status(), delta.path());
-}
-
 // Packfile対応（内部的に自動処理）
 let obj = repo.object("abc123")?;  // looseまたはpackから透過的に取得
+
+// 行単位差分（将来）
+let blob_diff = repo.diff_blobs(&old_blob, &new_blob)?;
+for hunk in blob_diff.hunks() {
+    println!("@@ -{},{} +{},{} @@", ...);
+}
 ```
 
 ### Phase 4: リモート操作（別crate: `zerogit-remote`）

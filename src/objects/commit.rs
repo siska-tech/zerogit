@@ -20,6 +20,28 @@ pub struct Signature {
 }
 
 impl Signature {
+    /// Creates a new Signature.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the person.
+    /// * `email` - The email address.
+    /// * `timestamp` - Unix timestamp (seconds since epoch).
+    /// * `tz_offset` - Timezone offset in minutes.
+    pub fn new(
+        name: impl Into<String>,
+        email: impl Into<String>,
+        timestamp: i64,
+        tz_offset: i32,
+    ) -> Self {
+        Signature {
+            name: name.into(),
+            email: email.into(),
+            timestamp,
+            tz_offset,
+        }
+    }
+
     /// Returns the name.
     pub fn name(&self) -> &str {
         &self.name

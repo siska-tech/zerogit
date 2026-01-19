@@ -48,6 +48,7 @@
 //! - [`index`] - Index (staging area) operations
 //! - [`status`] - Working tree status
 
+pub mod diff;
 pub mod error;
 pub mod index;
 pub mod log;
@@ -67,10 +68,16 @@ pub use repository::Repository;
 pub use objects::{Blob, Commit, FileMode, Object, Oid, Signature, Tree, TreeEntry};
 
 // Re-export reference types
-pub use refs::{Branch, Head};
+pub use refs::{Branch, Head, RemoteBranch, Tag};
 
 // Re-export status types
 pub use status::{FileStatus, StatusEntry};
 
 // Re-export index types
 pub use index::{Index, IndexEntry};
+
+// Re-export log types
+pub use log::LogOptions;
+
+// Re-export diff types
+pub use diff::{DiffDelta, DiffStats, DiffStatus, TreeDiff};

@@ -72,6 +72,9 @@ pub enum Error {
 
     /// The requested configuration key was not found.
     ConfigNotFound(String),
+
+    /// A repository already exists at the specified path.
+    AlreadyARepository(PathBuf),
 }
 
 impl fmt::Display for Error {
@@ -102,6 +105,9 @@ impl fmt::Display for Error {
             Error::EmptyCommit => write!(f, "nothing to commit"),
             Error::DirtyWorkingTree => write!(f, "working tree has uncommitted changes"),
             Error::ConfigNotFound(key) => write!(f, "configuration not found: {}", key),
+            Error::AlreadyARepository(path) => {
+                write!(f, "repository already exists: {}", path.display())
+            }
         }
     }
 }
@@ -196,6 +202,7 @@ mod tests {
             Error::EmptyCommit,
             Error::DirtyWorkingTree,
             Error::ConfigNotFound("user.name".to_string()),
+            Error::AlreadyARepository(PathBuf::from("/test/repo")),
         ];
 
         // All variants should implement Display without panicking

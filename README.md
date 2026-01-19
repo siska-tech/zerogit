@@ -29,6 +29,20 @@ zerogit = "0.3"
 
 ## クイックスタート
 
+### 新規リポジトリを初期化
+
+```rust
+use zerogit::{Repository, Result};
+
+fn main() -> Result<()> {
+    // 新しいGitリポジトリを作成
+    let repo = Repository::init("./my-project")?;
+
+    println!("Initialized empty Git repository");
+    Ok(())
+}
+```
+
 ### リポジトリを開いてログを表示
 
 ```rust
@@ -161,7 +175,8 @@ fn main() -> Result<()> {
 ### Repository メソッド
 
 ```rust
-// リポジトリを開く
+// リポジトリを開く・作成する
+Repository::init(path)?;      // 新規リポジトリを初期化
 Repository::open(path)?;      // 指定パス
 Repository::discover(path)?;  // 親ディレクトリを探索
 

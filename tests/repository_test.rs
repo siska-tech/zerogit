@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::Path;
+use tempfile::TempDir;
 use zerogit::error::Error;
 use zerogit::repository::Repository;
 
@@ -175,4 +176,182 @@ fn test_discover_from_deep_subdir() {
 
     // Clean up
     fs::remove_dir_all(Path::new(SIMPLE_FIXTURE).join("a")).ok();
+}
+
+// RP-008: Repository::init creates a new repository
+#[test]
+fn test_rp008_init_creates_repository() {
+    let temp = TempDir::new().unwrap();
+    let repo_path = temp.path().join("new-repo");
+
+    let repo = Repository::init(&repo_path);
+    assert!(repo.is_ok(), "Should initialize new repository");
+
+    let repo = repo.unwrap();
+
+    // Check that the repository paths are correct
+    assert_eq!(
+        repo.path().canonicalize().unwrap(),
+        repo_path.canonicalize().unwrap(),
+        "path() should return the repository root"
+    );
+    assert!(
+        repo.git_dir().ends_with(".git"),
+        "git_dir() should end with .git"
+    );
+
+    // Verify .git directory structure
+    let git_dir = repo_path.join(".git");
+    assert!(git_dir.is_dir(), ".git directory should exist");
+    assert!(git_dir.join("HEAD").is_file(), "HEAD file should exist");
+    assert!(
+        git_dir.join("objects").is_dir(),
+        "objects directory should exist"
+    );
+    assert!(
+        git_dir.join("refs/heads").is_dir(),
+        "refs/heads directory should exist"
+    );
+    assert!(
+        git_dir.join("refs/tags").is_dir(),
+        "refs/tags directory should exist"
+    );
+    assert!(git_dir.join("config").is_file(), "config file should exist");
+
+    // Verify HEAD content
+    let head_content = fs::read_to_string(git_dir.join("HEAD")).unwrap();
+    assert_eq!(
+        head_content, "ref: refs/heads/main\n",
+        "HEAD should point to main branch"
+    );
+
+    // Verify config content
+    let config_content = fs::read_to_string(git_dir.join("config")).unwrap();
+    assert!(
+        config_content.contains("bare = false"),
+        "config should indicate non-bare repository"
+    );
+}
+
+// RP-009: Repository::init fails if repository already exists
+#[test]
+fn test_rp009_init_fails_if_exists() {
+    let temp = TempDir::new().unwrap();
+    let repo_path = temp.path().join("existing-repo");
+
+    // First init should succeed
+    let repo = Repository::init(&repo_path);
+    assert!(repo.is_ok(), "First init should succeed");
+
+    // Second init should fail
+    let repo = Repository::init(&repo_path);
+    assert!(
+        matches!(repo, Err(Error::AlreadyARepository(_))),
+        "Second init should return AlreadyARepository error"
+    );
+}
+
+// RP-010: Repository::init_bare creates a bare repository
+#[test]
+fn test_rp010_init_bare_creates_bare_repository() {
+    let temp = TempDir::new().unwrap();
+    let repo_path = temp.path().join("bare-repo.git");
+
+    let repo = Repository::init_bare(&repo_path);
+    assert!(repo.is_ok(), "Should initialize bare repository");
+
+    let repo = repo.unwrap();
+
+    // For bare repositories, git_dir and work_dir should be the same
+    assert_eq!(
+        repo.path().canonicalize().unwrap(),
+        repo.git_dir().canonicalize().unwrap(),
+        "For bare repos, path() and git_dir() should be the same"
+    );
+
+    // Verify directory structure (directly in repo_path, not in .git subdirectory)
+    assert!(repo_path.join("HEAD").is_file(), "HEAD file should exist");
+    assert!(
+        repo_path.join("objects").is_dir(),
+        "objects directory should exist"
+    );
+    assert!(
+        repo_path.join("refs/heads").is_dir(),
+        "refs/heads directory should exist"
+    );
+    assert!(
+        repo_path.join("refs/tags").is_dir(),
+        "refs/tags directory should exist"
+    );
+    assert!(repo_path.join("config").is_file(), "config file should exist");
+
+    // Verify there's no .git subdirectory
+    assert!(
+        !repo_path.join(".git").exists(),
+        "Bare repository should not have .git subdirectory"
+    );
+
+    // Verify config content
+    let config_content = fs::read_to_string(repo_path.join("config")).unwrap();
+    assert!(
+        config_content.contains("bare = true"),
+        "config should indicate bare repository"
+    );
+}
+
+// RP-011: Repository::init_bare fails if repository already exists
+#[test]
+fn test_rp011_init_bare_fails_if_exists() {
+    let temp = TempDir::new().unwrap();
+    let repo_path = temp.path().join("existing-bare.git");
+
+    // First init should succeed
+    let repo = Repository::init_bare(&repo_path);
+    assert!(repo.is_ok(), "First init_bare should succeed");
+
+    // Second init should fail
+    let repo = Repository::init_bare(&repo_path);
+    assert!(
+        matches!(repo, Err(Error::AlreadyARepository(_))),
+        "Second init_bare should return AlreadyARepository error"
+    );
+}
+
+// RP-012: Initialized repository can be opened
+#[test]
+fn test_rp012_init_then_open() {
+    let temp = TempDir::new().unwrap();
+    let repo_path = temp.path().join("init-open-repo");
+
+    // Initialize
+    let init_repo = Repository::init(&repo_path).unwrap();
+    let init_path = init_repo.path().canonicalize().unwrap();
+    drop(init_repo);
+
+    // Open the same repository
+    let open_repo = Repository::open(&repo_path);
+    assert!(open_repo.is_ok(), "Should be able to open initialized repository");
+
+    let open_repo = open_repo.unwrap();
+    assert_eq!(
+        open_repo.path().canonicalize().unwrap(),
+        init_path,
+        "Opened repository should have the same path"
+    );
+}
+
+// RP-013: Repository::init creates parent directories
+#[test]
+fn test_rp013_init_creates_parent_dirs() {
+    let temp = TempDir::new().unwrap();
+    let repo_path = temp.path().join("deep/nested/path/repo");
+
+    // Parent directories don't exist yet
+    assert!(!temp.path().join("deep").exists());
+
+    let repo = Repository::init(&repo_path);
+    assert!(repo.is_ok(), "Should create parent directories");
+
+    // Verify the repository was created
+    assert!(repo_path.join(".git/HEAD").is_file());
 }

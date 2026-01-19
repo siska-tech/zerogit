@@ -169,6 +169,114 @@ impl Repository {
         }
     }
 
+    /// Initializes a new Git repository at the given path.
+    ///
+    /// Creates a new repository with the standard `.git` directory structure,
+    /// including the necessary subdirectories and files for a functional Git repository.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path where the repository should be created.
+    ///
+    /// # Returns
+    ///
+    /// A `Repository` instance pointing to the newly created repository.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::AlreadyARepository` if a `.git` directory already exists at the path.
+    /// - `Error::Io` if directory or file creation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::repository::Repository;
+    ///
+    /// let repo = Repository::init("path/to/new/repo").unwrap();
+    /// println!("Created repository at: {}", repo.path().display());
+    /// ```
+    pub fn init<P: AsRef<Path>>(path: P) -> Result<Self> {
+        Self::init_impl(path.as_ref(), false)
+    }
+
+    /// Initializes a new bare Git repository at the given path.
+    ///
+    /// Creates a bare repository (without a working directory) at the specified path.
+    /// Bare repositories are typically used as remote repositories and contain
+    /// the Git database directly in the specified directory rather than in a `.git` subdirectory.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path where the bare repository should be created.
+    ///
+    /// # Returns
+    ///
+    /// A `Repository` instance pointing to the newly created bare repository.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::AlreadyARepository` if a Git repository already exists at the path.
+    /// - `Error::Io` if directory or file creation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::repository::Repository;
+    ///
+    /// let repo = Repository::init_bare("path/to/bare.git").unwrap();
+    /// println!("Created bare repository at: {}", repo.path().display());
+    /// ```
+    pub fn init_bare<P: AsRef<Path>>(path: P) -> Result<Self> {
+        Self::init_impl(path.as_ref(), true)
+    }
+
+    /// Internal implementation for repository initialization.
+    fn init_impl(path: &Path, bare: bool) -> Result<Self> {
+        // Create the base directory if it doesn't exist
+        fs::create_dir_all(path)?;
+
+        // Determine git_dir and work_dir based on bare flag
+        let (work_dir, git_dir) = if bare {
+            // For bare repositories, git_dir is the path itself
+            let abs_path = path.canonicalize()?;
+            (abs_path.clone(), abs_path)
+        } else {
+            // For normal repositories, git_dir is path/.git
+            let abs_path = path.canonicalize()?;
+            let git_dir = abs_path.join(".git");
+            (abs_path, git_dir)
+        };
+
+        // Check if repository already exists
+        if git_dir.join("HEAD").exists() {
+            return Err(Error::AlreadyARepository(path.to_path_buf()));
+        }
+
+        // Create the .git directory for non-bare repositories
+        if !bare {
+            fs::create_dir_all(&git_dir)?;
+        }
+
+        // Create required subdirectories
+        fs::create_dir_all(git_dir.join("objects"))?;
+        fs::create_dir_all(git_dir.join("refs/heads"))?;
+        fs::create_dir_all(git_dir.join("refs/tags"))?;
+
+        // Create HEAD file pointing to main branch
+        let head_content = "ref: refs/heads/main\n";
+        fs::write(git_dir.join("HEAD"), head_content)?;
+
+        // Create minimal config file
+        let config_content = if bare {
+            "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n"
+        } else {
+            "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n"
+        };
+        fs::write(git_dir.join("config"), config_content)?;
+
+        Ok(Repository { work_dir, git_dir })
+    }
+
     /// Returns the path to the repository root (working directory).
     ///
     /// # Examples

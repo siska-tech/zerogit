@@ -3,6 +3,28 @@
 このプロジェクトは [Keep a Changelog](https://keepachangelog.com/ja/1.0.0/) に準拠し、
 [Semantic Versioning](https://semver.org/lang/ja/) を採用しています。
 
+## [0.3.5] - 2026-01-20
+
+### Added
+
+#### リポジトリ初期化
+- `Repository::init()`: 新規Gitリポジトリを初期化
+- 必要なディレクトリ構造（`.git/objects`, `.git/refs/heads`, `.git/refs/tags`）を自動作成
+- デフォルトブランチは `main`
+
+#### Commit OID取得
+- `Commit::oid()`: コミット自身のOIDを取得するメソッドを追加
+- `Oid::short()`: 短縮形式（7文字）のOIDを取得
+
+#### ローカルブランチ一覧
+- `Repository::branches()`: ローカルブランチ一覧を`Vec<Branch>`として取得
+- `remote_branches()`と対称的なAPIを提供
+
+### Fixed
+- `Repository::log()` で各コミットのOIDが取得可能に
+
+---
+
 ## [0.3.0] - 2026-01-20
 
 ### Added
@@ -142,6 +164,7 @@ Phase 1: Repository Layer（読み取り操作）の完全実装。
 - 対応プラットフォーム: Linux, macOS, Windows
 - テストカバレッジ: 94%以上
 
+[0.3.5]: https://github.com/siska-tech/zerogit/releases/tag/v0.3.5
 [0.3.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.3.0
 [0.2.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.2.0
 [0.1.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.1.0

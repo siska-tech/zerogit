@@ -1562,6 +1562,50 @@ impl Repository {
         Ok(())
     }
 
+    /// Lists all local branches in the repository.
+    ///
+    /// Returns a vector of `Branch` objects representing all branches
+    /// in `refs/heads/`. The current branch (if any) is marked with
+    /// `is_current() == true`.
+    ///
+    /// # Returns
+    ///
+    /// A vector of branches, sorted by name.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::repository::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    ///
+    /// for branch in repo.branches().unwrap() {
+    ///     let marker = if branch.is_current() { "* " } else { "  " };
+    ///     println!("{}{}", marker, branch.name());
+    /// }
+    /// ```
+    pub fn branches(&self) -> Result<Vec<Branch>> {
+        let store = self.ref_store();
+        let branch_names = store.branches()?;
+        let current_branch = store.current_branch()?;
+
+        let mut result = Vec::new();
+        for name in branch_names {
+            let ref_name = format!("refs/heads/{}", name);
+            if let Ok(resolved) = store.resolve_recursive(&ref_name) {
+                let is_current = current_branch.as_ref().is_some_and(|c| c == &name);
+                let branch = if is_current {
+                    Branch::current(name, resolved.oid)
+                } else {
+                    Branch::new(name, resolved.oid)
+                };
+                result.push(branch);
+            }
+        }
+
+        Ok(result)
+    }
+
     /// Lists all remote-tracking branches in the repository.
     ///
     /// Returns a vector of `RemoteBranch` objects representing all branches

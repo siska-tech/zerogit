@@ -406,3 +406,100 @@ fn test_integration_branch_workflow() {
     // Branch should not exist
     assert!(!temp.path().join(".git/refs/heads/feature").exists());
 }
+
+// =============================================================================
+// Repository::branches() tests (Issue #2)
+// =============================================================================
+
+/// Test listing branches returns all local branches
+#[test]
+fn test_branches_list() {
+    let temp = TempDir::new().unwrap();
+    let (repo, _) = setup_repo_with_commit(&temp);
+
+    // Initially only main branch exists
+    let branches = repo.branches().unwrap();
+    assert_eq!(branches.len(), 1);
+    assert_eq!(branches[0].name(), "main");
+    assert!(branches[0].is_current());
+
+    // Create additional branches
+    repo.create_branch("develop", None).unwrap();
+    repo.create_branch("feature/test", None).unwrap();
+
+    // List branches again
+    let branches = repo.branches().unwrap();
+    assert_eq!(branches.len(), 3);
+
+    // Branches should be sorted by name
+    assert_eq!(branches[0].name(), "develop");
+    assert_eq!(branches[1].name(), "feature/test");
+    assert_eq!(branches[2].name(), "main");
+
+    // main should still be current
+    assert!(!branches[0].is_current());
+    assert!(!branches[1].is_current());
+    assert!(branches[2].is_current());
+}
+
+/// Test branches() marks current branch correctly after checkout
+#[test]
+fn test_branches_current_after_checkout() {
+    let temp = TempDir::new().unwrap();
+    let (repo, _) = setup_repo_with_commit(&temp);
+
+    // Create a feature branch
+    repo.create_branch("feature", None).unwrap();
+
+    // Checkout feature branch
+    repo.checkout("feature").unwrap();
+
+    // List branches - feature should now be current
+    let branches = repo.branches().unwrap();
+    assert_eq!(branches.len(), 2);
+
+    let feature = branches.iter().find(|b| b.name() == "feature").unwrap();
+    let main = branches.iter().find(|b| b.name() == "main").unwrap();
+
+    assert!(feature.is_current());
+    assert!(!main.is_current());
+}
+
+/// Test branches() returns empty when no branches exist (before first commit)
+#[test]
+fn test_branches_empty_repo() {
+    let temp = TempDir::new().unwrap();
+    create_git_dir(temp.path());
+
+    let repo = Repository::open(temp.path()).unwrap();
+
+    // No branches exist yet (unborn HEAD)
+    let branches = repo.branches().unwrap();
+    assert!(branches.is_empty());
+}
+
+/// Test branches() includes OID for each branch
+#[test]
+fn test_branches_include_oid() {
+    let temp = TempDir::new().unwrap();
+    let (repo, first_oid) = setup_repo_with_commit(&temp);
+
+    // Create second commit
+    fs::write(temp.path().join("file.txt"), "Content").unwrap();
+    repo.add("file.txt").unwrap();
+    let second_oid = repo
+        .create_commit("Second commit", "Test User", "test@example.com")
+        .unwrap();
+
+    // Create branch at first commit
+    repo.create_branch("old-branch", Some(first_oid)).unwrap();
+
+    // List branches
+    let branches = repo.branches().unwrap();
+
+    let main = branches.iter().find(|b| b.name() == "main").unwrap();
+    let old = branches.iter().find(|b| b.name() == "old-branch").unwrap();
+
+    assert_eq!(main.oid(), &second_oid);
+    assert_eq!(old.oid(), &first_oid);
+}

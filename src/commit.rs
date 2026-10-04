@@ -199,6 +199,11 @@ impl Repository {
     ///
     /// While a merge is in progress, `MERGE_HEAD` becomes the second parent
     /// and the merge state is removed, as in [`Repository::create_commit`].
+    /// A commit made while a cherry-pick or revert is stopped concludes the
+    /// stopped commit, as `git commit` does: a cherry-picked commit keeps
+    /// its author unless [`CommitOptions::author`] is set, and the
+    /// operation goes on with [`Repository::cherry_pick_continue`] or
+    /// [`Repository::revert_continue`].
     ///
     /// # Errors
     ///
@@ -210,9 +215,11 @@ impl Repository {
     /// - `Error::ConfigNotFound` or `Error::InvalidDate` if an identity is
     ///   not given and cannot be resolved.
     pub fn create_commit_with(&self, message: &str, options: &CommitOptions) -> Result<Oid> {
-        let author = match &options.author {
-            Some(author) => author.clone(),
-            None => self.default_author()?,
+        let author = match (&options.author, self.cherry_pick_head()?) {
+            (Some(author), _) => author.clone(),
+            // Concluding a stopped cherry-pick keeps the picked author.
+            (None, Some(picked)) => self.commit(&picked.to_hex())?.author().clone(),
+            (None, None) => self.default_author()?,
         };
         let committer = match &options.committer {
             Some(committer) => committer.clone(),
@@ -247,7 +254,8 @@ impl Repository {
     /// Nothing is changed when an error is returned.
     ///
     /// - `Error::RefNotFound` if HEAD has no commit to amend.
-    /// - `Error::MergeInProgress` while a merge is in progress, which Git
+    /// - `Error::MergeInProgress` / `Error::CherryPickInProgress` while a
+    ///   merge is in progress or a cherry-pick is stopped, which Git
     ///   refuses to amend.
     /// - `Error::EmptyCommit` if the new commit would have the same tree as
     ///   its parent, unless [`CommitOptions::allow_empty`] (a merge commit
@@ -322,10 +330,14 @@ impl Repository {
         let merge_heads = self.merge_heads()?;
         // Parents: the current HEAD (if any), then MERGE_HEAD when
         // concluding a merge; or, when amending, those of HEAD's commit.
+        let cherry_picking = self.cherry_pick_head()?.is_some();
         let (parents, kind) = if amend {
             let head = head.ok_or_else(|| Error::RefNotFound("HEAD".to_owned()))?;
             if !merge_heads.is_empty() {
                 return Err(Error::MergeInProgress);
+            }
+            if cherry_picking {
+                return Err(Error::CherryPickInProgress);
             }
             let parents = self.commit(&head.to_hex())?.parents().to_vec();
             (parents, "commit (amend)")
@@ -334,6 +346,8 @@ impl Repository {
             parents.extend(merge_heads.iter().copied());
             let kind = if !merge_heads.is_empty() {
                 "commit (merge)"
+            } else if cherry_picking {
+                "commit (cherry-pick)"
             } else if head.is_some() {
                 "commit"
             } else {
@@ -369,6 +383,14 @@ impl Repository {
         self.update_head(&commit_oid, head, committer, &reflog_message)?;
         if !amend && !merge_heads.is_empty() {
             self.clear_merge_state()?;
+        }
+        // The commit concludes a stopped cherry-pick or revert.
+        if !amend && self.conclude_pick()? {
+            match std::fs::remove_file(self.git_dir().join("MERGE_MSG")) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
         }
 
         // Save the trees just built as the cache tree, so the next commit

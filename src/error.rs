@@ -182,6 +182,26 @@ pub enum Error {
     /// list with commands other than `pick`, from an interactive rebase).
     UnsupportedRebase(String),
 
+    /// A cherry-pick is in progress (`CHERRY_PICK_HEAD`, or a
+    /// `.git/sequencer/` of picks, exists); continue, skip or abort it
+    /// first.
+    CherryPickInProgress,
+
+    /// No cherry-pick is in progress.
+    NoCherryPickInProgress,
+
+    /// A revert is in progress (`REVERT_HEAD`, or a `.git/sequencer/` of
+    /// reverts, exists); continue, skip or abort it first.
+    RevertInProgress,
+
+    /// No revert is in progress.
+    NoRevertInProgress,
+
+    /// The cherry-pick or revert needs something not supported (for
+    /// example a merge commit, which needs a mainline parent, or sequencer
+    /// options zerogit does not apply); nothing was changed.
+    UnsupportedCherryPick(String),
+
     /// No remote with this name is configured.
     RemoteNotFound(String),
 
@@ -308,6 +328,13 @@ impl fmt::Display for Error {
             Error::RebaseInProgress => write!(f, "a rebase is in progress"),
             Error::NoRebaseInProgress => write!(f, "no rebase is in progress"),
             Error::UnsupportedRebase(reason) => write!(f, "unsupported rebase: {}", reason),
+            Error::CherryPickInProgress => write!(f, "a cherry-pick is in progress"),
+            Error::NoCherryPickInProgress => write!(f, "no cherry-pick is in progress"),
+            Error::RevertInProgress => write!(f, "a revert is in progress"),
+            Error::NoRevertInProgress => write!(f, "no revert is in progress"),
+            Error::UnsupportedCherryPick(reason) => {
+                write!(f, "unsupported cherry-pick or revert: {}", reason)
+            }
             Error::RemoteNotFound(name) => write!(f, "remote not found: {}", name),
             Error::RemoteAlreadyExists(name) => write!(f, "remote already exists: {}", name),
             Error::StaleReference(name) => write!(f, "reference changed concurrently: {}", name),
@@ -449,6 +476,11 @@ mod tests {
             Error::RebaseInProgress,
             Error::NoRebaseInProgress,
             Error::UnsupportedRebase("reason".to_string()),
+            Error::CherryPickInProgress,
+            Error::NoCherryPickInProgress,
+            Error::RevertInProgress,
+            Error::NoRevertInProgress,
+            Error::UnsupportedCherryPick("reason".to_string()),
             Error::RemoteNotFound("origin".to_string()),
             Error::RemoteAlreadyExists("origin".to_string()),
             Error::StaleReference("refs/heads/main".to_string()),

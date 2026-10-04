@@ -49,6 +49,7 @@
 //! - [`status`] - Working tree status
 
 pub(crate) mod attributes;
+pub mod cherry_pick;
 pub mod commit;
 pub mod config;
 pub mod diff;
@@ -76,6 +77,7 @@ pub(crate) mod worktree;
 pub(crate) mod infra;
 
 // Re-export primary types for convenient access
+pub use cherry_pick::{CherryPickOptions, PickOutcome};
 pub use commit::CommitOptions;
 pub use config::{Config, ConfigLevel};
 pub use error::{Error, Result};

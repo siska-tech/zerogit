@@ -209,3 +209,95 @@ fn renames_are_not_followed_when_disabled() {
     let (outcome, _) = merge_both(temp.path());
     assert!(matches!(outcome, MergeOutcome::Conflicts(_)));
 }
+
+#[test]
+fn rename_against_delete_conflicts_like_git() {
+    let changed = replace_line(TEXT, "2", "two (main)");
+    // Renamed (with or without changes) on main, deleted on topic.
+    for main_text in [TEXT, changed.as_str()] {
+        let temp = diverged(
+            &[("a.txt", TEXT), ("keep.txt", "keep\n")],
+            &[("a.txt", "-"), ("b.txt", main_text)],
+            &[("a.txt", "-")],
+            &[],
+        );
+        let (outcome, _) = merge_both(temp.path());
+        assert!(matches!(outcome, MergeOutcome::Conflicts(_)));
+    }
+    // Deleted on main, renamed on topic.
+    let temp = diverged(
+        &[("a.txt", TEXT), ("keep.txt", "keep\n")],
+        &[("a.txt", "-")],
+        &[("a.txt", "-"), ("dir/b.txt", TEXT)],
+        &[],
+    );
+    let (outcome, _) = merge_both(temp.path());
+    assert!(matches!(outcome, MergeOutcome::Conflicts(_)));
+}
+
+#[test]
+fn different_renames_conflict_like_git() {
+    let main_text = replace_line(TEXT, "2", "two (main)");
+    let topic_text = replace_line(TEXT, "9", "nine (topic)");
+    let main_conflicting = replace_line(TEXT, "5", "five (main)");
+    let topic_conflicting = replace_line(TEXT, "5", "five (topic)");
+    for (main_text, topic_text) in [
+        (TEXT, TEXT),
+        (main_text.as_str(), topic_text.as_str()),
+        (main_conflicting.as_str(), topic_conflicting.as_str()),
+    ] {
+        for style in ["merge", "diff3"] {
+            let temp = diverged(
+                &[("a.txt", TEXT), ("keep.txt", "keep\n")],
+                &[("a.txt", "-"), ("b.txt", main_text)],
+                &[("a.txt", "-"), ("c.txt", topic_text)],
+                &[("merge.conflictStyle", style)],
+            );
+            let (outcome, _) = merge_both(temp.path());
+            assert!(matches!(outcome, MergeOutcome::Conflicts(_)));
+        }
+    }
+}
+
+#[test]
+fn renames_onto_the_same_path_are_add_add_conflicts() {
+    // Two files renamed to the same path, one on each side.
+    let temp = diverged(
+        &[("a.txt", TEXT), ("other.txt", "x\ny\nz\n")],
+        &[("a.txt", "-"), ("c.txt", TEXT)],
+        &[("other.txt", "-"), ("c.txt", "x\ny\nz\n")],
+        &[],
+    );
+    let (outcome, _) = merge_both(temp.path());
+    assert!(matches!(outcome, MergeOutcome::Conflicts(_)));
+    // Renamed on one side onto a path the other side added.
+    let temp = diverged(
+        &[("a.txt", TEXT)],
+        &[("a.txt", "-"), ("b.txt", TEXT)],
+        &[("b.txt", "new on topic\n")],
+        &[],
+    );
+    let (outcome, _) = merge_both(temp.path());
+    assert!(matches!(outcome, MergeOutcome::Conflicts(_)));
+}
+
+#[test]
+fn rename_conflicts_can_be_aborted_like_git() {
+    let temp = diverged(
+        &[("a.txt", TEXT), ("keep.txt", "keep\n")],
+        &[("a.txt", "-"), ("b.txt", TEXT)],
+        &[("a.txt", "-"), ("c.txt", TEXT)],
+        &[],
+    );
+    let (_, ours) = merge_both(temp.path());
+    let theirs = twin(temp.path());
+    let _ = git_output(theirs.path(), &["merge", "-q", "--no-edit", "topic"]);
+    git(theirs.path(), &["merge", "--abort"]);
+    Repository::open(ours.path())
+        .unwrap()
+        .abort_merge()
+        .unwrap();
+    assert_eq!(git_ls_files(ours.path()), git_ls_files(theirs.path()));
+    assert_eq!(worktree_files(ours.path()), worktree_files(theirs.path()));
+    assert_eq!(git(ours.path(), &["status", "--porcelain"]), "");
+}

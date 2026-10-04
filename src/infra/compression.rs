@@ -63,6 +63,49 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
     miniz_oxide::inflate::decompress_to_vec_zlib(data).map_err(|_| Error::DecompressionFailed)
 }
 
+/// Decompresses one zlib stream that must occupy all of `data` and inflate to
+/// exactly `size` bytes.
+///
+/// The output is never allowed to grow past `size`, so the caller bounds the
+/// allocation by validating the declared size first.
+///
+/// # Errors
+///
+/// Returns `Error::DecompressionFailed` if the stream is corrupt or truncated,
+/// inflates to a different size, or is followed by trailing bytes.
+pub fn decompress_exact(data: &[u8], size: usize) -> Result<Vec<u8>> {
+    use miniz_oxide::inflate::stream::{inflate, InflateState};
+    use miniz_oxide::{DataFormat, MZFlush, MZStatus};
+
+    let mut state = InflateState::new_boxed(DataFormat::Zlib);
+    let mut output = vec![0u8; size];
+    let mut overflow = [0u8; 1];
+    let mut input = data;
+    let mut written = 0;
+    loop {
+        let target: &mut [u8] = if written < size {
+            &mut output[written..]
+        } else {
+            &mut overflow
+        };
+        let result = inflate(&mut state, input, target, MZFlush::None);
+        if written == size && result.bytes_written > 0 {
+            return Err(Error::DecompressionFailed);
+        }
+        input = &input[result.bytes_consumed..];
+        written += result.bytes_written;
+        match result.status {
+            Ok(MZStatus::StreamEnd) => break,
+            Ok(_) if result.bytes_consumed > 0 || result.bytes_written > 0 => {}
+            _ => return Err(Error::DecompressionFailed),
+        }
+    }
+    if written != size || !input.is_empty() {
+        return Err(Error::DecompressionFailed);
+    }
+    Ok(output)
+}
+
 /// Validates a zlib header.
 ///
 /// A valid zlib header consists of two bytes where:
@@ -94,6 +137,35 @@ mod tests {
     // Helper to create valid zlib-compressed data
     fn compress_data(data: &[u8]) -> Vec<u8> {
         miniz_oxide::deflate::compress_to_vec_zlib(data, 6)
+    }
+
+    #[test]
+    fn test_decompress_exact() {
+        let original: Vec<u8> = (0..100_000).map(|i| (i % 251) as u8).collect();
+        let compressed = compress_data(&original);
+        assert_eq!(
+            decompress_exact(&compressed, original.len()).unwrap(),
+            original
+        );
+        assert_eq!(decompress_exact(&compress_data(b""), 0).unwrap(), b"");
+
+        for size in [0, original.len() - 1, original.len() + 1] {
+            assert!(
+                decompress_exact(&compressed, size).is_err(),
+                "size {}",
+                size
+            );
+        }
+        let mut trailing = compressed.clone();
+        trailing.push(0);
+        assert!(decompress_exact(&trailing, original.len()).is_err());
+        for len in 0..compressed.len() {
+            assert!(decompress_exact(&compressed[..len], original.len()).is_err());
+        }
+        let mut corrupt = compressed;
+        let last = corrupt.len() - 1;
+        corrupt[last] ^= 1; // Adler-32 checksum
+        assert!(decompress_exact(&corrupt, original.len()).is_err());
     }
 
     // C-001: Normal decompression

@@ -2,6 +2,7 @@
 
 pub mod branch;
 pub mod head;
+mod packed;
 pub mod remote_branch;
 pub mod resolver;
 pub mod tag;

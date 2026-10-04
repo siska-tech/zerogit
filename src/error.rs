@@ -27,6 +27,44 @@ pub enum Error {
     /// The provided string is not a valid reference name.
     InvalidRefName(String),
 
+    /// A packed-refs record is malformed.
+    InvalidPackedRefs {
+        /// The one-based line number of the malformed record.
+        line: usize,
+        /// The reason the record was rejected.
+        reason: String,
+    },
+
+    /// Deleting a packed reference is not supported yet.
+    PackedRefDeletionUnsupported(String),
+
+    /// A pack index file is malformed or its checksum does not match.
+    InvalidPackIndex {
+        /// The reason the index was rejected.
+        reason: String,
+    },
+
+    /// The pack index version is recognized but not supported.
+    UnsupportedPackIndexVersion(u32),
+
+    /// A pack file is malformed, inconsistent with its index, or a delta cannot be applied.
+    InvalidPack {
+        /// The reason the pack was rejected.
+        reason: String,
+    },
+
+    /// The pack file version is not supported.
+    UnsupportedPackVersion(u32),
+
+    /// The repository uses a format this library does not support (for example SHA-256 objects).
+    UnsupportedRepositoryFormat(String),
+
+    /// Reading a packed object would exceed a configured size or delta depth limit.
+    PackLimitExceeded {
+        /// The limit that was exceeded.
+        reason: String,
+    },
+
     /// The object is invalid or corrupted.
     InvalidObject {
         /// The object ID.
@@ -89,6 +127,24 @@ impl fmt::Display for Error {
             Error::PathNotFound(path) => write!(f, "path not found: {}", path.display()),
             Error::InvalidOid(s) => write!(f, "invalid object id: {}", s),
             Error::InvalidRefName(name) => write!(f, "invalid reference name: {}", name),
+            Error::InvalidPackedRefs { line, reason } => {
+                write!(f, "invalid packed-refs at line {}: {}", line, reason)
+            }
+            Error::PackedRefDeletionUnsupported(name) => {
+                write!(f, "deleting packed reference is not supported: {}", name)
+            }
+            Error::InvalidPackIndex { reason } => write!(f, "invalid pack index: {}", reason),
+            Error::UnsupportedPackIndexVersion(version) => {
+                write!(f, "unsupported pack index version: {}", version)
+            }
+            Error::InvalidPack { reason } => write!(f, "invalid pack: {}", reason),
+            Error::UnsupportedPackVersion(version) => {
+                write!(f, "unsupported pack version: {}", version)
+            }
+            Error::UnsupportedRepositoryFormat(what) => {
+                write!(f, "unsupported repository format: {}", what)
+            }
+            Error::PackLimitExceeded { reason } => write!(f, "pack limit exceeded: {}", reason),
             Error::InvalidObject { oid, reason } => {
                 write!(f, "invalid object {}: {}", oid, reason)
             }

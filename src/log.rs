@@ -29,7 +29,7 @@ use std::collections::{BinaryHeap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
-use crate::objects::{Commit, LooseObjectStore, ObjectType, Oid, Tree};
+use crate::objects::{Commit, ObjectStore, ObjectType, Oid, Tree};
 
 /// A pending commit in the priority queue.
 ///
@@ -304,8 +304,8 @@ fn parse_date(s: &str) -> i64 {
 /// }
 /// ```
 pub struct LogIterator {
-    /// The loose object store for reading commits.
-    store: LooseObjectStore,
+    /// The object store for reading commits.
+    store: ObjectStore,
     /// Priority queue of pending commits to visit.
     pending: BinaryHeap<PendingCommit>,
     /// Set of already visited commit OIDs to avoid duplicates.
@@ -335,7 +335,15 @@ impl LogIterator {
     /// * `start_oid` - The OID of the commit to start from.
     /// * `options` - Filtering options.
     pub fn with_options(objects_dir: PathBuf, start_oid: Oid, options: LogOptions) -> Result<Self> {
-        let store = LooseObjectStore::new(&objects_dir);
+        Self::with_store(ObjectStore::new(&objects_dir), start_oid, options)
+    }
+
+    /// Creates a LogIterator that reuses a repository's object store and pack indexes.
+    pub(crate) fn with_store(
+        store: ObjectStore,
+        start_oid: Oid,
+        options: LogOptions,
+    ) -> Result<Self> {
         let mut pending = BinaryHeap::new();
         let visited = HashSet::new();
 
@@ -516,10 +524,8 @@ impl LogIterator {
         }
 
         // Check path filter
-        if self.options.has_path_filter() {
-            if !self.commit_touches_paths(commit)? {
-                return Ok(false);
-            }
+        if self.options.has_path_filter() && !self.commit_touches_paths(commit)? {
+            return Ok(false);
         }
 
         Ok(true)
@@ -894,24 +900,41 @@ mod tests {
         let c1 = make_commit_content_with_time(&tree_oid.to_hex(), None, "Commit 1", 1000);
         let c1_oid = create_loose_object(&objects_dir, c1.as_bytes(), "commit");
 
-        let c2 = make_commit_content_with_time(&tree_oid.to_hex(), Some(&c1_oid.to_hex()), "Commit 2", 2000);
+        let c2 = make_commit_content_with_time(
+            &tree_oid.to_hex(),
+            Some(&c1_oid.to_hex()),
+            "Commit 2",
+            2000,
+        );
         let c2_oid = create_loose_object(&objects_dir, c2.as_bytes(), "commit");
 
-        let c3 = make_commit_content_with_time(&tree_oid.to_hex(), Some(&c2_oid.to_hex()), "Commit 3", 3000);
+        let c3 = make_commit_content_with_time(
+            &tree_oid.to_hex(),
+            Some(&c2_oid.to_hex()),
+            "Commit 3",
+            3000,
+        );
         let c3_oid = create_loose_object(&objects_dir, c3.as_bytes(), "commit");
 
-        let c4 = make_commit_content_with_time(&tree_oid.to_hex(), Some(&c3_oid.to_hex()), "Commit 4", 4000);
+        let c4 = make_commit_content_with_time(
+            &tree_oid.to_hex(),
+            Some(&c3_oid.to_hex()),
+            "Commit 4",
+            4000,
+        );
         let c4_oid = create_loose_object(&objects_dir, c4.as_bytes(), "commit");
 
-        let c5 = make_commit_content_with_time(&tree_oid.to_hex(), Some(&c4_oid.to_hex()), "Commit 5", 5000);
+        let c5 = make_commit_content_with_time(
+            &tree_oid.to_hex(),
+            Some(&c4_oid.to_hex()),
+            "Commit 5",
+            5000,
+        );
         let c5_oid = create_loose_object(&objects_dir, c5.as_bytes(), "commit");
 
         // Get only 3 commits
-        let log = LogIterator::with_options(
-            objects_dir,
-            c5_oid,
-            LogOptions::new().max_count(3),
-        ).unwrap();
+        let log =
+            LogIterator::with_options(objects_dir, c5_oid, LogOptions::new().max_count(3)).unwrap();
         let commits: Vec<_> = log.filter_map(Result::ok).collect();
 
         assert_eq!(commits.len(), 3);
@@ -932,18 +955,26 @@ mod tests {
         let c1 = make_commit_content_with_time(&tree_oid.to_hex(), None, "Old commit", 1000);
         let c1_oid = create_loose_object(&objects_dir, c1.as_bytes(), "commit");
 
-        let c2 = make_commit_content_with_time(&tree_oid.to_hex(), Some(&c1_oid.to_hex()), "Middle commit", 2000);
+        let c2 = make_commit_content_with_time(
+            &tree_oid.to_hex(),
+            Some(&c1_oid.to_hex()),
+            "Middle commit",
+            2000,
+        );
         let c2_oid = create_loose_object(&objects_dir, c2.as_bytes(), "commit");
 
-        let c3 = make_commit_content_with_time(&tree_oid.to_hex(), Some(&c2_oid.to_hex()), "New commit", 3000);
+        let c3 = make_commit_content_with_time(
+            &tree_oid.to_hex(),
+            Some(&c2_oid.to_hex()),
+            "New commit",
+            3000,
+        );
         let c3_oid = create_loose_object(&objects_dir, c3.as_bytes(), "commit");
 
         // Only commits since timestamp 2000
-        let log = LogIterator::with_options(
-            objects_dir,
-            c3_oid,
-            LogOptions::new().since_timestamp(2000),
-        ).unwrap();
+        let log =
+            LogIterator::with_options(objects_dir, c3_oid, LogOptions::new().since_timestamp(2000))
+                .unwrap();
         let commits: Vec<_> = log.filter_map(Result::ok).collect();
 
         assert_eq!(commits.len(), 2);
@@ -963,18 +994,26 @@ mod tests {
         let c1 = make_commit_content_with_time(&tree_oid.to_hex(), None, "Old commit", 1000);
         let c1_oid = create_loose_object(&objects_dir, c1.as_bytes(), "commit");
 
-        let c2 = make_commit_content_with_time(&tree_oid.to_hex(), Some(&c1_oid.to_hex()), "Middle commit", 2000);
+        let c2 = make_commit_content_with_time(
+            &tree_oid.to_hex(),
+            Some(&c1_oid.to_hex()),
+            "Middle commit",
+            2000,
+        );
         let c2_oid = create_loose_object(&objects_dir, c2.as_bytes(), "commit");
 
-        let c3 = make_commit_content_with_time(&tree_oid.to_hex(), Some(&c2_oid.to_hex()), "New commit", 3000);
+        let c3 = make_commit_content_with_time(
+            &tree_oid.to_hex(),
+            Some(&c2_oid.to_hex()),
+            "New commit",
+            3000,
+        );
         let c3_oid = create_loose_object(&objects_dir, c3.as_bytes(), "commit");
 
         // Only commits until timestamp 2000
-        let log = LogIterator::with_options(
-            objects_dir,
-            c3_oid,
-            LogOptions::new().until_timestamp(2000),
-        ).unwrap();
+        let log =
+            LogIterator::with_options(objects_dir, c3_oid, LogOptions::new().until_timestamp(2000))
+                .unwrap();
         let commits: Vec<_> = log.filter_map(Result::ok).collect();
 
         assert_eq!(commits.len(), 2);
@@ -994,21 +1033,39 @@ mod tests {
         let c1 = make_commit_content_with_time(&tree_oid.to_hex(), None, "Very old", 1000);
         let c1_oid = create_loose_object(&objects_dir, c1.as_bytes(), "commit");
 
-        let c2 = make_commit_content_with_time(&tree_oid.to_hex(), Some(&c1_oid.to_hex()), "In range", 2000);
+        let c2 = make_commit_content_with_time(
+            &tree_oid.to_hex(),
+            Some(&c1_oid.to_hex()),
+            "In range",
+            2000,
+        );
         let c2_oid = create_loose_object(&objects_dir, c2.as_bytes(), "commit");
 
-        let c3 = make_commit_content_with_time(&tree_oid.to_hex(), Some(&c2_oid.to_hex()), "Also in range", 2500);
+        let c3 = make_commit_content_with_time(
+            &tree_oid.to_hex(),
+            Some(&c2_oid.to_hex()),
+            "Also in range",
+            2500,
+        );
         let c3_oid = create_loose_object(&objects_dir, c3.as_bytes(), "commit");
 
-        let c4 = make_commit_content_with_time(&tree_oid.to_hex(), Some(&c3_oid.to_hex()), "Too new", 4000);
+        let c4 = make_commit_content_with_time(
+            &tree_oid.to_hex(),
+            Some(&c3_oid.to_hex()),
+            "Too new",
+            4000,
+        );
         let c4_oid = create_loose_object(&objects_dir, c4.as_bytes(), "commit");
 
         // Only commits in range [1500, 3000]
         let log = LogIterator::with_options(
             objects_dir,
             c4_oid,
-            LogOptions::new().since_timestamp(1500).until_timestamp(3000),
-        ).unwrap();
+            LogOptions::new()
+                .since_timestamp(1500)
+                .until_timestamp(3000),
+        )
+        .unwrap();
         let commits: Vec<_> = log.filter_map(Result::ok).collect();
 
         assert_eq!(commits.len(), 2);
@@ -1034,10 +1091,20 @@ mod tests {
         let a = make_commit_content_with_time(&tree_oid.to_hex(), None, "Root A", 1000);
         let a_oid = create_loose_object(&objects_dir, a.as_bytes(), "commit");
 
-        let b = make_commit_content_with_time(&tree_oid.to_hex(), Some(&a_oid.to_hex()), "Branch B", 2000);
+        let b = make_commit_content_with_time(
+            &tree_oid.to_hex(),
+            Some(&a_oid.to_hex()),
+            "Branch B",
+            2000,
+        );
         let b_oid = create_loose_object(&objects_dir, b.as_bytes(), "commit");
 
-        let c = make_commit_content_with_time(&tree_oid.to_hex(), Some(&a_oid.to_hex()), "Branch C", 2500);
+        let c = make_commit_content_with_time(
+            &tree_oid.to_hex(),
+            Some(&a_oid.to_hex()),
+            "Branch C",
+            2500,
+        );
         let c_oid = create_loose_object(&objects_dir, c.as_bytes(), "commit");
 
         let m = format!(
@@ -1049,11 +1116,9 @@ mod tests {
         let m_oid = create_loose_object(&objects_dir, m.as_bytes(), "commit");
 
         // With first_parent, should only follow B (first parent of M)
-        let log = LogIterator::with_options(
-            objects_dir,
-            m_oid,
-            LogOptions::new().first_parent(true),
-        ).unwrap();
+        let log =
+            LogIterator::with_options(objects_dir, m_oid, LogOptions::new().first_parent(true))
+                .unwrap();
         let commits: Vec<_> = log.filter_map(Result::ok).collect();
 
         assert_eq!(commits.len(), 3);
@@ -1073,21 +1138,31 @@ mod tests {
 
         let tree_oid = create_loose_object(&objects_dir, b"", "tree");
 
-        let c1 = make_commit_content_with_author(&tree_oid.to_hex(), None, "By Alice", 1000, "Alice");
+        let c1 =
+            make_commit_content_with_author(&tree_oid.to_hex(), None, "By Alice", 1000, "Alice");
         let c1_oid = create_loose_object(&objects_dir, c1.as_bytes(), "commit");
 
-        let c2 = make_commit_content_with_author(&tree_oid.to_hex(), Some(&c1_oid.to_hex()), "By Bob", 2000, "Bob");
+        let c2 = make_commit_content_with_author(
+            &tree_oid.to_hex(),
+            Some(&c1_oid.to_hex()),
+            "By Bob",
+            2000,
+            "Bob",
+        );
         let c2_oid = create_loose_object(&objects_dir, c2.as_bytes(), "commit");
 
-        let c3 = make_commit_content_with_author(&tree_oid.to_hex(), Some(&c2_oid.to_hex()), "Also by Alice", 3000, "Alice");
+        let c3 = make_commit_content_with_author(
+            &tree_oid.to_hex(),
+            Some(&c2_oid.to_hex()),
+            "Also by Alice",
+            3000,
+            "Alice",
+        );
         let c3_oid = create_loose_object(&objects_dir, c3.as_bytes(), "commit");
 
         // Only commits by Alice
-        let log = LogIterator::with_options(
-            objects_dir,
-            c3_oid,
-            LogOptions::new().author("Alice"),
-        ).unwrap();
+        let log = LogIterator::with_options(objects_dir, c3_oid, LogOptions::new().author("Alice"))
+            .unwrap();
         let commits: Vec<_> = log.filter_map(Result::ok).collect();
 
         assert_eq!(commits.len(), 2);
@@ -1104,16 +1179,35 @@ mod tests {
 
         let tree_oid = create_loose_object(&objects_dir, b"", "tree");
 
-        let c1 = make_commit_content_with_author(&tree_oid.to_hex(), None, "Old Alice", 1000, "Alice");
+        let c1 =
+            make_commit_content_with_author(&tree_oid.to_hex(), None, "Old Alice", 1000, "Alice");
         let c1_oid = create_loose_object(&objects_dir, c1.as_bytes(), "commit");
 
-        let c2 = make_commit_content_with_author(&tree_oid.to_hex(), Some(&c1_oid.to_hex()), "Recent Bob", 2000, "Bob");
+        let c2 = make_commit_content_with_author(
+            &tree_oid.to_hex(),
+            Some(&c1_oid.to_hex()),
+            "Recent Bob",
+            2000,
+            "Bob",
+        );
         let c2_oid = create_loose_object(&objects_dir, c2.as_bytes(), "commit");
 
-        let c3 = make_commit_content_with_author(&tree_oid.to_hex(), Some(&c2_oid.to_hex()), "Recent Alice", 3000, "Alice");
+        let c3 = make_commit_content_with_author(
+            &tree_oid.to_hex(),
+            Some(&c2_oid.to_hex()),
+            "Recent Alice",
+            3000,
+            "Alice",
+        );
         let c3_oid = create_loose_object(&objects_dir, c3.as_bytes(), "commit");
 
-        let c4 = make_commit_content_with_author(&tree_oid.to_hex(), Some(&c3_oid.to_hex()), "Very recent Alice", 4000, "Alice");
+        let c4 = make_commit_content_with_author(
+            &tree_oid.to_hex(),
+            Some(&c3_oid.to_hex()),
+            "Very recent Alice",
+            4000,
+            "Alice",
+        );
         let c4_oid = create_loose_object(&objects_dir, c4.as_bytes(), "commit");
 
         // Alice's commits since 2000, max 2
@@ -1124,7 +1218,8 @@ mod tests {
                 .author("Alice")
                 .since_timestamp(2000)
                 .max_count(2),
-        ).unwrap();
+        )
+        .unwrap();
         let commits: Vec<_> = log.filter_map(Result::ok).collect();
 
         assert_eq!(commits.len(), 2);
@@ -1141,15 +1236,13 @@ mod tests {
 
         let tree_oid = create_loose_object(&objects_dir, b"", "tree");
 
-        let c1 = make_commit_content_with_author(&tree_oid.to_hex(), None, "By Alice", 1000, "Alice");
+        let c1 =
+            make_commit_content_with_author(&tree_oid.to_hex(), None, "By Alice", 1000, "Alice");
         let c1_oid = create_loose_object(&objects_dir, c1.as_bytes(), "commit");
 
         // Look for Bob, but only Alice committed
-        let log = LogIterator::with_options(
-            objects_dir,
-            c1_oid,
-            LogOptions::new().author("Bob"),
-        ).unwrap();
+        let log = LogIterator::with_options(objects_dir, c1_oid, LogOptions::new().author("Bob"))
+            .unwrap();
         let commits: Vec<_> = log.filter_map(Result::ok).collect();
 
         assert_eq!(commits.len(), 0);
@@ -1210,32 +1303,48 @@ mod tests {
 
         // Create different trees for each commit
         let tree1 = create_tree_with_files(&objects_dir, &[("README.md", b"v1")]);
-        let tree2 = create_tree_with_files(&objects_dir, &[("README.md", b"v1"), ("main.rs", b"v1")]);
-        let tree3 = create_tree_with_files(&objects_dir, &[("README.md", b"v2"), ("main.rs", b"v1")]);
-        let tree4 = create_tree_with_files(&objects_dir, &[("README.md", b"v2"), ("main.rs", b"v2")]);
+        let tree2 =
+            create_tree_with_files(&objects_dir, &[("README.md", b"v1"), ("main.rs", b"v1")]);
+        let tree3 =
+            create_tree_with_files(&objects_dir, &[("README.md", b"v2"), ("main.rs", b"v1")]);
+        let tree4 =
+            create_tree_with_files(&objects_dir, &[("README.md", b"v2"), ("main.rs", b"v2")]);
 
         // Commit 1: Initial with README.md
         let c1 = make_commit_content_with_time(&tree1.to_hex(), None, "Add README", 1000);
         let c1_oid = create_loose_object(&objects_dir, c1.as_bytes(), "commit");
 
         // Commit 2: Add main.rs
-        let c2 = make_commit_content_with_time(&tree2.to_hex(), Some(&c1_oid.to_hex()), "Add main.rs", 2000);
+        let c2 = make_commit_content_with_time(
+            &tree2.to_hex(),
+            Some(&c1_oid.to_hex()),
+            "Add main.rs",
+            2000,
+        );
         let c2_oid = create_loose_object(&objects_dir, c2.as_bytes(), "commit");
 
         // Commit 3: Update README.md
-        let c3 = make_commit_content_with_time(&tree3.to_hex(), Some(&c2_oid.to_hex()), "Update README", 3000);
+        let c3 = make_commit_content_with_time(
+            &tree3.to_hex(),
+            Some(&c2_oid.to_hex()),
+            "Update README",
+            3000,
+        );
         let c3_oid = create_loose_object(&objects_dir, c3.as_bytes(), "commit");
 
         // Commit 4: Update main.rs
-        let c4 = make_commit_content_with_time(&tree4.to_hex(), Some(&c3_oid.to_hex()), "Update main.rs", 4000);
+        let c4 = make_commit_content_with_time(
+            &tree4.to_hex(),
+            Some(&c3_oid.to_hex()),
+            "Update main.rs",
+            4000,
+        );
         let c4_oid = create_loose_object(&objects_dir, c4.as_bytes(), "commit");
 
         // Filter by README.md - should return commits 1 and 3
-        let log = LogIterator::with_options(
-            objects_dir,
-            c4_oid,
-            LogOptions::new().path("README.md"),
-        ).unwrap();
+        let log =
+            LogIterator::with_options(objects_dir, c4_oid, LogOptions::new().path("README.md"))
+                .unwrap();
         let commits: Vec<_> = log.filter_map(Result::ok).collect();
 
         assert_eq!(commits.len(), 2);
@@ -1251,28 +1360,43 @@ mod tests {
         fs::create_dir_all(&objects_dir).unwrap();
 
         let tree1 = create_tree_with_files(&objects_dir, &[("README.md", b"v1")]);
-        let tree2 = create_tree_with_files(&objects_dir, &[("README.md", b"v1"), ("main.rs", b"v1")]);
-        let tree3 = create_tree_with_files(&objects_dir, &[("README.md", b"v2"), ("main.rs", b"v1")]);
-        let tree4 = create_tree_with_files(&objects_dir, &[("README.md", b"v2"), ("main.rs", b"v2")]);
+        let tree2 =
+            create_tree_with_files(&objects_dir, &[("README.md", b"v1"), ("main.rs", b"v1")]);
+        let tree3 =
+            create_tree_with_files(&objects_dir, &[("README.md", b"v2"), ("main.rs", b"v1")]);
+        let tree4 =
+            create_tree_with_files(&objects_dir, &[("README.md", b"v2"), ("main.rs", b"v2")]);
 
         let c1 = make_commit_content_with_time(&tree1.to_hex(), None, "Add README", 1000);
         let c1_oid = create_loose_object(&objects_dir, c1.as_bytes(), "commit");
 
-        let c2 = make_commit_content_with_time(&tree2.to_hex(), Some(&c1_oid.to_hex()), "Add main.rs", 2000);
+        let c2 = make_commit_content_with_time(
+            &tree2.to_hex(),
+            Some(&c1_oid.to_hex()),
+            "Add main.rs",
+            2000,
+        );
         let c2_oid = create_loose_object(&objects_dir, c2.as_bytes(), "commit");
 
-        let c3 = make_commit_content_with_time(&tree3.to_hex(), Some(&c2_oid.to_hex()), "Update README", 3000);
+        let c3 = make_commit_content_with_time(
+            &tree3.to_hex(),
+            Some(&c2_oid.to_hex()),
+            "Update README",
+            3000,
+        );
         let c3_oid = create_loose_object(&objects_dir, c3.as_bytes(), "commit");
 
-        let c4 = make_commit_content_with_time(&tree4.to_hex(), Some(&c3_oid.to_hex()), "Update main.rs", 4000);
+        let c4 = make_commit_content_with_time(
+            &tree4.to_hex(),
+            Some(&c3_oid.to_hex()),
+            "Update main.rs",
+            4000,
+        );
         let c4_oid = create_loose_object(&objects_dir, c4.as_bytes(), "commit");
 
         // Filter by main.rs - should return commits 2 and 4
-        let log = LogIterator::with_options(
-            objects_dir,
-            c4_oid,
-            LogOptions::new().path("main.rs"),
-        ).unwrap();
+        let log = LogIterator::with_options(objects_dir, c4_oid, LogOptions::new().path("main.rs"))
+            .unwrap();
         let commits: Vec<_> = log.filter_map(Result::ok).collect();
 
         assert_eq!(commits.len(), 2);
@@ -1289,15 +1413,28 @@ mod tests {
 
         let tree1 = create_tree_with_files(&objects_dir, &[("a.txt", b"v1")]);
         let tree2 = create_tree_with_files(&objects_dir, &[("a.txt", b"v1"), ("b.txt", b"v1")]);
-        let tree3 = create_tree_with_files(&objects_dir, &[("a.txt", b"v1"), ("b.txt", b"v1"), ("c.txt", b"v1")]);
+        let tree3 = create_tree_with_files(
+            &objects_dir,
+            &[("a.txt", b"v1"), ("b.txt", b"v1"), ("c.txt", b"v1")],
+        );
 
         let c1 = make_commit_content_with_time(&tree1.to_hex(), None, "Add a.txt", 1000);
         let c1_oid = create_loose_object(&objects_dir, c1.as_bytes(), "commit");
 
-        let c2 = make_commit_content_with_time(&tree2.to_hex(), Some(&c1_oid.to_hex()), "Add b.txt", 2000);
+        let c2 = make_commit_content_with_time(
+            &tree2.to_hex(),
+            Some(&c1_oid.to_hex()),
+            "Add b.txt",
+            2000,
+        );
         let c2_oid = create_loose_object(&objects_dir, c2.as_bytes(), "commit");
 
-        let c3 = make_commit_content_with_time(&tree3.to_hex(), Some(&c2_oid.to_hex()), "Add c.txt", 3000);
+        let c3 = make_commit_content_with_time(
+            &tree3.to_hex(),
+            Some(&c2_oid.to_hex()),
+            "Add c.txt",
+            3000,
+        );
         let c3_oid = create_loose_object(&objects_dir, c3.as_bytes(), "commit");
 
         // Filter by a.txt OR b.txt - should return commits 1 and 2
@@ -1305,7 +1442,8 @@ mod tests {
             objects_dir,
             c3_oid,
             LogOptions::new().path("a.txt").path("b.txt"),
-        ).unwrap();
+        )
+        .unwrap();
         let commits: Vec<_> = log.filter_map(Result::ok).collect();
 
         assert_eq!(commits.len(), 2);
@@ -1314,10 +1452,7 @@ mod tests {
     }
 
     /// Helper to create a tree with nested directory structure.
-    fn create_nested_tree(
-        objects_dir: &std::path::Path,
-        files: &[(&str, &[u8])],
-    ) -> Oid {
+    fn create_nested_tree(objects_dir: &std::path::Path, files: &[(&str, &[u8])]) -> Oid {
         use std::collections::BTreeMap;
 
         // Build directory structure
@@ -1384,28 +1519,44 @@ mod tests {
 
         // Create trees with files in src/ directory
         let tree1 = create_nested_tree(&objects_dir, &[("README.md", b"v1")]);
-        let tree2 = create_nested_tree(&objects_dir, &[("README.md", b"v1"), ("src/lib.rs", b"v1")]);
-        let tree3 = create_nested_tree(&objects_dir, &[("README.md", b"v2"), ("src/lib.rs", b"v1")]);
-        let tree4 = create_nested_tree(&objects_dir, &[("README.md", b"v2"), ("src/lib.rs", b"v2")]);
+        let tree2 =
+            create_nested_tree(&objects_dir, &[("README.md", b"v1"), ("src/lib.rs", b"v1")]);
+        let tree3 =
+            create_nested_tree(&objects_dir, &[("README.md", b"v2"), ("src/lib.rs", b"v1")]);
+        let tree4 =
+            create_nested_tree(&objects_dir, &[("README.md", b"v2"), ("src/lib.rs", b"v2")]);
 
         let c1 = make_commit_content_with_time(&tree1.to_hex(), None, "Add README", 1000);
         let c1_oid = create_loose_object(&objects_dir, c1.as_bytes(), "commit");
 
-        let c2 = make_commit_content_with_time(&tree2.to_hex(), Some(&c1_oid.to_hex()), "Add src/lib.rs", 2000);
+        let c2 = make_commit_content_with_time(
+            &tree2.to_hex(),
+            Some(&c1_oid.to_hex()),
+            "Add src/lib.rs",
+            2000,
+        );
         let c2_oid = create_loose_object(&objects_dir, c2.as_bytes(), "commit");
 
-        let c3 = make_commit_content_with_time(&tree3.to_hex(), Some(&c2_oid.to_hex()), "Update README", 3000);
+        let c3 = make_commit_content_with_time(
+            &tree3.to_hex(),
+            Some(&c2_oid.to_hex()),
+            "Update README",
+            3000,
+        );
         let c3_oid = create_loose_object(&objects_dir, c3.as_bytes(), "commit");
 
-        let c4 = make_commit_content_with_time(&tree4.to_hex(), Some(&c3_oid.to_hex()), "Update src/lib.rs", 4000);
+        let c4 = make_commit_content_with_time(
+            &tree4.to_hex(),
+            Some(&c3_oid.to_hex()),
+            "Update src/lib.rs",
+            4000,
+        );
         let c4_oid = create_loose_object(&objects_dir, c4.as_bytes(), "commit");
 
         // Filter by src/lib.rs - should return commits 2 and 4
-        let log = LogIterator::with_options(
-            objects_dir,
-            c4_oid,
-            LogOptions::new().path("src/lib.rs"),
-        ).unwrap();
+        let log =
+            LogIterator::with_options(objects_dir, c4_oid, LogOptions::new().path("src/lib.rs"))
+                .unwrap();
         let commits: Vec<_> = log.filter_map(Result::ok).collect();
 
         assert_eq!(commits.len(), 2);
@@ -1422,28 +1573,49 @@ mod tests {
 
         // Create trees with files in src/ directory
         let tree1 = create_nested_tree(&objects_dir, &[("README.md", b"v1")]);
-        let tree2 = create_nested_tree(&objects_dir, &[("README.md", b"v1"), ("src/lib.rs", b"v1")]);
-        let tree3 = create_nested_tree(&objects_dir, &[("README.md", b"v2"), ("src/lib.rs", b"v1")]);
-        let tree4 = create_nested_tree(&objects_dir, &[("README.md", b"v2"), ("src/lib.rs", b"v1"), ("src/main.rs", b"v1")]);
+        let tree2 =
+            create_nested_tree(&objects_dir, &[("README.md", b"v1"), ("src/lib.rs", b"v1")]);
+        let tree3 =
+            create_nested_tree(&objects_dir, &[("README.md", b"v2"), ("src/lib.rs", b"v1")]);
+        let tree4 = create_nested_tree(
+            &objects_dir,
+            &[
+                ("README.md", b"v2"),
+                ("src/lib.rs", b"v1"),
+                ("src/main.rs", b"v1"),
+            ],
+        );
 
         let c1 = make_commit_content_with_time(&tree1.to_hex(), None, "Add README", 1000);
         let c1_oid = create_loose_object(&objects_dir, c1.as_bytes(), "commit");
 
-        let c2 = make_commit_content_with_time(&tree2.to_hex(), Some(&c1_oid.to_hex()), "Add src/lib.rs", 2000);
+        let c2 = make_commit_content_with_time(
+            &tree2.to_hex(),
+            Some(&c1_oid.to_hex()),
+            "Add src/lib.rs",
+            2000,
+        );
         let c2_oid = create_loose_object(&objects_dir, c2.as_bytes(), "commit");
 
-        let c3 = make_commit_content_with_time(&tree3.to_hex(), Some(&c2_oid.to_hex()), "Update README only", 3000);
+        let c3 = make_commit_content_with_time(
+            &tree3.to_hex(),
+            Some(&c2_oid.to_hex()),
+            "Update README only",
+            3000,
+        );
         let c3_oid = create_loose_object(&objects_dir, c3.as_bytes(), "commit");
 
-        let c4 = make_commit_content_with_time(&tree4.to_hex(), Some(&c3_oid.to_hex()), "Add src/main.rs", 4000);
+        let c4 = make_commit_content_with_time(
+            &tree4.to_hex(),
+            Some(&c3_oid.to_hex()),
+            "Add src/main.rs",
+            4000,
+        );
         let c4_oid = create_loose_object(&objects_dir, c4.as_bytes(), "commit");
 
         // Filter by "src/" - should return commits 2 and 4 (not 3 which only changed README)
-        let log = LogIterator::with_options(
-            objects_dir,
-            c4_oid,
-            LogOptions::new().path("src/"),
-        ).unwrap();
+        let log =
+            LogIterator::with_options(objects_dir, c4_oid, LogOptions::new().path("src/")).unwrap();
         let commits: Vec<_> = log.filter_map(Result::ok).collect();
 
         assert_eq!(commits.len(), 2);
@@ -1459,28 +1631,43 @@ mod tests {
         fs::create_dir_all(&objects_dir).unwrap();
 
         let tree1 = create_nested_tree(&objects_dir, &[("README.md", b"v1")]);
-        let tree2 = create_nested_tree(&objects_dir, &[("README.md", b"v1"), ("src/lib.rs", b"v1")]);
-        let tree3 = create_nested_tree(&objects_dir, &[("README.md", b"v2"), ("src/lib.rs", b"v1")]);
-        let tree4 = create_nested_tree(&objects_dir, &[("README.md", b"v2"), ("src/lib.rs", b"v2")]);
+        let tree2 =
+            create_nested_tree(&objects_dir, &[("README.md", b"v1"), ("src/lib.rs", b"v1")]);
+        let tree3 =
+            create_nested_tree(&objects_dir, &[("README.md", b"v2"), ("src/lib.rs", b"v1")]);
+        let tree4 =
+            create_nested_tree(&objects_dir, &[("README.md", b"v2"), ("src/lib.rs", b"v2")]);
 
         let c1 = make_commit_content_with_time(&tree1.to_hex(), None, "Add README", 1000);
         let c1_oid = create_loose_object(&objects_dir, c1.as_bytes(), "commit");
 
-        let c2 = make_commit_content_with_time(&tree2.to_hex(), Some(&c1_oid.to_hex()), "Add src/lib.rs", 2000);
+        let c2 = make_commit_content_with_time(
+            &tree2.to_hex(),
+            Some(&c1_oid.to_hex()),
+            "Add src/lib.rs",
+            2000,
+        );
         let c2_oid = create_loose_object(&objects_dir, c2.as_bytes(), "commit");
 
-        let c3 = make_commit_content_with_time(&tree3.to_hex(), Some(&c2_oid.to_hex()), "Update README only", 3000);
+        let c3 = make_commit_content_with_time(
+            &tree3.to_hex(),
+            Some(&c2_oid.to_hex()),
+            "Update README only",
+            3000,
+        );
         let c3_oid = create_loose_object(&objects_dir, c3.as_bytes(), "commit");
 
-        let c4 = make_commit_content_with_time(&tree4.to_hex(), Some(&c3_oid.to_hex()), "Update src/lib.rs", 4000);
+        let c4 = make_commit_content_with_time(
+            &tree4.to_hex(),
+            Some(&c3_oid.to_hex()),
+            "Update src/lib.rs",
+            4000,
+        );
         let c4_oid = create_loose_object(&objects_dir, c4.as_bytes(), "commit");
 
         // Filter by "src" (without slash) - should also match files under src/
-        let log = LogIterator::with_options(
-            objects_dir,
-            c4_oid,
-            LogOptions::new().path("src"),
-        ).unwrap();
+        let log =
+            LogIterator::with_options(objects_dir, c4_oid, LogOptions::new().path("src")).unwrap();
         let commits: Vec<_> = log.filter_map(Result::ok).collect();
 
         assert_eq!(commits.len(), 2);

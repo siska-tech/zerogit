@@ -56,7 +56,7 @@ pub struct RawObject {
 ///
 /// Loose objects are stored in `.git/objects/` as individual zlib-compressed
 /// files, with the path determined by the object's SHA-1 hash.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LooseObjectStore {
     /// Path to the objects directory (e.g., `.git/objects`).
     objects_dir: PathBuf,
@@ -72,6 +72,11 @@ impl LooseObjectStore {
         LooseObjectStore {
             objects_dir: objects_dir.as_ref().to_path_buf(),
         }
+    }
+
+    /// Returns the objects directory this store reads from.
+    pub(crate) fn objects_dir(&self) -> &Path {
+        &self.objects_dir
     }
 
     /// Converts an Oid to the path of its loose object file.
@@ -126,6 +131,13 @@ impl LooseObjectStore {
             reason: "missing object size".to_string(),
         })?;
 
+        if parts.next().is_some() {
+            return Err(Error::InvalidObject {
+                oid: oid.to_hex(),
+                reason: "extra fields in object header".to_string(),
+            });
+        }
+
         // Parse the object type
         let object_type = ObjectType::parse(type_str).ok_or_else(|| Error::InvalidObject {
             oid: oid.to_hex(),
@@ -147,6 +159,13 @@ impl LooseObjectStore {
                     size,
                     content.len()
                 ),
+            });
+        }
+
+        if Oid::from_bytes(hash_object(object_type.as_str(), content)) != *oid {
+            return Err(Error::InvalidObject {
+                oid: oid.to_hex(),
+                reason: "content does not match object ID".to_string(),
             });
         }
 
@@ -220,19 +239,19 @@ impl LooseObjectStore {
         };
 
         let subdir = self.objects_dir.join(dir_prefix);
-        if !subdir.exists() {
-            return Ok(Vec::new());
-        }
-
         let mut matches = Vec::new();
 
-        let entries = fs::read_dir(&subdir)?;
+        let entries = match fs::read_dir(&subdir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(matches),
+            Err(e) => return Err(Error::Io(e)),
+        };
         for entry in entries {
             let entry = entry?;
             let file_name = entry.file_name();
             let name = file_name.to_string_lossy();
 
-            if name.starts_with(file_prefix) {
+            if name.starts_with(file_prefix) && entry.file_type()?.is_file() {
                 let full_hex = format!("{}{}", dir_prefix, name);
                 if full_hex.len() == OID_HEX_LEN {
                     if let Ok(oid) = Oid::from_hex(&full_hex) {
@@ -242,6 +261,7 @@ impl LooseObjectStore {
             }
         }
 
+        matches.sort_by_key(Oid::to_hex);
         Ok(matches)
     }
 

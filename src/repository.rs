@@ -7,9 +7,12 @@ use crate::index::{self, Index, IndexEntry};
 use crate::infra::{read_file, write_file_atomic};
 use crate::log::{LogIterator, LogOptions};
 use crate::objects::tree::FileMode;
-use crate::objects::{Blob, Commit, LooseObjectStore, Object, ObjectType, Oid, TagObject, Tree};
+use crate::objects::{Blob, Commit, Object, ObjectStore, ObjectType, Oid, TagObject, Tree};
 use crate::refs::{Branch, Head, RefStore, RemoteBranch, Tag};
-use crate::status::{compute_status, flatten_tree, StatusEntry};
+use crate::status::{
+    compute_status_with_store as compute_status, flatten_tree_with_store as flatten_tree,
+    StatusEntry,
+};
 
 use std::fs;
 
@@ -19,15 +22,61 @@ use std::collections::BTreeMap;
 ///
 /// This is the main entry point for interacting with a Git repository.
 /// It provides access to objects, references, and the index.
+///
+/// Objects are read from loose files and pack files. Pack indexes are parsed
+/// on first use and reused for the lifetime of the `Repository` (and of the
+/// log iterators created from it); packs added or replaced by an external
+/// `git repack` or `git gc` are picked up when a lookup misses.
 #[derive(Debug)]
 pub struct Repository {
     /// The root directory of the working tree.
     work_dir: PathBuf,
     /// The path to the `.git` directory.
     git_dir: PathBuf,
+    /// Loose and packed objects, shared with iterators.
+    objects: ObjectStore,
 }
 
 impl Repository {
+    fn from_dirs(work_dir: PathBuf, git_dir: PathBuf) -> Result<Self> {
+        Self::check_repository_format(&git_dir)?;
+        let objects = ObjectStore::new(git_dir.join("objects"));
+        Ok(Repository {
+            work_dir,
+            git_dir,
+            objects,
+        })
+    }
+
+    /// Rejects repository formats this library cannot read correctly.
+    ///
+    /// Only SHA-1 objects and the files reference backend are supported, so a
+    /// SHA-256 or reftable repository fails here rather than misreading data.
+    fn check_repository_format(git_dir: &Path) -> Result<()> {
+        let path = git_dir.join("config");
+        if !path.is_file() {
+            return Ok(());
+        }
+        let config = crate::config::Config::from_file(path)?;
+        let unsupported = |what: String| Err(Error::UnsupportedRepositoryFormat(what));
+        if let Some(version) = config.get("core", "repositoryformatversion") {
+            if !matches!(version.trim(), "0" | "1") {
+                return unsupported(format!("repositoryformatversion {}", version));
+            }
+        }
+        if let Some(format) = config.get("extensions", "objectformat") {
+            if !format.eq_ignore_ascii_case("sha1") {
+                return unsupported(format!("objectFormat {}", format));
+            }
+        }
+        if let Some(storage) = config.get("extensions", "refstorage") {
+            if !storage.eq_ignore_ascii_case("files") {
+                return unsupported(format!("refStorage {}", storage));
+            }
+        }
+        Ok(())
+    }
+
     /// Validates that a directory is a valid Git directory.
     ///
     /// A valid `.git` directory must contain at least:
@@ -112,7 +161,7 @@ impl Repository {
         // Validate that it's a proper git directory
         Self::validate_git_dir(&git_dir)?;
 
-        Ok(Repository { work_dir, git_dir })
+        Self::from_dirs(work_dir, git_dir)
     }
 
     /// Discovers a Git repository by searching upward from the given path.
@@ -150,10 +199,7 @@ impl Repository {
 
             // Check if .git exists and is valid
             if git_dir.is_dir() && Self::validate_git_dir(&git_dir).is_ok() {
-                return Ok(Repository {
-                    work_dir: current,
-                    git_dir,
-                });
+                return Self::from_dirs(current, git_dir);
             }
 
             // Move to parent directory
@@ -274,7 +320,7 @@ impl Repository {
         };
         fs::write(git_dir.join("config"), config_content)?;
 
-        Ok(Repository { work_dir, git_dir })
+        Self::from_dirs(work_dir, git_dir)
     }
 
     /// Returns the path to the repository root (working directory).
@@ -342,9 +388,28 @@ impl Repository {
         crate::config::Config::from_file(self.git_dir.join("config"))
     }
 
-    /// Returns a reference to the loose object store.
-    fn object_store(&self) -> LooseObjectStore {
-        LooseObjectStore::new(self.git_dir.join("objects"))
+    /// Returns the object store shared by this repository and its iterators.
+    fn object_store(&self) -> ObjectStore {
+        self.objects.clone()
+    }
+
+    /// Resolves HEAD while allowing a valid symbolic reference to an unborn branch.
+    fn optional_head_oid(&self) -> Result<Option<Oid>> {
+        match self.head() {
+            Ok(head) => Ok(Some(*head.oid())),
+            Err(Error::RefNotFound(_)) => {
+                // A missing HEAD file itself is not an unborn branch.
+                self.ref_store().read_ref_file("HEAD")?;
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn head_tree_oid(&self) -> Result<Option<Oid>> {
+        self.optional_head_oid()?
+            .map(|oid| self.commit(&oid.to_hex()).map(|commit| *commit.tree()))
+            .transpose()
     }
 
     /// Resolves a short (abbreviated) OID to a full OID.
@@ -372,23 +437,7 @@ impl Repository {
     /// let full_oid = repo.resolve_short_oid("abc1234").unwrap();
     /// ```
     pub fn resolve_short_oid(&self, short_oid: &str) -> Result<Oid> {
-        // If it's already a full OID, just parse it
-        if short_oid.len() == 40 {
-            return Oid::from_hex(short_oid);
-        }
-
-        let store = self.object_store();
-        let matches = store.find_objects_by_prefix(short_oid)?;
-
-        match matches.len() {
-            0 => Err(Error::ObjectNotFound(short_oid.to_string())),
-            1 => Ok(matches.into_iter().next().unwrap()),
-            _ => Err(Error::InvalidOid(format!(
-                "ambiguous short OID: {} ({} matches)",
-                short_oid,
-                matches.len()
-            ))),
-        }
+        self.object_store().resolve_oid(short_oid)
     }
 
     /// Retrieves a commit by its OID.
@@ -662,7 +711,7 @@ impl Repository {
     /// }
     /// ```
     pub fn log_from(&self, start_oid: Oid) -> Result<LogIterator> {
-        LogIterator::new(self.git_dir.join("objects"), start_oid)
+        LogIterator::with_store(self.object_store(), start_oid, LogOptions::default())
     }
 
     /// Returns an iterator over the commit history with filtering options.
@@ -702,7 +751,7 @@ impl Repository {
         } else {
             *self.head()?.oid()
         };
-        LogIterator::with_options(self.git_dir.join("objects"), start_oid, options)
+        LogIterator::with_store(self.object_store(), start_oid, options)
     }
 
     /// Returns the status of the working tree.
@@ -738,12 +787,8 @@ impl Repository {
     pub fn status(&self) -> Result<Vec<StatusEntry>> {
         let store = self.object_store();
 
-        // Get HEAD tree OID (if HEAD exists and points to a commit)
-        let head_tree_oid = self.head().ok().and_then(|head| {
-            self.commit(&head.oid().to_hex())
-                .ok()
-                .map(|commit| *commit.tree())
-        });
+        // An unborn branch has no tree; a missing/corrupt commit is an error.
+        let head_tree_oid = self.head_tree_oid()?;
 
         // Read and parse index (if exists)
         let index_path = self.git_dir.join("index");
@@ -855,15 +900,15 @@ impl Repository {
         let entry = IndexEntry::new(
             ctime,
             mtime,
-            0,                         // dev (not portable, use 0)
-            0,                         // ino (not portable, use 0)
+            0, // dev (not portable, use 0)
+            0, // ino (not portable, use 0)
             mode,
-            0,                         // uid (not portable, use 0)
-            0,                         // gid (not portable, use 0)
+            0, // uid (not portable, use 0)
+            0, // gid (not portable, use 0)
             content.len() as u32,
             oid,
             path.to_path_buf(),
-            0,                         // stage (normal entry)
+            0, // stage (normal entry)
         );
 
         // Read current index, add entry, and write back
@@ -891,17 +936,11 @@ impl Repository {
     /// repo.add_all().unwrap();
     /// ```
     pub fn add_all(&self) -> Result<()> {
-        use std::collections::BTreeMap;
-
         let store = self.object_store();
         let mut idx = self.read_index()?;
 
         // Get HEAD tree files (if exists)
-        let head_tree_oid = self.head().ok().and_then(|head| {
-            self.commit(&head.oid().to_hex())
-                .ok()
-                .map(|commit| *commit.tree())
-        });
+        let head_tree_oid = self.head_tree_oid()?;
 
         let mut head_files: BTreeMap<PathBuf, Oid> = BTreeMap::new();
         if let Some(tree_oid) = head_tree_oid {
@@ -1004,17 +1043,11 @@ impl Repository {
     /// repo.reset(Some("src/main.rs")).unwrap();
     /// ```
     pub fn reset<P: AsRef<Path>>(&self, path: Option<P>) -> Result<()> {
-        use std::collections::BTreeMap;
-
         let store = self.object_store();
         let mut idx = self.read_index()?;
 
         // Get HEAD tree files
-        let head_tree_oid = self.head().ok().and_then(|head| {
-            self.commit(&head.oid().to_hex())
-                .ok()
-                .map(|commit| *commit.tree())
-        });
+        let head_tree_oid = self.head_tree_oid()?;
 
         let mut head_files: BTreeMap<PathBuf, Oid> = BTreeMap::new();
         if let Some(tree_oid) = head_tree_oid {
@@ -1173,7 +1206,7 @@ impl Repository {
         tree_oids
             .get(&PathBuf::new())
             .copied()
-            .ok_or_else(|| Error::EmptyCommit)
+            .ok_or(Error::EmptyCommit)
     }
 
     /// Builds the binary content of a tree object.
@@ -1314,7 +1347,7 @@ impl Repository {
         let tree_oid = self.build_tree_from_index(&idx)?;
 
         // Get parent commit (current HEAD, if exists)
-        let parent_oid = self.head().ok().map(|h| *h.oid());
+        let parent_oid = self.optional_head_oid()?;
 
         // Create timestamp
         let timestamp = std::time::SystemTime::now()
@@ -1323,10 +1356,7 @@ impl Repository {
             .unwrap_or(0);
 
         // Format signature (using +0000 timezone for simplicity)
-        let signature = format!(
-            "{} <{}> {} +0000",
-            author_name, author_email, timestamp
-        );
+        let signature = format!("{} <{}> {} +0000", author_name, author_email, timestamp);
 
         // Format commit content
         let commit_content = Self::format_commit(
@@ -1357,7 +1387,9 @@ impl Repository {
     /// - Cannot end with `.lock`
     fn validate_branch_name(name: &str) -> Result<()> {
         if name.is_empty() {
-            return Err(Error::InvalidRefName("branch name cannot be empty".to_string()));
+            return Err(Error::InvalidRefName(
+                "branch name cannot be empty".to_string(),
+            ));
         }
 
         if name.starts_with('-') {
@@ -1453,8 +1485,11 @@ impl Repository {
 
         // Check if branch already exists
         let branch_path = self.git_dir.join("refs/heads").join(name);
-        if branch_path.exists() {
-            return Err(Error::RefAlreadyExists(format!("refs/heads/{}", name)));
+        let ref_name = format!("refs/heads/{}", name);
+        match self.ref_store().read_ref_file(&ref_name) {
+            Ok(_) => return Err(Error::RefAlreadyExists(ref_name)),
+            Err(Error::RefNotFound(_)) => {}
+            Err(e) => return Err(e),
         }
 
         // Ensure parent directories exist (for nested branch names like feature/foo)
@@ -1463,7 +1498,10 @@ impl Repository {
         }
 
         // Write the branch ref file
-        write_file_atomic(&branch_path, format!("{}\n", target_oid.to_hex()).as_bytes())?;
+        write_file_atomic(
+            &branch_path,
+            format!("{}\n", target_oid.to_hex()).as_bytes(),
+        )?;
 
         Ok(Branch::new(name, target_oid))
     }
@@ -1482,6 +1520,7 @@ impl Repository {
     ///
     /// - `Error::RefNotFound` if the branch does not exist.
     /// - `Error::CannotDeleteCurrentBranch` if trying to delete the current branch.
+    /// - `Error::PackedRefDeletionUnsupported` if the branch also exists in packed-refs.
     ///
     /// # Examples
     ///
@@ -1492,19 +1531,20 @@ impl Repository {
     /// repo.delete_branch("feature/old-feature").unwrap();
     /// ```
     pub fn delete_branch(&self, name: &str) -> Result<()> {
+        Self::validate_branch_name(name)?;
         // Check if this is the current branch
         let store = self.ref_store();
-        if let Ok(Some(current)) = store.current_branch() {
-            if current == name {
-                return Err(Error::CannotDeleteCurrentBranch);
-            }
+        if store.current_branch()?.as_deref() == Some(name) {
+            return Err(Error::CannotDeleteCurrentBranch);
         }
 
         // Check if branch exists
         let branch_path = self.git_dir.join("refs/heads").join(name);
-        if !branch_path.exists() {
-            return Err(Error::RefNotFound(format!("refs/heads/{}", name)));
+        let ref_name = format!("refs/heads/{}", name);
+        if store.is_packed(&ref_name)? {
+            return Err(Error::PackedRefDeletionUnsupported(ref_name));
         }
+        store.read_ref_file(&ref_name)?;
 
         // Delete the branch ref file
         fs::remove_file(&branch_path)?;
@@ -1575,17 +1615,23 @@ impl Repository {
 
         // Try to resolve as a branch first
         let branch_ref = format!("refs/heads/{}", target);
-        let (new_head_content, target_oid) = if let Ok(resolved) = store.resolve_recursive(&branch_ref) {
-            // It's a branch - update HEAD to be symbolic
-            (format!("ref: {}\n", branch_ref), resolved.oid)
-        } else if let Ok(resolved) = store.resolve(target) {
-            // It's a known ref - detached HEAD
-            (format!("{}\n", resolved.oid.to_hex()), resolved.oid)
-        } else if let Ok(oid) = self.resolve_short_oid(target) {
-            // It's a commit OID (full or short) - detached HEAD
-            (format!("{}\n", oid.to_hex()), oid)
-        } else {
-            return Err(Error::RefNotFound(target.to_string()));
+        let (new_head_content, target_oid) = match store.resolve_recursive(&branch_ref) {
+            Ok(resolved) => (format!("ref: {}\n", branch_ref), resolved.oid),
+            Err(Error::RefNotFound(_)) => {
+                let oid = match store.resolve(target) {
+                    Ok(resolved) => resolved.oid,
+                    Err(Error::RefNotFound(_)) => match self.resolve_short_oid(target) {
+                        Ok(oid) => oid,
+                        Err(Error::ObjectNotFound(_) | Error::InvalidOid(_)) => {
+                            return Err(Error::RefNotFound(target.to_owned()));
+                        }
+                        Err(e) => return Err(e),
+                    },
+                    Err(e) => return Err(e),
+                };
+                (format!("{}\n", oid.to_hex()), oid)
+            }
+            Err(e) => return Err(e),
         };
 
         // Get the tree for the target commit
@@ -1607,11 +1653,7 @@ impl Repository {
         let store = self.object_store();
 
         // Get current HEAD tree (if any) to compare
-        let current_tree = self.head().ok().and_then(|head| {
-            self.commit(&head.oid().to_hex())
-                .ok()
-                .map(|commit| *commit.tree())
-        });
+        let current_tree = self.head_tree_oid()?;
 
         // Flatten both trees for comparison
         let mut current_files: BTreeMap<PathBuf, Oid> = BTreeMap::new();
@@ -1731,23 +1773,17 @@ impl Repository {
     /// ```
     pub fn branches(&self) -> Result<Vec<Branch>> {
         let store = self.ref_store();
-        let branch_names = store.branches()?;
         let current_branch = store.current_branch()?;
-
         let mut result = Vec::new();
-        for name in branch_names {
-            let ref_name = format!("refs/heads/{}", name);
-            if let Ok(resolved) = store.resolve_recursive(&ref_name) {
-                let is_current = current_branch.as_ref().is_some_and(|c| c == &name);
-                let branch = if is_current {
-                    Branch::current(name, resolved.oid)
-                } else {
-                    Branch::new(name, resolved.oid)
-                };
-                result.push(branch);
-            }
+        for resolved in store.resolved_refs("refs/heads/")? {
+            let name = resolved.name.strip_prefix("refs/heads/").unwrap();
+            let branch = if current_branch.as_deref() == Some(name) {
+                Branch::current(name, resolved.oid)
+            } else {
+                Branch::new(name, resolved.oid)
+            };
+            result.push(branch);
         }
-
         Ok(result)
     }
 
@@ -1772,17 +1808,17 @@ impl Repository {
     /// }
     /// ```
     pub fn remote_branches(&self) -> Result<Vec<RemoteBranch>> {
-        let store = self.ref_store();
-        let remote_branch_tuples = store.remote_branches()?;
-
         let mut result = Vec::new();
-        for (remote, branch) in remote_branch_tuples {
-            let ref_name = format!("refs/remotes/{}/{}", remote, branch);
-            if let Ok(resolved) = store.resolve_recursive(&ref_name) {
+        for resolved in self.ref_store().resolved_refs("refs/remotes/")? {
+            if let Some((remote, branch)) = resolved
+                .name
+                .strip_prefix("refs/remotes/")
+                .unwrap()
+                .split_once('/')
+            {
                 result.push(RemoteBranch::new(remote, branch, resolved.oid));
             }
         }
-
         Ok(result)
     }
 
@@ -1810,34 +1846,23 @@ impl Repository {
     /// }
     /// ```
     pub fn tags(&self) -> Result<Vec<Tag>> {
-        let ref_store = self.ref_store();
         let object_store = self.object_store();
-        let tag_names = ref_store.tags()?;
-
         let mut result = Vec::new();
-        for name in tag_names {
-            let ref_name = format!("refs/tags/{}", name);
-            if let Ok(resolved) = ref_store.resolve_recursive(&ref_name) {
-                // Check if this is a tag object (annotated) or direct commit (lightweight)
-                if let Ok(raw) = object_store.read(&resolved.oid) {
-                    if raw.object_type == ObjectType::Tag {
-                        // Annotated tag - parse tag object
-                        if let Ok(tag_obj) = TagObject::parse(raw) {
-                            result.push(Tag::annotated(
-                                name,
-                                *tag_obj.object(),
-                                tag_obj.message().to_string(),
-                                tag_obj.tagger().clone(),
-                            ));
-                            continue;
-                        }
-                    }
-                }
-                // Lightweight tag or failed to parse - just use the resolved OID
+        for resolved in self.ref_store().resolved_refs("refs/tags/")? {
+            let name = resolved.name.strip_prefix("refs/tags/").unwrap();
+            let raw = object_store.read(&resolved.oid)?;
+            if raw.object_type == ObjectType::Tag {
+                let tag_obj = TagObject::parse(raw)?;
+                result.push(Tag::annotated(
+                    name,
+                    *tag_obj.object(),
+                    tag_obj.message().to_string(),
+                    tag_obj.tagger().clone(),
+                ));
+            } else {
                 result.push(Tag::lightweight(name, resolved.oid));
             }
         }
-
         Ok(result)
     }
 }
@@ -2720,9 +2745,7 @@ mod tests {
     #[test]
     fn test_build_tree_content() {
         let oid = Oid::from_hex("da39a3ee5e6b4b0d3255bfef95601890afd80709").unwrap();
-        let entries = vec![
-            ("file.txt".to_string(), FileMode::Regular, oid),
-        ];
+        let entries = vec![("file.txt".to_string(), FileMode::Regular, oid)];
 
         let content = Repository::build_tree_content(&entries);
 
@@ -2829,8 +2852,7 @@ mod tests {
 
         // Verify the ref file was created in nested directory
         let git_dir = temp.path().join(".git");
-        let branch_ref =
-            fs::read_to_string(git_dir.join("refs/heads/feature/my-feature")).unwrap();
+        let branch_ref = fs::read_to_string(git_dir.join("refs/heads/feature/my-feature")).unwrap();
         assert_eq!(branch_ref.trim(), commit_oid.to_hex());
     }
 

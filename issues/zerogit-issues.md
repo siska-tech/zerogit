@@ -1036,3 +1036,7 @@ Commitから直接変更ファイル一覧を取得できるようにする。
 | 052 | [#25](https://github.com/siska-tech/zerogit/issues/25) | reflogを書かない |
 | 053 | [#26](https://github.com/siska-tech/zerogit/issues/26) | 未実装機能（merge・rebase・stash・タグ作成・リモート操作）の追跡 |
 | 054 | [#27](https://github.com/siska-tech/zerogit/issues/27) | タグの作成・削除（軽量タグ・注釈付きタグ） |
+| 055 | [#29](https://github.com/siska-tech/zerogit/issues/29) | merge（fast-forward・3-way） |
+| 056 | [#30](https://github.com/siska-tech/zerogit/issues/30) | stash（作業ツリーとindexの退避・復元） |
+| 057 | [#31](https://github.com/siska-tech/zerogit/issues/31) | rebase（コミットの付け替え、中断・再開） |
+| 058 | [#32](https://github.com/siska-tech/zerogit/issues/32) | リモート操作（fetch・push・clone、別crate zerogit-remote） |

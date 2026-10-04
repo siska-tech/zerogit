@@ -462,24 +462,78 @@ fn main() -> Result<()> {
 
 測定は`cargo run --release --example measure_document_diff`で再現できます（Windows 11、release build。1,000コミット・50文書をpack化したリポジトリで、全履歴の走査50〜220 ms、全コミットの変更一覧160〜670 ms、全変更ファイルの行差分は1件あたり0.6〜2.5 ms、ピークメモリ約46 MiB）。
 
-### 次の予定
+### Phase 3.5: 書き込み操作の拡張（予定）
+
+着手順に並べています。詳細と依存関係は各Issueを参照してください。
 
 - [ ] タグの作成・削除 - 軽量タグ、注釈付きタグ（tagオブジェクトの書き込み）（[#27](https://github.com/siska-tech/zerogit/issues/27)）
+- [ ] merge - fast-forward、3-way merge（共通祖先の探索、コンフリクトの記録、中止）（[#29](https://github.com/siska-tech/zerogit/issues/29)）
+- [ ] stash - 作業ツリーとindexの退避・復元（`refs/stash`とreflog）（[#30](https://github.com/siska-tech/zerogit/issues/30)）
+- [ ] rebase - コミットの付け替え、中断・再開（[#31](https://github.com/siska-tech/zerogit/issues/31)）
 
-### 対象外
+### Phase 4: リモート操作（別crate: `zerogit-remote`）
 
-次の機能は実装しません（[#26](https://github.com/siska-tech/zerogit/issues/26)で検討）。zerogitは履歴と差分の読み取り、基本的なステージング・コミット・ブランチ・タグの操作に絞り、Pure Rustと最小依存を保ちます。
+ネットワーク操作は依存関係が増えるため、別crateとして提供予定です（[#32](https://github.com/siska-tech/zerogit/issues/32)）。
 
-| 機能 | 理由 |
-| --- | --- |
-| merge（fast-forward・3-way） | 共通祖先の探索、3-wayの行マージ、コンフリクトの記録と解消の流れが必要で、規模が大きい |
-| rebase | mergeが前提 |
-| stash | 復元が3-way mergeになるため、mergeが前提 |
-| リモート操作（fetch・push・clone） | TLS・SSHなどの依存が増え、最小依存の方針と両立しない。別crate（`zerogit-remote`）の計画も取りやめる |
+#### なぜ別crateなのか？
+
+| 観点         | zerogit (コア)     | zerogit-remote               |
+| ------------ | ------------------ | ---------------------------- |
+| 依存         | `miniz_oxide` のみ | `rustls`, `russh`, `ureq` 等 |
+| ビルド時間   | 高速               | TLS/SSH依存で増加            |
+| WASM対応     | ○                  | △（制限あり）                |
+| 組み込み用途 | ○                  | △                            |
+
+#### サポート予定プロトコル
+
+| プロトコル | URL形式                  | 認証方式             | 優先度 |
+| ---------- | ------------------------ | -------------------- | ------ |
+| HTTPS      | `https://github.com/...` | Basic / Bearer Token | 高     |
+| SSH        | `git@github.com:...`     | SSH鍵                | 中     |
+| Git        | `git://...`              | なし（読み取り専用） | 低     |
+
+#### 想定API
+
+```rust
+use zerogit::Repository;
+use zerogit_remote::{Remote, Credentials};
+
+// クローン
+let repo = Remote::clone(
+    "https://github.com/user/repo.git",
+    "./local-repo",
+    Credentials::token("ghp_xxxx"),
+)?;
+
+// フェッチ
+let remote = repo.remote("origin")?;
+remote.fetch(&Credentials::ssh_key("~/.ssh/id_ed25519"))?;
+
+// プッシュ
+remote.push("main", &Credentials::token("ghp_xxxx"))?;
+```
+
+#### 技術的な実装要素
+
+```
+Smart HTTP Protocol:
+┌─────────┐                              ┌─────────┐
+│ Client  │  GET /info/refs              │ Server  │
+│         │ ───────────────────────────> │         │
+│         │  200 OK (refs + capabilities)│         │
+│         │ <─────────────────────────── │         │
+│         │                              │         │
+│         │  POST /git-upload-pack       │         │
+│         │  (want/have negotiation)     │         │
+│         │ ───────────────────────────> │         │
+│         │  200 OK (packfile)           │         │
+│         │ <─────────────────────────── │         │
+└─────────┘                              └─────────┘
+```
 
 #### 代替アプローチ
 
-これらの操作が必要な場合は、システムのgitコマンドと連携できます：
+リモート操作が必要だが `zerogit-remote` を待てない場合、システムのgitコマンドと連携できます：
 
 ```rust
 use std::process::Command;

@@ -20,6 +20,7 @@
 //! let auto_crlf = config.get_bool("core", "autocrlf").unwrap_or(false);
 //! ```
 
+pub(crate) mod edit;
 mod parser;
 
 use std::collections::{BTreeMap, HashSet};
@@ -37,6 +38,10 @@ pub struct Config {
     /// Configuration entries stored as section -> subsection -> key -> value.
     /// Subsection is empty string for sections without subsection.
     entries: BTreeMap<String, BTreeMap<String, BTreeMap<String, String>>>,
+    /// Every value in the order read, for multi-valued keys such as
+    /// `remote.<name>.fetch`: (section, subsection, key, value), with section
+    /// and key lowercased.
+    all: Vec<(String, String, String, String)>,
 }
 
 impl Config {
@@ -44,6 +49,7 @@ impl Config {
     pub fn new() -> Self {
         Config {
             entries: BTreeMap::new(),
+            all: Vec::new(),
         }
     }
 
@@ -196,6 +202,31 @@ impl Config {
             .map(|s| s.as_str())
     }
 
+    /// Gets every value of a multi-valued key, in the order they appear
+    /// (across files, system first and local last, as Git reads them).
+    ///
+    /// `subsection` is `""` for keys without one.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use zerogit::config::Config;
+    ///
+    /// let config = Config::from_file(".git/config").unwrap();
+    /// for refspec in config.get_all("remote", "origin", "fetch") {
+    ///     println!("{}", refspec);
+    /// }
+    /// ```
+    pub fn get_all(&self, section: &str, subsection: &str, key: &str) -> Vec<&str> {
+        let section_lower = section.to_lowercase();
+        let key_lower = key.to_lowercase();
+        self.all
+            .iter()
+            .filter(|(s, sub, k, _)| *s == section_lower && sub == subsection && *k == key_lower)
+            .map(|(_, _, _, v)| v.as_str())
+            .collect()
+    }
+
     /// Gets a configuration value as a boolean.
     ///
     /// Git config supports various boolean representations:
@@ -321,6 +352,12 @@ impl Config {
         let section_lower = section.to_lowercase();
         let key_lower = key.to_lowercase();
 
+        self.all.push((
+            section_lower.clone(),
+            subsection.to_string(),
+            key_lower.clone(),
+            value.to_string(),
+        ));
         self.entries
             .entry(section_lower)
             .or_default()
@@ -333,12 +370,8 @@ impl Config {
     ///
     /// Values from `other` will override values in `self`.
     pub fn merge(&mut self, other: &Config) {
-        for (section, subsections) in &other.entries {
-            for (subsection, keys) in subsections {
-                for (key, value) in keys {
-                    self.set(section, subsection, key, value);
-                }
-            }
+        for (section, subsection, key, value) in &other.all {
+            self.set(section, subsection, key, value);
         }
     }
 }

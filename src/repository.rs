@@ -2058,6 +2058,33 @@ impl Repository {
         self.delete_loose_ref(&ref_name, "refs/tags")
     }
 
+    /// Removes a reference (and its peeled line) from `packed-refs`.
+    pub(crate) fn remove_packed_ref(&self, ref_name: &str) -> Result<()> {
+        let path = self.git_dir.join("packed-refs");
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = String::with_capacity(content.len());
+        let mut skipping = false;
+        for line in content.lines() {
+            if line.starts_with('^') {
+                if !skipping {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+                continue;
+            }
+            skipping = line.split_once(' ').map(|(_, name)| name) == Some(ref_name);
+            if !skipping {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        write_file_atomic(&path, out.as_bytes())
+    }
+
     /// Deletes a loose reference, its reflog and the directories under
     /// `root` it leaves empty.
     fn delete_loose_ref(&self, ref_name: &str, root: &str) -> Result<()> {

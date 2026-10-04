@@ -23,6 +23,10 @@
 - `create_commit`は、マージ中（`MERGE_HEAD`あり）なら`MERGE_HEAD`を第二親にしてマージ状態を片付ける（reflogは`commit (merge):`）
 - stash: `Repository::stash_save()`（`git stash push`。`StashOptions`でメッセージと未追跡ファイルの対象化を指定）、`stash_list()`、`stash_apply()`（`--index`相当の指定あり）、`stash_pop()`、`stash_drop()`、`StashEntry`、`StashApplyOutcome`。Gitと同じ形式（`refs/stash`とそのreflog、index・未追跡ファイルのコミット）で保存し、Gitとzerogitのどちらで作ったstashも相互に扱える。適用は3-way mergeで行い、コンフリクトはmergeと同じ形で記録する（popはstashを残す）(#30)
 - rebase: `Repository::rebase()`（`git rebase <upstream>`、`--onto`相当）、`rebase_continue()`、`rebase_skip()`、`rebase_abort()`、`is_rebasing()`、`RebaseOutcome`。Gitの既定（mergeバックエンド・非対話）と同じく、upstreamにないコミットを古い順に3-way mergeで付け替え、作者・メッセージを保つ。マージコミットは除外し、upstreamに同じ変更があるコミット（patch-id）は飛ばし、空になったコミットは捨てる。途中の状態を`.git/rebase-merge/`にGitと同じ形式で保存し、zerogit・Gitのどちらからでも再開・スキップ・中止できる。reflog（`rebase (start)`・`(pick)`・`(continue)`・`(finish)`・`(abort)`）と`ORIG_HEAD`もGitと同じ。対話的rebaseは範囲外 (#31)
+- リモート設定: `Repository::remotes()`、`remote()`、`add_remote()`（既定のfetch refspec付き）、`set_remote_url()`、`remove_remote()`（設定・リモート追跡ブランチ・upstream設定を削除）、`branch_upstream()`、`set_branch_upstream()`、`Remote`、`Refspec`（`+`・`^`・`*`のパターン、対応付けと逆引き）(#32)
+- packの受信と送信: `Repository::store_pack()`（受け取ったpackを検証し、deltaを解決してversion 2の`.idx`を作り`objects/pack/`に保存する。thin packは手元のオブジェクトで補う。`.idx`は`git index-pack`の出力と一致する）、`objects_to_send()`・`pack_objects()`（wantsから到達しhavesから到達しないオブジェクトのpackを作る。deltaなし）、`StoredPack` (#32)
+- `Config::get_all()`: 複数値のキー（`remote.<name>.fetch`など）の取得
+- `Error::RemoteNotFound`、`RemoteAlreadyExists`
 - `Error::RebaseInProgress`、`NoRebaseInProgress`、`UnsupportedRebase`
 - `Error::MergeInProgress`、`NoMergeInProgress`、`NotFastForward`、`LocalChangesWouldBeOverwritten`、`UnsupportedMerge`
 - 設定の読み込みで`GIT_CONFIG_NOSYSTEM`・`GIT_CONFIG_SYSTEM`・`GIT_CONFIG_GLOBAL`に従う
@@ -30,7 +34,7 @@
 
 ### Changed
 - crates.ioのパッケージから`issues/`・`docs/`・`tests/`を除外した
-- **破壊的変更**: `Error`に`UnmergedPaths`・`IgnoredPath`・`UnsupportedAttribute`・`IrreversibleLineEndings`・`MergeInProgress`・`NoMergeInProgress`・`NotFastForward`・`LocalChangesWouldBeOverwritten`・`UnsupportedMerge`・`RebaseInProgress`・`NoRebaseInProgress`・`UnsupportedRebase`を追加した
+- **破壊的変更**: `Error`に`UnmergedPaths`・`IgnoredPath`・`UnsupportedAttribute`・`IrreversibleLineEndings`・`MergeInProgress`・`NoMergeInProgress`・`NotFastForward`・`LocalChangesWouldBeOverwritten`・`UnsupportedMerge`・`RebaseInProgress`・`NoRebaseInProgress`・`UnsupportedRebase`・`RemoteNotFound`・`RemoteAlreadyExists`を追加した
 - ブランチ名・タグ名を`git check-ref-format`の規則で検証する（空白、`@{`、`//`、末尾の`.`、`.`で始まる・`.lock`で終わる要素を追加で拒否。ブランチ名の`@`・`HEAD`も拒否）。`a`と`a/b`のように衝突する参照は`RefAlreadyExists`になる
 - グローバル設定は`$XDG_CONFIG_HOME/git/config`の後に`~/.gitconfig`を読む（Gitと同じく`~/.gitconfig`が優先）
 - 作業ツリーの走査で、名前が`.`で始まるファイル・ディレクトリ（`.github/`、`.env.example`など）を除外しない。除外するのは`.git`だけ (#20)
@@ -43,6 +47,7 @@
 - `Repository::add_all`は、HEADにないファイルを含め、作業ツリーにないindexのエントリを削除する（`git add -A`と同じ）
 
 ### Fixed
+- 設定値の解析が、引用符の中のエスケープされた`"`や、値の途中の引用符・末尾の空白を正しく扱っていなかった
 - 作業ツリーの走査がディレクトリへのsymlinkを辿らない（リポジトリ外の走査や無限ループを防ぐ）(#22)
 - コンフリクト中のindexから`create_commit`すると、同名エントリが重複した不正なtreeを作っていた。`UnmergedPaths`を返し、何も書き込まない (#23)
 - コンフリクト中の`checkout`を`UnmergedPaths`で拒否する (#23)

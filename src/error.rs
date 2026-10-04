@@ -174,6 +174,12 @@ pub enum Error {
     /// The rebase state uses something not supported (for example a todo
     /// list with commands other than `pick`, from an interactive rebase).
     UnsupportedRebase(String),
+
+    /// No remote with this name is configured.
+    RemoteNotFound(String),
+
+    /// A remote with this name is already configured.
+    RemoteAlreadyExists(String),
 }
 
 impl fmt::Display for Error {
@@ -258,6 +264,8 @@ impl fmt::Display for Error {
             Error::RebaseInProgress => write!(f, "a rebase is in progress"),
             Error::NoRebaseInProgress => write!(f, "no rebase is in progress"),
             Error::UnsupportedRebase(reason) => write!(f, "unsupported rebase: {}", reason),
+            Error::RemoteNotFound(name) => write!(f, "remote not found: {}", name),
+            Error::RemoteAlreadyExists(name) => write!(f, "remote already exists: {}", name),
             Error::IrreversibleLineEndings(path) => write!(
                 f,
                 "line ending conversion would not round-trip: {}",
@@ -373,6 +381,8 @@ mod tests {
             Error::RebaseInProgress,
             Error::NoRebaseInProgress,
             Error::UnsupportedRebase("reason".to_string()),
+            Error::RemoteNotFound("origin".to_string()),
+            Error::RemoteAlreadyExists("origin".to_string()),
         ];
 
         // All variants should implement Display without panicking

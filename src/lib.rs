@@ -60,9 +60,11 @@ pub mod merge;
 pub mod objects;
 pub mod rebase;
 pub mod refs;
+pub mod remote;
 pub mod repository;
 pub mod stash;
 pub mod status;
+pub mod transfer;
 pub(crate) mod worktree;
 
 // Internal modules (not part of public API)
@@ -92,6 +94,12 @@ pub use log::LogOptions;
 
 // Re-export merge types
 pub use merge::{FastForward, MergeOptions, MergeOutcome};
+
+// Re-export remote types
+pub use remote::{Refspec, Remote};
+
+// Re-export transfer types
+pub use transfer::StoredPack;
 
 // Re-export rebase types
 pub use rebase::RebaseOutcome;

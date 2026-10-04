@@ -208,6 +208,12 @@ fn operations_on_a_v4_index_keep_it_valid_for_git() {
 fn reset_and_checkout_keep_file_modes() {
     let temp = repository(&["run.sh", "plain.txt"]);
     let dir = temp.path();
+    // Make the file executable on disk too, so the working tree is clean.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+    }
     git(dir, &["update-index", "--chmod=+x", "run.sh"]);
     git(dir, &["commit", "-q", "-m", "Executable"]);
     git(dir, &["branch", "feature"]);

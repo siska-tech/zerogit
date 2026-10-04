@@ -158,7 +158,7 @@ impl IgnoreRules {
         if let Some(content) = read_optional(&git_dir.join("info").join("exclude"))? {
             global.push(PatternList::parse(Vec::new(), &content));
         }
-        let icase = config.get_bool("core", "ignorecase").unwrap_or(false);
+        let icase = config.get_bool_or("core", "ignorecase", false);
         Ok(IgnoreRules {
             work_dir: work_dir.to_path_buf(),
             global,

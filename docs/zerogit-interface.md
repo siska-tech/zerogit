@@ -254,7 +254,9 @@ pub fn status(&self) -> Result<Vec<StatusEntry>>
 | エラー | `Error::Io` - ファイルシステムエラー               |
 | エラー | `Error::InvalidIndex` - インデックス読み取りエラー |
 
-作業ツリーの走査は`.git`だけを除外し、名前が`.`で始まるファイルも対象にする。未追跡ファイルには`.gitignore`（各ディレクトリ）・`.git/info/exclude`・`core.excludesFile`（既定は`$XDG_CONFIG_HOME/git/ignore`）をGitと同じ規則・優先順位で適用し、無視されたファイルは`Untracked`に含めない（`git ls-files --others --exclude-standard`と一致）。追跡中のファイルは無視指定に一致しても通常どおり比較する。`core.ignoreCase`がtrueなら大文字・小文字を区別しない。
+作業ツリーの走査は`.git`だけを除外し、名前が`.`で始まるファイルも対象にする。未追跡ファイルには`.gitignore`（各ディレクトリ）・`.git/info/exclude`・`core.excludesFile`（既定は`$XDG_CONFIG_HOME/git/ignore`）をGitと同じ規則・優先順位で適用し、無視されたファイルは`Untracked`に含めない（`git ls-files --others --exclude-standard`と一致）。追跡中のファイルは無視指定に一致しても通常どおり比較する。
+
+作業ツリーのファイルは内容とmodeの両方で比較する。symlinkは辿らず、リンク先パス（区切りは`/`）を内容とするmode `120000`として扱う。実行ビットは`core.fileMode`がtrue（既定）のUnixでのみ参照し、それ以外ではindexのmodeを使う。`checkout`は`core.symlinks`がtrue（既定）ならsymlinkを作成し、falseの場合や作成できない場合はリンク先パスを内容とする通常ファイルを書き出す（indexのmodeは`120000`のまま）。`core.ignoreCase`がtrueなら大文字・小文字を区別しない。
 
 ##### `Repository::is_ignored` / `Repository::ignored_files`
 

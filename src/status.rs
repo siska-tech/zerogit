@@ -7,10 +7,10 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::ignore::IgnoreRules;
 use crate::index::{Index, IndexEntry};
 use crate::infra::{hash_object, read_file};
 use crate::objects::{LooseObjectStore, ObjectStore, ObjectType, Oid, Tree};
+use crate::worktree::Worktree;
 
 /// The status of a file in the working tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,22 +163,20 @@ pub fn compute_status(
 ) -> Result<Vec<StatusEntry>> {
     let git_dir = work_dir.join(".git");
     let config = crate::config::load_config(&git_dir)?;
-    let mut rules = IgnoreRules::load(work_dir, &git_dir, &config)?;
+    let mut worktree = Worktree::load(work_dir, &git_dir, &config)?;
     compute_status_with_store(
-        work_dir,
         &ObjectStore::from_loose(store),
         head_tree_oid,
         index,
-        &mut rules,
+        &mut worktree,
     )
 }
 
 pub(crate) fn compute_status_with_store(
-    work_dir: &Path,
     store: &ObjectStore,
     head_tree_oid: Option<&Oid>,
     index: Option<&Index>,
-    rules: &mut IgnoreRules,
+    worktree: &mut Worktree,
 ) -> Result<Vec<StatusEntry>> {
     let mut entries = Vec::new();
 
@@ -204,7 +202,7 @@ pub(crate) fn compute_status_with_store(
 
     // Get working tree files
     // Get working tree files: tracked ones, and untracked ones not ignored.
-    let working_files = crate::worktree::scan(work_dir, rules, index, false)?.files;
+    let working_files = worktree.scan(index, false)?.files;
 
     // Collect all paths
     let mut all_paths: HashSet<PathBuf> = HashSet::new();
@@ -266,7 +264,9 @@ pub(crate) fn compute_status_with_store(
             (Some(head_oid), Some(index_entry), true) => {
                 let index_oid = index_entry.oid();
                 let head_modified = head_oid != index_oid;
-                let working_modified = file_modified(work_dir, &path, index_oid)?;
+                // Content or mode (executable bit, symlink) differs from the index.
+                let working_modified = worktree.hash(&path, Some(index_entry.mode()))?
+                    != Some((*index_oid, index_entry.mode()));
 
                 match (head_modified, working_modified) {
                     (false, false) => None, // No changes

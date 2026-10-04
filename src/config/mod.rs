@@ -216,6 +216,15 @@ impl Config {
         self.get_bool_subsection(section, "", key)
     }
 
+    /// Gets a boolean, or `default` when the key is not set or is not a
+    /// valid boolean.
+    pub(crate) fn get_bool_or(&self, section: &str, key: &str, default: bool) -> bool {
+        match self.get(section, key) {
+            Some(value) => parse_bool(value).unwrap_or(default),
+            None => default,
+        }
+    }
+
     /// Gets a configuration value as a boolean from a section with a subsection.
     pub fn get_bool_subsection(&self, section: &str, subsection: &str, key: &str) -> Result<bool> {
         match self.get_subsection(section, subsection, key) {

@@ -3,7 +3,6 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::ignore::IgnoreRules;
 use crate::index::{self, Index, IndexEntry};
 use crate::infra::{read_file, write_file_atomic};
 use crate::log::{LogIterator, LogOptions};
@@ -14,6 +13,7 @@ use crate::status::{
     compute_status_with_store as compute_status, flatten_tree_with_store as flatten_tree,
     StatusEntry,
 };
+use crate::worktree::Worktree;
 
 use std::fs;
 
@@ -801,18 +801,17 @@ impl Repository {
         };
 
         compute_status(
-            &self.work_dir,
             &store,
             head_tree_oid.as_ref(),
             parsed_index.as_ref(),
-            &mut self.ignore_rules()?,
+            &mut self.worktree()?,
         )
     }
 
-    /// Loads the ignore rules (`.gitignore` files, `.git/info/exclude` and
-    /// `core.excludesFile`) for this working tree.
-    pub(crate) fn ignore_rules(&self) -> Result<IgnoreRules> {
-        IgnoreRules::load(&self.work_dir, &self.git_dir, &self.config()?)
+    /// Loads the working tree: its ignore rules (`.gitignore` files,
+    /// `.git/info/exclude`, `core.excludesFile`) and checkout settings.
+    pub(crate) fn worktree(&self) -> Result<Worktree> {
+        Worktree::load(&self.work_dir, &self.git_dir, &self.config()?)
     }
 
     /// Returns whether a path is ignored by `.gitignore` files,
@@ -838,7 +837,7 @@ impl Repository {
     pub fn is_ignored<P: AsRef<Path>>(&self, path: P) -> Result<bool> {
         let path = path.as_ref();
         let is_dir = self.work_dir.join(path).is_dir();
-        self.ignore_rules()?.is_ignored(path, is_dir)
+        self.worktree()?.rules().is_ignored(path, is_dir)
     }
 
     /// Lists the untracked files that are ignored, like
@@ -852,12 +851,7 @@ impl Repository {
     /// The paths relative to the repository root, sorted.
     pub fn ignored_files(&self) -> Result<Vec<PathBuf>> {
         let index = self.read_index()?;
-        let scan = crate::worktree::scan(
-            &self.work_dir,
-            &mut self.ignore_rules()?,
-            Some(&index),
-            true,
-        )?;
+        let scan = self.worktree()?.scan(Some(&index), true)?;
         Ok(scan.ignored.into_iter().collect())
     }
 
@@ -920,84 +914,27 @@ impl Repository {
     }
 
     fn add_impl(&self, path: &Path, force: bool) -> Result<()> {
-        let full_path = self.work_dir.join(path);
+        let mut idx = self.read_index()?;
+        let mut worktree = self.worktree()?;
+        let tracked_mode = idx.get(path).map(IndexEntry::mode);
 
-        // Check if file exists. A tracked file that was deleted has its
-        // removal staged, as `git add` does; this also resolves a conflict
-        // by deletion.
-        if !full_path.exists() {
-            let mut idx = self.read_index()?;
+        // A tracked file that was deleted has its removal staged, as
+        // `git add` does; this also resolves a conflict by deletion.
+        let Some(file) = worktree.read(path, tracked_mode)? else {
             if idx.remove(path) {
                 return self.write_index(&idx);
             }
             return Err(Error::PathNotFound(path.to_path_buf()));
-        }
-
-        if !force {
-            let tracked = self.read_index()?.get(path).is_some();
-            if !tracked && self.ignore_rules()?.is_ignored(path, false)? {
-                return Err(Error::IgnoredPath(path.to_path_buf()));
-            }
-        }
-
-        // Read file content
-        let content = read_file(&full_path)?;
-
-        // Get file metadata
-        let metadata = std::fs::metadata(&full_path)?;
-
-        // Write blob to object store
-        let store = self.object_store();
-        let oid = store.write(ObjectType::Blob, &content)?;
-
-        // Determine file mode
-        #[cfg(unix)]
-        let mode = {
-            use std::os::unix::fs::PermissionsExt;
-            if metadata.permissions().mode() & 0o111 != 0 {
-                FileMode::Executable
-            } else {
-                FileMode::Regular
-            }
         };
-        #[cfg(not(unix))]
-        let mode = FileMode::Regular;
 
-        // Get timestamps
-        let mtime = metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let ctime = metadata
-            .created()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(mtime);
+        if !force && tracked_mode.is_none() && worktree.rules().is_ignored(path, false)? {
+            return Err(Error::IgnoredPath(path.to_path_buf()));
+        }
 
-        // Create index entry
-        let entry = IndexEntry::new(
-            ctime,
-            mtime,
-            0, // dev (not portable, use 0)
-            0, // ino (not portable, use 0)
-            mode,
-            0, // uid (not portable, use 0)
-            0, // gid (not portable, use 0)
-            content.len() as u32,
-            oid,
-            path.to_path_buf(),
-            0, // stage (normal entry)
-        );
-
-        // Read current index, add entry, and write back
-        let mut idx = self.read_index()?;
-        idx.add(entry);
-        self.write_index(&idx)?;
-
-        Ok(())
+        // Write the blob and stage it.
+        let oid = self.object_store().write(ObjectType::Blob, &file.content)?;
+        idx.add(file.index_entry(path.to_path_buf(), oid));
+        self.write_index(&idx)
     }
 
     /// Adds all modified and untracked files to the staging area.
@@ -1025,61 +962,17 @@ impl Repository {
 
         // Get working tree files: tracked ones, and untracked ones that are
         // not ignored.
-        let working_files =
-            crate::worktree::scan(&self.work_dir, &mut self.ignore_rules()?, Some(&idx), false)?
-                .files;
+        let mut worktree = self.worktree()?;
+        let working_files = worktree.scan(Some(&idx), false)?.files;
 
         // Add all working tree files
         for path in &working_files {
-            let full_path = self.work_dir.join(path);
-            let content = read_file(&full_path)?;
-            let metadata = std::fs::metadata(&full_path)?;
-
-            // Write blob
-            let oid = store.write(ObjectType::Blob, &content)?;
-
-            // Determine file mode
-            #[cfg(unix)]
-            let mode = {
-                use std::os::unix::fs::PermissionsExt;
-                if metadata.permissions().mode() & 0o111 != 0 {
-                    FileMode::Executable
-                } else {
-                    FileMode::Regular
-                }
+            let tracked_mode = idx.get(path).map(IndexEntry::mode);
+            let Some(file) = worktree.read(path, tracked_mode)? else {
+                continue;
             };
-            #[cfg(not(unix))]
-            let mode = FileMode::Regular;
-
-            // Get timestamps
-            let mtime = metadata
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let ctime = metadata
-                .created()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(mtime);
-
-            let entry = IndexEntry::new(
-                ctime,
-                mtime,
-                0,
-                0,
-                mode,
-                0,
-                0,
-                content.len() as u32,
-                oid,
-                path.clone(),
-                0,
-            );
-
-            idx.add(entry);
+            let oid = store.write(ObjectType::Blob, &file.content)?;
+            idx.add(file.index_entry(path.clone(), oid));
         }
 
         // Handle deleted files: remove index entries (including conflict
@@ -1780,103 +1673,59 @@ impl Repository {
     /// Updates the working tree and index to match a tree object.
     fn checkout_tree(&self, tree_oid: &Oid) -> Result<()> {
         let store = self.object_store();
+        let worktree = self.worktree()?;
 
-        // Get current HEAD tree (if any) to compare
-        let current_tree = self.head_tree_oid()?;
-
-        // Flatten both trees for comparison
-        let mut current_files: BTreeMap<PathBuf, Oid> = BTreeMap::new();
-        if let Some(current_oid) = &current_tree {
-            flatten_tree(&store, current_oid, Path::new(""), &mut current_files)?;
-        }
-
-        let mut target_files: BTreeMap<PathBuf, Oid> = BTreeMap::new();
-        flatten_tree(&store, tree_oid, Path::new(""), &mut target_files)?;
+        // Flatten the current HEAD tree (if any) and the target tree.
+        let current_files = match self.head_tree_oid()? {
+            Some(oid) => self.flatten_tree(&self.tree(&oid.to_hex())?, PathBuf::new())?,
+            None => HashMap::new(),
+        };
+        let target_files: BTreeMap<PathBuf, crate::diff::FlatEntry> = self
+            .flatten_tree(&self.tree(&tree_oid.to_hex())?, PathBuf::new())?
+            .into_iter()
+            .collect();
 
         // Remove files that exist in current but not in target
         for path in current_files.keys() {
             if !target_files.contains_key(path) {
-                let full_path = self.work_dir.join(path);
-                if full_path.exists() {
-                    fs::remove_file(&full_path)?;
-                }
-                // Clean up empty parent directories
-                let mut parent = full_path.parent();
-                while let Some(dir) = parent {
-                    if dir == self.work_dir {
-                        break;
-                    }
-                    if dir.exists() && dir.read_dir()?.next().is_none() {
-                        fs::remove_dir(dir)?;
-                    } else {
-                        break;
-                    }
-                    parent = dir.parent();
-                }
+                worktree.remove(path)?;
             }
         }
 
         // Create/update files in target tree
-        for (path, oid) in &target_files {
-            let full_path = self.work_dir.join(path);
-
-            // Skip if file already has the correct content
-            if let Some(current_oid) = current_files.get(path) {
-                if current_oid == oid {
+        for (path, entry) in &target_files {
+            // Skip if the file already has the correct content and mode
+            if let Some(current) = current_files.get(path) {
+                if current.oid == entry.oid
+                    && current.mode == entry.mode
+                    && worktree.metadata(path)?.is_some()
+                {
                     continue;
                 }
             }
-
-            // Ensure parent directories exist
-            if let Some(parent) = full_path.parent() {
-                fs::create_dir_all(parent)?;
+            if entry.mode == FileMode::Submodule {
+                // A submodule is checked out as an empty directory, as Git does.
+                fs::create_dir_all(self.work_dir.join(path))?;
+                continue;
             }
-
-            // Read blob content and write to working tree
-            let raw = store.read(oid)?;
-            write_file_atomic(&full_path, &raw.content)?;
+            let raw = store.read(&entry.oid)?;
+            worktree.write(path, &raw.content, entry.mode)?;
         }
 
         // Rebuild index from target tree
         // Keep the index version the user configured (e.g. v4).
         let version = self.read_index()?.version();
-        let target_modes = self.tree_modes(Some(tree_oid))?;
         let mut idx = Index::empty(version);
-        for (path, oid) in &target_files {
-            let full_path = self.work_dir.join(path);
-            let metadata = fs::metadata(&full_path)?;
-
-            let mtime = metadata
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let ctime = metadata
-                .created()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(mtime);
-
-            let raw = store.read(oid)?;
-            let entry = IndexEntry::new(
-                ctime,
-                mtime,
-                0,
-                0,
-                target_modes
-                    .get(&normalize_index_path(path))
-                    .copied()
-                    .unwrap_or(FileMode::Regular),
-                0,
-                0,
-                raw.content.len() as u32,
-                *oid,
-                path.clone(),
-                0,
-            );
-            idx.add(entry);
+        for (path, entry) in &target_files {
+            let index_path = normalize_index_path(path);
+            let index_entry = match worktree.read(path, Some(entry.mode))? {
+                // The stat data of the file just written, with the tree's mode.
+                Some(file) => file
+                    .index_entry(index_path, entry.oid)
+                    .with_mode(entry.mode),
+                None => IndexEntry::new(0, 0, 0, 0, entry.mode, 0, 0, 0, entry.oid, index_path, 0),
+            };
+            idx.add(index_entry);
         }
 
         self.write_index(&idx)?;

@@ -11,17 +11,22 @@
 - `.gitignore`・`.git/info/exclude`・`core.excludesFile`の解釈（否定、ディレクトリ指定、固定、`*`・`?`・`[...]`・`**`、エスケープ、`core.ignoreCase`）。status・`add_all`・作業ツリーとの差分に適用する (#20)
 - `Repository::is_ignored()`、`Repository::ignored_files()`、`Repository::add_force()`
 - `Error::IgnoredPath`: 無視された未追跡ファイルを`add`した場合のエラー
+- symlinkをGitと同じくmode `120000`・リンク先パスを内容とするBlobとして扱う。`add`/`add_all`・status・作業ツリーとの差分・`checkout`に対応。リンク切れも`add`できる。`core.symlinks=false`や作成できない環境では、リンク先パスを内容とする通常ファイルとして書き出す (#22)
 
 ### Changed
 - crates.ioのパッケージから`issues/`・`docs/`・`tests/`を除外した
 - **破壊的変更**: `Error`に`UnmergedPaths`・`IgnoredPath`を追加した
 - 作業ツリーの走査で、名前が`.`で始まるファイル・ディレクトリ（`.github/`、`.env.example`など）を除外しない。除外するのは`.git`だけ (#20)
 - `Repository::add`は、無視された未追跡ファイルを`IgnoredPath`で拒否する（`git add`と同じ）
+- status・作業ツリーとの差分は、内容に加えてmode（実行ビット、symlink）の違いも変更として報告する。`core.fileMode=false`（およびUnix以外）ではindexのmodeを使う
+- `checkout`は実行ビットを設定し、ファイルとsymlinkの置き換えに対応する
+- indexに書くサイズを作業ツリー上のファイルサイズにし、時刻のナノ秒も記録する
 - `Index::add`はstage 0の追加で同じパスの全stageを置き換え、`Index::remove`は全stageを削除する。エントリはGitと同じ順（パスのバイト列、次にstage）に保つ
 - `Repository::add`は、作業ツリーから削除された追跡中のファイルの削除をステージする（`git add`と同じ）
 - `Repository::add_all`は、HEADにないファイルを含め、作業ツリーにないindexのエントリを削除する（`git add -A`と同じ）
 
 ### Fixed
+- 作業ツリーの走査がディレクトリへのsymlinkを辿らない（リポジトリ外の走査や無限ループを防ぐ）(#22)
 - コンフリクト中のindexから`create_commit`すると、同名エントリが重複した不正なtreeを作っていた。`UnmergedPaths`を返し、何も書き込まない (#23)
 - コンフリクト中の`checkout`を`UnmergedPaths`で拒否する (#23)
 - `status()`がコンフリクト中のパスをstage 3の内容で比較していた。`Modified`として1件報告する (#23)

@@ -1,12 +1,13 @@
 //! Integration tests for Config module.
 
+mod common;
+
+use common::fixtures::fixture;
+
 use std::fs;
 use tempfile::TempDir;
 use zerogit::config::{Config, ConfigLevel};
 use zerogit::repository::Repository;
-
-/// Path to the simple test fixture
-const SIMPLE_FIXTURE: &str = "tests/fixtures/simple";
 
 // CF-001: Config::from_str parses basic config
 #[test]
@@ -75,16 +76,16 @@ fn test_cf003_get_bool() {
 
     let config = Config::from_str(content).unwrap();
 
-    assert_eq!(config.get_bool("core", "bare").unwrap(), false);
-    assert_eq!(config.get_bool("core", "autocrlf").unwrap(), true);
-    assert_eq!(config.get_bool("core", "symlinks").unwrap(), true);
-    assert_eq!(config.get_bool("core", "ignorecase").unwrap(), false);
-    assert_eq!(config.get_bool("core", "precomposeunicode").unwrap(), true);
-    assert_eq!(config.get_bool("core", "logallrefupdates").unwrap(), false);
-    assert_eq!(config.get_bool("core", "filemode").unwrap(), true);
-    assert_eq!(config.get_bool("core", "excludesfile").unwrap(), false);
+    assert!(!config.get_bool("core", "bare").unwrap());
+    assert!(config.get_bool("core", "autocrlf").unwrap());
+    assert!(config.get_bool("core", "symlinks").unwrap());
+    assert!(!config.get_bool("core", "ignorecase").unwrap());
+    assert!(config.get_bool("core", "precomposeunicode").unwrap());
+    assert!(!config.get_bool("core", "logallrefupdates").unwrap());
+    assert!(config.get_bool("core", "filemode").unwrap());
+    assert!(!config.get_bool("core", "excludesfile").unwrap());
     // Non-existent key returns false
-    assert_eq!(config.get_bool("core", "nonexistent").unwrap(), false);
+    assert!(!config.get_bool("core", "nonexistent").unwrap());
 }
 
 // CF-004: Config::get_int parses integer values with suffixes
@@ -350,7 +351,7 @@ fn test_cf015_config_level_paths() {
 // CF-016: Repository::config() returns merged configuration
 #[test]
 fn test_cf016_repository_config() {
-    let repo = Repository::open(SIMPLE_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("simple")).unwrap();
     let config = repo.config();
 
     // Should succeed even if only local config exists
@@ -360,7 +361,7 @@ fn test_cf016_repository_config() {
 // CF-017: Repository::config_local() returns only local configuration
 #[test]
 fn test_cf017_repository_config_local() {
-    let repo = Repository::open(SIMPLE_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("simple")).unwrap();
     let config = repo.config_local();
 
     assert!(config.is_ok());

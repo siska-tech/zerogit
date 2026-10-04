@@ -4,7 +4,7 @@ mod common;
 
 use common::*;
 use std::fs;
-use zerogit::{FileStatus, Repository};
+use zerogit::Repository;
 
 /// Commits a symlink entry `link -> target.txt` on a new branch `with-link`
 /// without creating a link on disk, then returns to `main`.

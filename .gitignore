@@ -16,15 +16,8 @@ Cargo.lock
 .DS_Store
 Thumbs.db
 
-# Test fixtures (generated)
-tests/fixtures/simple/
-tests/fixtures/empty/
-tests/fixtures/branches/
-tests/fixtures/remotes/
-tests/fixtures/tags/
-tests/fixtures/diff/
-tests/fixtures/rename/
-tests/fixtures/merge/
+# Test fixtures (created by the tests on first use)
+tests/fixtures/*/
 
 # Claude Code
 .claude/

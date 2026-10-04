@@ -2,14 +2,15 @@
 //!
 //! Test cases: RP-020 to RP-024
 
+mod common;
+
+use common::fixtures::fixture;
+
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
 use zerogit::repository::Repository;
 use zerogit::status::FileStatus;
-
-/// Path to the simple test fixture
-const SIMPLE_FIXTURE: &str = "tests/fixtures/simple";
 
 /// Helper to create a minimal git repository for testing.
 fn create_test_repo() -> TempDir {
@@ -50,7 +51,7 @@ fn test_rp021_modified_files_detected() {
     let temp_path = temp.path();
 
     // Copy the fixture
-    copy_dir_all(SIMPLE_FIXTURE, temp_path).unwrap();
+    copy_dir_all(fixture("simple"), temp_path).unwrap();
 
     // Modify a tracked file
     fs::write(temp_path.join("README.md"), "Modified content\n").unwrap();
@@ -79,7 +80,7 @@ fn test_rp022_deleted_files_detected() {
     let temp_path = temp.path();
 
     // Copy the fixture
-    copy_dir_all(SIMPLE_FIXTURE, temp_path).unwrap();
+    copy_dir_all(fixture("simple"), temp_path).unwrap();
 
     // Delete a tracked file
     fs::remove_file(temp_path.join("README.md")).unwrap();
@@ -108,7 +109,7 @@ fn test_rp023_multiple_status_types() {
     let temp_path = temp.path();
 
     // Copy the fixture
-    copy_dir_all(SIMPLE_FIXTURE, temp_path).unwrap();
+    copy_dir_all(fixture("simple"), temp_path).unwrap();
 
     // Create an untracked file
     fs::write(temp_path.join("untracked.txt"), "untracked").unwrap();
@@ -235,14 +236,14 @@ fn sha1_hash(data: &[u8]) -> [u8; 20] {
 
         let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
 
-        for i in 0..80 {
+        for (i, &wi) in w.iter().enumerate() {
             let (f, k) = match i {
                 0..=19 => ((b & c) | ((!b) & d), Wrapping(0x5A827999u32)),
                 20..=39 => (b ^ c ^ d, Wrapping(0x6ED9EBA1u32)),
                 40..=59 => ((b & c) | (b & d) | (c & d), Wrapping(0x8F1BBCDCu32)),
                 _ => (b ^ c ^ d, Wrapping(0xCA62C1D6u32)),
             };
-            let temp = Wrapping(a.0.rotate_left(5)) + f + e + k + Wrapping(w[i]);
+            let temp = Wrapping(a.0.rotate_left(5)) + f + e + k + Wrapping(wi);
             e = d;
             d = c;
             c = Wrapping(b.0.rotate_left(30));

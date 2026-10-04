@@ -1,31 +1,25 @@
 //! Integration tests for Repository module.
 
+mod common;
+
+use common::fixtures::fixture;
+
 use std::fs;
-use std::path::Path;
 use tempfile::TempDir;
 use zerogit::error::Error;
 use zerogit::repository::Repository;
 
-/// Path to the simple test fixture
-const SIMPLE_FIXTURE: &str = "tests/fixtures/simple";
-
-/// Path to the branches test fixture
-const BRANCHES_FIXTURE: &str = "tests/fixtures/branches";
-
-/// Path to the empty test fixture
-const EMPTY_FIXTURE: &str = "tests/fixtures/empty";
-
 // RP-001: Repository::open with valid repository returns Ok
 #[test]
 fn test_rp001_open_valid_repository() {
-    let repo = Repository::open(SIMPLE_FIXTURE);
+    let repo = Repository::open(fixture("simple"));
     assert!(repo.is_ok(), "Should open valid repository");
 }
 
 // RP-002: Repository::open with .git directory path returns Ok
 #[test]
 fn test_rp002_open_git_dir_path() {
-    let git_dir = Path::new(SIMPLE_FIXTURE).join(".git");
+    let git_dir = fixture("simple").join(".git");
     let repo = Repository::open(&git_dir);
     assert!(repo.is_ok(), "Should open repository via .git path");
 
@@ -58,7 +52,7 @@ fn test_rp003_open_invalid_path() {
 #[test]
 fn test_rp004_discover_from_subdir() {
     // Create a subdirectory in the simple fixture if it doesn't exist
-    let subdir = Path::new(SIMPLE_FIXTURE).join("subdir");
+    let subdir = fixture("simple").join("subdir");
     fs::create_dir_all(&subdir).ok();
 
     let repo = Repository::discover(&subdir);
@@ -66,7 +60,7 @@ fn test_rp004_discover_from_subdir() {
 
     let repo = repo.unwrap();
     // The path should point to the simple fixture root
-    let simple_path = Path::new(SIMPLE_FIXTURE).canonicalize().unwrap();
+    let simple_path = fixture("simple").canonicalize().unwrap();
     assert_eq!(
         repo.path().canonicalize().unwrap(),
         simple_path,
@@ -92,8 +86,8 @@ fn test_rp005_discover_no_repository() {
 // RP-006: Repository::path returns repository root
 #[test]
 fn test_rp006_path_returns_root() {
-    let repo = Repository::open(SIMPLE_FIXTURE).unwrap();
-    let expected_path = Path::new(SIMPLE_FIXTURE).canonicalize().unwrap();
+    let repo = Repository::open(fixture("simple")).unwrap();
+    let expected_path = fixture("simple").canonicalize().unwrap();
 
     assert_eq!(
         repo.path().canonicalize().unwrap(),
@@ -111,17 +105,14 @@ fn test_rp006_path_returns_root() {
 // RP-007: Repository::git_dir returns .git path
 #[test]
 fn test_rp007_git_dir_returns_dot_git() {
-    let repo = Repository::open(SIMPLE_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("simple")).unwrap();
 
     assert!(
         repo.git_dir().ends_with(".git"),
         "git_dir() should end with .git"
     );
 
-    let expected_git_dir = Path::new(SIMPLE_FIXTURE)
-        .join(".git")
-        .canonicalize()
-        .unwrap();
+    let expected_git_dir = fixture("simple").join(".git").canonicalize().unwrap();
     assert_eq!(
         repo.git_dir().canonicalize().unwrap(),
         expected_git_dir,
@@ -132,21 +123,21 @@ fn test_rp007_git_dir_returns_dot_git() {
 // Additional: Test with branches fixture
 #[test]
 fn test_open_branches_fixture() {
-    let repo = Repository::open(BRANCHES_FIXTURE);
+    let repo = Repository::open(fixture("branches"));
     assert!(repo.is_ok(), "Should open branches fixture");
 }
 
 // Additional: Test with empty fixture
 #[test]
 fn test_open_empty_fixture() {
-    let repo = Repository::open(EMPTY_FIXTURE);
+    let repo = Repository::open(fixture("empty"));
     assert!(repo.is_ok(), "Should open empty fixture");
 }
 
 // Additional: discover from current directory
 #[test]
 fn test_discover_from_repo_root() {
-    let repo = Repository::discover(SIMPLE_FIXTURE);
+    let repo = Repository::discover(fixture("simple"));
     assert!(
         repo.is_ok(),
         "Should discover repository when starting from root"
@@ -157,7 +148,7 @@ fn test_discover_from_repo_root() {
 #[test]
 fn test_discover_from_deep_subdir() {
     // Create a deep subdirectory
-    let deep_subdir = Path::new(SIMPLE_FIXTURE).join("a/b/c/d");
+    let deep_subdir = fixture("simple").join("a/b/c/d");
     fs::create_dir_all(&deep_subdir).ok();
 
     let repo = Repository::discover(&deep_subdir);
@@ -167,7 +158,7 @@ fn test_discover_from_deep_subdir() {
     );
 
     let repo = repo.unwrap();
-    let simple_path = Path::new(SIMPLE_FIXTURE).canonicalize().unwrap();
+    let simple_path = fixture("simple").canonicalize().unwrap();
     assert_eq!(
         repo.path().canonicalize().unwrap(),
         simple_path,
@@ -175,7 +166,7 @@ fn test_discover_from_deep_subdir() {
     );
 
     // Clean up
-    fs::remove_dir_all(Path::new(SIMPLE_FIXTURE).join("a")).ok();
+    fs::remove_dir_all(fixture("simple").join("a")).ok();
 }
 
 // RP-008: Repository::init creates a new repository

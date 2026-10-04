@@ -4,6 +4,8 @@
 
 #![allow(dead_code)]
 
+pub mod fixtures;
+
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};

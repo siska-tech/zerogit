@@ -64,7 +64,7 @@ impl Config {
     /// A `Config` instance, or an error if the file cannot be read or parsed.
     ///
     /// Note: This method does not process include directives. Use
-    /// [`from_file_with_includes`] to process includes.
+    /// [`Self::from_file_with_includes`] to process includes.
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = read_file(path.as_ref())?;
         let text = String::from_utf8(content).map_err(|_| Error::InvalidUtf8)?;
@@ -654,19 +654,19 @@ mod tests {
 
     #[test]
     fn test_parse_bool() {
-        assert_eq!(parse_bool("true").unwrap(), true);
-        assert_eq!(parse_bool("True").unwrap(), true);
-        assert_eq!(parse_bool("TRUE").unwrap(), true);
-        assert_eq!(parse_bool("yes").unwrap(), true);
-        assert_eq!(parse_bool("on").unwrap(), true);
-        assert_eq!(parse_bool("1").unwrap(), true);
+        assert!(parse_bool("true").unwrap());
+        assert!(parse_bool("True").unwrap());
+        assert!(parse_bool("TRUE").unwrap());
+        assert!(parse_bool("yes").unwrap());
+        assert!(parse_bool("on").unwrap());
+        assert!(parse_bool("1").unwrap());
 
-        assert_eq!(parse_bool("false").unwrap(), false);
-        assert_eq!(parse_bool("False").unwrap(), false);
-        assert_eq!(parse_bool("no").unwrap(), false);
-        assert_eq!(parse_bool("off").unwrap(), false);
-        assert_eq!(parse_bool("0").unwrap(), false);
-        assert_eq!(parse_bool("").unwrap(), false);
+        assert!(!parse_bool("false").unwrap());
+        assert!(!parse_bool("False").unwrap());
+        assert!(!parse_bool("no").unwrap());
+        assert!(!parse_bool("off").unwrap());
+        assert!(!parse_bool("0").unwrap());
+        assert!(!parse_bool("").unwrap());
 
         assert!(parse_bool("invalid").is_err());
     }
@@ -695,10 +695,10 @@ mod tests {
         config.set("core", "", "autocrlf", "true");
         config.set("core", "", "bare", "false");
 
-        assert_eq!(config.get_bool("core", "autocrlf").unwrap(), true);
-        assert_eq!(config.get_bool("core", "bare").unwrap(), false);
+        assert!(config.get_bool("core", "autocrlf").unwrap());
+        assert!(!config.get_bool("core", "bare").unwrap());
         // Non-existent key returns false
-        assert_eq!(config.get_bool("core", "nonexistent").unwrap(), false);
+        assert!(!config.get_bool("core", "nonexistent").unwrap());
     }
 
     #[test]

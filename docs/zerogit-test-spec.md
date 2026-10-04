@@ -74,7 +74,7 @@ jobs:
 
 ### 2.3 テストフィクスチャ
 
-テスト用Gitリポジトリは `tests/fixtures/create_fixtures.sh` で生成する（git管理外）。`simple`、`empty`、`branches`、`remotes`、`tags`、`diff`、`rename`、`merge`がある。生成時はユーザー・システムのGit設定と自動メンテナンスを無効にし、作成者と日時を固定する。
+テスト用Gitリポジトリは、テストが `tests/common/fixtures.rs` の `fixture(name)` を呼んだときに、未作成ならGit CLIで `tests/fixtures/<name>` に生成する（git管理外）。事前のスクリプト実行は不要で、bashにも依存しない。`simple`、`empty`、`branches`、`remotes`、`tags`、`diff`、`rename`、`merge`がある。生成時はユーザー・システムのGit設定と自動メンテナンスを無効にし、作成者と日時を固定する。
 
 Phase 3のテスト（`pack_*`、`packed_refs_test`、`blob_diff_test`、`rename_test`、`document_flow_test`）は、各テストが一時ディレクトリにGit CLIでリポジトリを作る。Git CLIはfixture生成と期待値の比較にだけ使い、製品コードからは呼ばない。テスト中はバックグラウンドの自動repackを防ぐため、`maintenance.auto=false`と`gc.auto=0`を環境変数で与える。
 
@@ -86,41 +86,22 @@ Phase 3のテスト（`pack_*`、`packed_refs_test`、`blob_diff_test`、`rename
 | `rename_test` | `git diff --raw -M100%`との旧新パス・旧新modeの一致 |
 | `document_flow_test` | 文書差分フロー、OID固定、破損・省略・未対応を空の差分にしないこと |
 
-### 2.4 フィクスチャ生成スクリプト
+### 2.4 フィクスチャの生成
 
-```bash
-#!/bin/bash
-# tests/fixtures/create_fixtures.sh
+```rust
+mod common;
 
-# simple: 基本リポジトリ
-mkdir -p simple && cd simple
-git init
-echo "Hello" > README.md
-git add README.md
-git commit -m "Initial commit"
-echo "World" >> README.md
-git add README.md
-git commit -m "Second commit"
-cd ..
+use common::fixtures::fixture;
 
-# empty: 空リポジトリ
-mkdir -p empty && cd empty
-git init
-cd ..
-
-# branches: 複数ブランチ
-mkdir -p branches && cd branches
-git init
-echo "main" > file.txt
-git add file.txt
-git commit -m "Main commit"
-git checkout -b feature
-echo "feature" > feature.txt
-git add feature.txt
-git commit -m "Feature commit"
-git checkout main
-cd ..
+#[test]
+fn opens_simple_fixture() {
+    // 初回呼び出しで tests/fixtures/simple を作成し、以降は再利用する
+    let repo = Repository::open(fixture("simple")).unwrap();
+    assert!(repo.head().is_ok());
+}
 ```
+
+生成は一時ディレクトリ（`.<name>-<pid>`）で行ってから所定の名前に移すため、複数のテストバイナリが並行しても作りかけのリポジトリは見えない。
 
 ---
 
@@ -815,13 +796,11 @@ open tarpaulin-report.html
 ### 5.3 フィクスチャ準備
 
 ```bash
-# フィクスチャ生成
-cd tests/fixtures
-./create_fixtures.sh
+# フィクスチャは cargo test の初回実行時に自動生成される
 
 # フィクスチャ検証
-git -C simple log --oneline
-git -C branches branch -a
+git -C tests/fixtures/simple log --oneline
+git -C tests/fixtures/branches branch -a
 ```
 
 ---
@@ -851,10 +830,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
-      - name: Setup fixtures
-        run: |
-          cd tests/fixtures
-          bash create_fixtures.sh
       - name: Run tests
         run: cargo test --all-features
 
@@ -865,10 +840,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install tarpaulin
         run: cargo install cargo-tarpaulin
-      - name: Setup fixtures
-        run: |
-          cd tests/fixtures
-          bash create_fixtures.sh
       - name: Generate coverage
         run: cargo tarpaulin --out Xml
       - name: Upload coverage
@@ -879,5 +850,5 @@ jobs:
 
 - [ ] 全テストがパス
 - [ ] カバレッジ80%以上
-- [ ] Clippy警告なし
+- [ ] Clippy警告なし（`--all-targets`）・rustdoc警告なし
 - [ ] rustfmtフォーマット済み

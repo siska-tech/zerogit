@@ -524,31 +524,29 @@ push(&repo, "origin", &["main"], &PushOptions::new())?;
 git clone https://github.com/siska-tech/zerogit
 cd zerogit
 
-# テスト用フィクスチャの準備
-cd tests/fixtures
-bash create_fixtures.sh
-cd ../..
-
-# テスト実行
+# テスト実行（テスト用フィクスチャは初回実行時に自動で作られる）
 cargo test
 
-# フォーマットとLint
+# フォーマット・Lint・ドキュメント（CIと同じ検査）
 cargo fmt
-cargo clippy
+cargo clippy --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```
+
+テストの実行には `git` コマンドが必要です。フィクスチャの作成と期待値の比較に使います。
 
 ### プルリクエスト
 
 1. Issueを作成して変更内容を議論
 2. フォークしてfeatureブランチを作成
 3. 変更を実装（テスト必須）
-4. `cargo fmt` と `cargo clippy` を実行
+4. `cargo fmt`・`cargo clippy --all-targets`・`cargo doc` を実行
 5. プルリクエストを送信
 
 ### コーディング規約
 
 - `cargo fmt` でフォーマット
-- `cargo clippy` の警告をゼロに
+- `cargo clippy --all-targets` と `cargo doc` の警告をゼロに
 - 公開APIには必ずドキュメントコメント
 - 新機能にはテストを追加
 

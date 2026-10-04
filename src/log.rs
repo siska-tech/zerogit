@@ -657,7 +657,7 @@ mod tests {
             "committer Test User <test@example.com> {} +0000\n",
             timestamp
         ));
-        content.push_str("\n");
+        content.push('\n');
         content.push_str(message);
         content
     }
@@ -882,7 +882,7 @@ mod tests {
             author_name.to_lowercase().replace(' ', "."),
             timestamp
         ));
-        content.push_str("\n");
+        content.push('\n');
         content.push_str(message);
         content
     }

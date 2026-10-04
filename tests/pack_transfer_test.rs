@@ -63,10 +63,13 @@ fn stored_git_pack_matches_git_index_pack() {
 
     // Git agrees on the index, byte for byte.
     let ours = fs::read(stored.path().with_extension("idx")).unwrap();
-    let copy = target.path().join("copy.pack");
+    // Outside the repository: Git writes the index read-only, which
+    // Windows does not let the test remove.
+    let scratch = tempfile::TempDir::new().unwrap();
+    let copy = scratch.path().join("copy.pack");
     fs::write(&copy, &pack).unwrap();
-    git(target.path(), &["index-pack", "copy.pack"]);
-    assert_eq!(ours, fs::read(target.path().join("copy.idx")).unwrap());
+    git(target.path(), &["index-pack", copy.to_str().unwrap()]);
+    assert_eq!(ours, fs::read(scratch.path().join("copy.idx")).unwrap());
 
     // The objects are usable.
     let head = git(source.path(), &["rev-parse", "main"]);
@@ -82,8 +85,6 @@ fn stored_git_pack_matches_git_index_pack() {
             git(source.path(), &["rev-parse", "v1"]).trim(),
         ],
     );
-    fs::remove_file(&copy).unwrap();
-    fs::remove_file(target.path().join("copy.idx")).unwrap();
     assert_fsck(target.path());
     let commit = repo.commit(head.trim()).unwrap();
     assert_eq!(commit.summary(), "Commit 39");
@@ -132,7 +133,17 @@ fn thin_pack_is_completed_with_local_bases() {
         target,
         &[
             "verify-pack",
-            stored.path().with_extension("idx").to_str().unwrap(),
+            // Relative: Git for Windows cannot open `\\?\` paths.
+            &format!(
+                ".git/objects/pack/{}",
+                stored
+                    .path()
+                    .with_extension("idx")
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            ),
         ],
     );
 }

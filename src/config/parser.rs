@@ -115,8 +115,8 @@ fn parse_key_value(line: &str) -> Option<(String, String)> {
 
 /// Parses a value as Git does: double quotes may enclose any part of it
 /// (keeping spaces and `#`/`;` inside), `\\`, `\"`, `\n`, `\t` and `\b` are
-/// escapes, a `#` or `;` outside quotes starts a comment, and whitespace
-/// outside quotes at the ends is dropped.
+/// escapes (any other backslash is kept), a `#` or `;` outside quotes
+/// starts a comment, and whitespace outside quotes at the ends is dropped.
 fn parse_value(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     // Length of `result` up to the last character inside quotes or not
@@ -131,14 +131,19 @@ fn parse_value(s: &str) -> String {
                 keep = result.len();
             }
             '\\' => {
-                let escaped = match chars.next() {
-                    Some('n') => '\n',
-                    Some('t') => '\t',
-                    Some('b') => '\u{8}',
-                    Some(other) => other,
+                match chars.next() {
+                    Some('n') => result.push('\n'),
+                    Some('t') => result.push('\t'),
+                    Some('b') => result.push('\u{8}'),
+                    Some(c @ ('\\' | '"')) => result.push(c),
+                    // Git rejects other escapes; keep them as written so
+                    // unescaped Windows paths still work.
+                    Some(other) => {
+                        result.push('\\');
+                        result.push(other);
+                    }
                     None => break,
-                };
-                result.push(escaped);
+                }
                 keep = result.len();
             }
             '#' | ';' if !in_quotes => break,
@@ -157,6 +162,15 @@ fn parse_value(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_unknown_escapes_are_kept() {
+        assert_eq!(
+            parse_value(r"C:\Users\me\x.cfg  # comment"),
+            r"C:\Users\me\x.cfg"
+        );
+        assert_eq!(parse_value(r#""a\"b\\c\td""#), "a\"b\\c\td");
+    }
 
     #[test]
     fn test_parse_simple_section() {

@@ -1023,17 +1023,16 @@ Commitから直接変更ファイル一覧を取得できるようにする。
 
 ## GitHubのみで管理するIssue（2026-10-04以降）
 
-ローカル計画ID 046以降は個別ファイルを作らず、GitHub Issueを正とする。連番の対応のみここに記録する。
+ローカル計画ID 046以降は個別ファイルを作らず、GitHub Issueを正とする。連番の対応のみここに記録し、状態は各GitHub Issueで確認する。
 
-| ローカル計画ID | GitHub Issue | 内容 | 状態 |
-|---|---|---|---|
-| 046 | [#16](https://github.com/siska-tech/zerogit/issues/16) | index v4（パス圧縮）の誤解析と破損書き込み | 完了（PR #18、v0.4.0） |
-| 047 | [#20](https://github.com/siska-tech/zerogit/issues/20) | .gitignoreの未解釈、ドットで始まるファイルの除外 | 未着手 |
-| 048 | [#21](https://github.com/siska-tech/zerogit/issues/21) | core.autocrlf・.gitattributesの未適用 | 未着手 |
-| 049 | [#22](https://github.com/siska-tech/zerogit/issues/22) | symlinkを通常ファイルとして扱う | 未着手 |
-| 050 | [#23](https://github.com/siska-tech/zerogit/issues/23) | コンフリクト中のindexからcommitできる | 未着手 |
-| 051 | [#24](https://github.com/siska-tech/zerogit/issues/24) | statusがステージ済み・未ステージを区別できない | 未着手 |
-| 052 | [#25](https://github.com/siska-tech/zerogit/issues/25) | reflogを書かない | 未着手 |
-| 053 | [#26](https://github.com/siska-tech/zerogit/issues/26) | 未実装機能（merge・rebase・stash・タグ作成・リモート操作）の追跡 | 未着手 |
+| ローカル計画ID | GitHub Issue | 内容 |
+|---|---|---|
+| 046 | [#16](https://github.com/siska-tech/zerogit/issues/16) | index v4（パス圧縮）の誤解析と破損書き込み |
+| 047 | [#20](https://github.com/siska-tech/zerogit/issues/20) | .gitignoreの未解釈、ドットで始まるファイルの除外 |
+| 048 | [#21](https://github.com/siska-tech/zerogit/issues/21) | core.autocrlf・.gitattributesの未適用 |
+| 049 | [#22](https://github.com/siska-tech/zerogit/issues/22) | symlinkを通常ファイルとして扱う |
+| 050 | [#23](https://github.com/siska-tech/zerogit/issues/23) | コンフリクト中のindexからcommitできる |
+| 051 | [#24](https://github.com/siska-tech/zerogit/issues/24) | statusがステージ済み・未ステージを区別できない |
+| 052 | [#25](https://github.com/siska-tech/zerogit/issues/25) | reflogを書かない |
+| 053 | [#26](https://github.com/siska-tech/zerogit/issues/26) | 未実装機能（merge・rebase・stash・タグ作成・リモート操作）の追跡 |
 
-状態はGitHub側で管理し、この表の「状態」列は起票時点の値とする。

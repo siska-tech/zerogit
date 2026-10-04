@@ -6,6 +6,11 @@
 //! message. Merge commits are left out, commits whose change is already in
 //! the upstream are skipped, and commits that become empty are dropped.
 //!
+//! An interactive rebase ([`Repository::rebase_interactive`]) runs a todo
+//! list instead, as `git rebase -i` does with an edited list: pick, reword,
+//! edit, squash, fixup and drop ([`RebaseStep`]), in any order. `exec`,
+//! `break`, `label`, `reset` and `merge` are not supported.
+//!
 //! Progress is stored in `.git/rebase-merge/` in Git's format, so a rebase
 //! stopped on conflicts can be continued, skipped or aborted with either
 //! zerogit or `git rebase --continue` / `--skip` / `--abort`.
@@ -41,6 +46,64 @@ pub enum RebaseOutcome {
         /// The conflicted paths.
         paths: Vec<PathBuf>,
     },
+    /// An [`RebaseStep::Edit`] step stopped after picking `commit`. Change
+    /// the work tree and index (or the commit, with
+    /// [`Repository::amend_commit`]) and call
+    /// [`Repository::rebase_continue`]; staged changes are then added to
+    /// the picked commit, as `git rebase --continue` does.
+    Stopped {
+        /// The original commit just picked.
+        commit: Oid,
+    },
+}
+
+/// One step of an interactive rebase (`git rebase -i`): a line of its todo
+/// list. Each names an original commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RebaseStep {
+    /// Replays the commit.
+    Pick(Oid),
+    /// Replays the commit with a new message (cleaned up as by
+    /// `git commit -m`).
+    Reword(Oid, String),
+    /// Replays the commit and stops, so it can be changed
+    /// ([`RebaseOutcome::Stopped`]).
+    Edit(Oid),
+    /// Adds the commit's change to the previous commit and appends its
+    /// message to the previous message, as Git does when its editor keeps
+    /// the combined message.
+    Squash(Oid),
+    /// Adds the commit's change to the previous commit, keeping the
+    /// previous message.
+    Fixup(Oid),
+    /// Leaves the commit out (as does omitting it from the list).
+    Drop(Oid),
+}
+
+impl RebaseStep {
+    /// The commit the step names.
+    pub fn commit(&self) -> &Oid {
+        match self {
+            RebaseStep::Pick(oid)
+            | RebaseStep::Reword(oid, _)
+            | RebaseStep::Edit(oid)
+            | RebaseStep::Squash(oid)
+            | RebaseStep::Fixup(oid)
+            | RebaseStep::Drop(oid) => oid,
+        }
+    }
+
+    /// The todo command, as Git writes it.
+    fn command(&self) -> &'static str {
+        match self {
+            RebaseStep::Pick(_) => "pick",
+            RebaseStep::Reword(..) => "reword",
+            RebaseStep::Edit(_) => "edit",
+            RebaseStep::Squash(_) => "squash",
+            RebaseStep::Fixup(_) => "fixup",
+            RebaseStep::Drop(_) => "drop",
+        }
+    }
 }
 
 /// The progress of a rebase in `.git/rebase-merge/`.
@@ -50,14 +113,17 @@ struct State {
     head_name: Option<String>,
     onto: Oid,
     orig_head: Oid,
-    /// The commits still to pick.
-    todo: VecDeque<Oid>,
-    /// The commits already picked (or being picked).
-    done: Vec<Oid>,
+    /// The steps still to run.
+    todo: VecDeque<RebaseStep>,
+    /// The steps already run (or running).
+    done: Vec<RebaseStep>,
     /// Commits picked so far: original and rewritten.
     rewritten: Vec<(Oid, Oid)>,
-    /// The commit a pick stopped at, if it stopped.
+    /// The commit a step stopped at (on conflicts, or for `edit`).
     stopped: Option<Oid>,
+    /// After an `edit` step: the commit HEAD pointed to when it stopped
+    /// (Git's `rebase-merge/amend`).
+    amend: Option<Oid>,
 }
 
 fn read_trimmed(path: &Path) -> Result<Option<String>> {
@@ -68,9 +134,17 @@ fn read_trimmed(path: &Path) -> Result<Option<String>> {
     }
 }
 
-/// Parses todo lines, accepting only `pick` (and `p`).
-fn parse_todo(content: &str) -> Result<Vec<Oid>> {
-    let mut commits = Vec::new();
+/// The file keeping the new message of a `reword` step (zerogit's own;
+/// Git ignores it and asks its editor instead).
+fn reword_file(dir: &Path, oid: &Oid) -> PathBuf {
+    dir.join(format!("zerogit-reword-{}", oid.to_hex()))
+}
+
+/// Parses todo lines: `pick`, `reword`, `edit`, `squash`, `fixup` and
+/// `drop` (and their one-letter forms). A `reword` takes its message from
+/// the file zerogit wrote, or keeps the commit's message.
+fn parse_todo(dir: &Path, content: &str) -> Result<Vec<RebaseStep>> {
+    let mut steps = Vec::new();
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -78,20 +152,43 @@ fn parse_todo(content: &str) -> Result<Vec<Oid>> {
         }
         let mut words = line.split_whitespace();
         let command = words.next().unwrap_or("");
-        if command != "pick" && command != "p" {
-            return Err(Error::UnsupportedRebase(format!(
-                "todo command '{}'",
-                command
-            )));
-        }
+        let unsupported = || Error::UnsupportedRebase(format!("todo command '{}'", command));
+        let make: fn(Oid) -> RebaseStep = match command {
+            "pick" | "p" => RebaseStep::Pick,
+            "edit" | "e" => RebaseStep::Edit,
+            "squash" | "s" => RebaseStep::Squash,
+            "fixup" | "f" => RebaseStep::Fixup,
+            "drop" | "d" => RebaseStep::Drop,
+            "reword" | "r" => |oid| RebaseStep::Reword(oid, String::new()),
+            _ => return Err(unsupported()),
+        };
         let oid = words
             .next()
             .ok_or_else(|| Error::UnsupportedRebase(format!("todo line '{}'", line)))?;
-        commits.push(Oid::from_hex(oid).map_err(|_| {
+        if oid.starts_with('-') {
+            // `fixup -C` / `-c` replace the message; not supported.
+            return Err(Error::UnsupportedRebase(format!("todo line '{}'", line)));
+        }
+        let oid = Oid::from_hex(oid).map_err(|_| {
             Error::UnsupportedRebase(format!("abbreviated commit in todo line '{}'", line))
-        })?);
+        })?;
+        let step = match make(oid) {
+            RebaseStep::Reword(oid, _) => {
+                let message = fs::read_to_string(reword_file(dir, &oid)).unwrap_or_default();
+                RebaseStep::Reword(oid, message)
+            }
+            step => step,
+        };
+        steps.push(step);
     }
-    Ok(commits)
+    Ok(steps)
+}
+
+/// Removes comment lines, then cleans up the message as `git commit -m`
+/// does: Git's `--cleanup=strip`, used for messages its editor prepared.
+fn strip_message(message: &str) -> String {
+    let kept: Vec<&str> = message.lines().filter(|l| !l.starts_with('#')).collect();
+    crate::commit::cleanup_message(&kept.join("\n"))
 }
 
 /// Quotes a value for `author-script` (shell single quotes).
@@ -113,8 +210,11 @@ impl State {
         let head_name = read("head-name")?;
         let onto = Oid::from_hex(&read("onto")?)?;
         let orig_head = Oid::from_hex(&read("orig-head")?)?;
-        let todo = parse_todo(&read_trimmed(&dir.join("git-rebase-todo"))?.unwrap_or_default())?;
-        let done = parse_todo(&read_trimmed(&dir.join("done"))?.unwrap_or_default())?;
+        let todo = parse_todo(
+            &dir,
+            &read_trimmed(&dir.join("git-rebase-todo"))?.unwrap_or_default(),
+        )?;
+        let done = parse_todo(&dir, &read_trimmed(&dir.join("done"))?.unwrap_or_default())?;
         let mut rewritten = Vec::new();
         for line in read_trimmed(&dir.join("rewritten-list"))?
             .unwrap_or_default()
@@ -127,6 +227,10 @@ impl State {
         }
         let stopped = match read_trimmed(&dir.join("stopped-sha"))? {
             Some(hex) if !hex.is_empty() => Some(repo.resolve_short_oid(&hex)?),
+            _ => None,
+        };
+        let amend = match read_trimmed(&dir.join("amend"))? {
+            Some(hex) if !hex.is_empty() => Some(Oid::from_hex(&hex)?),
             _ => None,
         };
         Ok(Some(State {
@@ -142,14 +246,17 @@ impl State {
             done,
             rewritten,
             stopped,
+            amend,
         }))
     }
 
     /// A todo line in the format of current Git (the subject after `#`;
     /// older Git, which writes it without, reads it too).
-    fn todo_line(repo: &Repository, oid: &Oid) -> Result<String> {
+    fn todo_line(repo: &Repository, step: &RebaseStep) -> Result<String> {
+        let oid = step.commit();
         Ok(format!(
-            "pick {} # {}\n",
+            "{} {} # {}\n",
+            step.command(),
             oid.to_hex(),
             repo.commit(&oid.to_hex())?.subject()
         ))
@@ -169,15 +276,20 @@ impl State {
         write("interactive", "")?;
         write("drop_redundant_commits", "")?;
         let mut todo = String::new();
-        for oid in &self.todo {
-            todo.push_str(&Self::todo_line(repo, oid)?);
+        for step in &self.todo {
+            todo.push_str(&Self::todo_line(repo, step)?);
         }
         write("git-rebase-todo", &todo)?;
         let mut done = String::new();
-        for oid in &self.done {
-            done.push_str(&Self::todo_line(repo, oid)?);
+        for step in &self.done {
+            done.push_str(&Self::todo_line(repo, step)?);
         }
         write("done", &done)?;
+        for step in self.todo.iter().chain(&self.done) {
+            if let RebaseStep::Reword(oid, message) = step {
+                write_locked(reword_file(&self.dir, oid), message.as_bytes())?;
+            }
+        }
         write("msgnum", &format!("{}\n", self.done.len()))?;
         write("end", &format!("{}\n", self.done.len() + self.todo.len()))?;
         let mut rewritten = String::new();
@@ -188,11 +300,13 @@ impl State {
         Ok(())
     }
 
-    /// Removes the files describing a stopped pick.
+    /// Removes the files describing a stopped step.
     fn clear_stop(&mut self, repo: &Repository) -> Result<()> {
         self.stopped = None;
+        self.amend = None;
         for path in [
             self.dir.join("stopped-sha"),
+            self.dir.join("amend"),
             self.dir.join("author-script"),
             self.dir.join("message"),
             self.dir.join("patch"),
@@ -446,6 +560,88 @@ impl Repository {
         committer_name: &str,
         committer_email: &str,
     ) -> Result<RebaseOutcome> {
+        self.start_rebase(upstream, onto, None, committer_name, committer_email)
+    }
+
+    /// The todo list `git rebase -i <upstream>` starts from: a pick for each
+    /// commit [`Repository::rebase`] would replay, oldest first. Edit it and
+    /// pass it to [`Repository::rebase_interactive`].
+    ///
+    /// # Errors
+    ///
+    /// `Error::RefNotFound` if `upstream` or HEAD cannot be resolved.
+    pub fn rebase_plan(&self, upstream: &str) -> Result<Vec<RebaseStep>> {
+        let upstream_oid = self.resolve_commit(upstream)?;
+        let head = self
+            .optional_head_oid()?
+            .ok_or_else(|| Error::RefNotFound("HEAD".to_owned()))?;
+        Ok(self
+            .commits_to_replay(&upstream_oid, &head)?
+            .into_iter()
+            .map(RebaseStep::Pick)
+            .collect())
+    }
+
+    /// Runs an interactive rebase with the given todo list, like
+    /// `git rebase -i [--onto <onto>] <upstream>` when the list is edited to
+    /// `steps`: the steps run in order on top of `onto` (by default
+    /// `upstream`), and commits of the branch left out of the list are
+    /// dropped. See [`RebaseStep`] for what each step does;
+    /// [`Repository::rebase_plan`] gives the list Git would start from.
+    /// `exec`, `break`, `label`, `reset` and `merge` are not supported.
+    ///
+    /// The progress is kept in Git's format, so the rebase can be continued
+    /// with either zerogit or Git (Git asks its editor for a `reword`
+    /// message instead of using the one given here).
+    ///
+    /// # Errors
+    ///
+    /// Nothing is changed when any of these is returned:
+    /// - `Error::UnsupportedRebase` if the first step (other than drops) is
+    ///   a squash or fixup, which needs a previous commit.
+    /// - The errors of [`Repository::rebase`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::{RebaseStep, Repository};
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// // Squash the last two commits into one.
+    /// let mut steps = repo.rebase_plan("HEAD~2").unwrap();
+    /// steps[1] = RebaseStep::Squash(*steps[1].commit());
+    /// repo.rebase_interactive("HEAD~2", None, &steps, "John Doe", "john@example.com")
+    ///     .unwrap();
+    /// ```
+    pub fn rebase_interactive(
+        &self,
+        upstream: &str,
+        onto: Option<&str>,
+        steps: &[RebaseStep],
+        committer_name: &str,
+        committer_email: &str,
+    ) -> Result<RebaseOutcome> {
+        let first = steps
+            .iter()
+            .find(|step| !matches!(step, RebaseStep::Drop(_)));
+        if let Some(step @ (RebaseStep::Squash(_) | RebaseStep::Fixup(_))) = first {
+            return Err(Error::UnsupportedRebase(format!(
+                "cannot '{}' without a previous commit",
+                step.command()
+            )));
+        }
+        self.start_rebase(upstream, onto, Some(steps), committer_name, committer_email)
+    }
+
+    /// Starts a rebase with `steps`, or with the commits to replay.
+    fn start_rebase(
+        &self,
+        upstream: &str,
+        onto: Option<&str>,
+        steps: Option<&[RebaseStep]>,
+        committer_name: &str,
+        committer_email: &str,
+    ) -> Result<RebaseOutcome> {
         if self.is_rebasing() {
             return Err(Error::RebaseInProgress);
         }
@@ -466,14 +662,30 @@ impl Repository {
             .current_branch()?
             .map(|b| format!("refs/heads/{}", b));
 
-        // Already based on onto with nothing to drop: up to date.
-        if self.merge_base(&onto_oid, &head)? == Some(onto_oid)
-            && self.merge_base(&upstream_oid, &head)? == Some(onto_oid)
-        {
-            return Ok(RebaseOutcome::UpToDate);
+        let steps: Vec<RebaseStep> = match steps {
+            Some(steps) => {
+                // An empty list leaves the branch as it is, as in Git.
+                if steps.is_empty() {
+                    return Ok(RebaseOutcome::UpToDate);
+                }
+                steps.to_vec()
+            }
+            None => {
+                // Already based on onto with nothing to drop: up to date.
+                if self.merge_base(&onto_oid, &head)? == Some(onto_oid)
+                    && self.merge_base(&upstream_oid, &head)? == Some(onto_oid)
+                {
+                    return Ok(RebaseOutcome::UpToDate);
+                }
+                self.commits_to_replay(&upstream_oid, &head)?
+                    .into_iter()
+                    .map(RebaseStep::Pick)
+                    .collect()
+            }
+        };
+        for step in &steps {
+            self.peel_to(*step.commit(), ObjectType::Commit)?;
         }
-
-        let commits = self.commits_to_replay(&upstream_oid, &head)?;
         let who = Signature::now(committer_name, committer_email);
         self.write_orig_head(&head)?;
         let mut state = State {
@@ -481,10 +693,11 @@ impl Repository {
             head_name,
             onto: onto_oid,
             orig_head: head,
-            todo: commits.into(),
+            todo: steps.into(),
             done: Vec::new(),
             rewritten: Vec::new(),
             stopped: None,
+            amend: None,
         };
         self.detach_to(
             &onto_oid,
@@ -495,12 +708,17 @@ impl Repository {
         self.run_rebase(&mut state, &who)
     }
 
-    /// Picks the remaining commits; stops at a conflict or finishes.
+    /// Runs the remaining steps; stops at a conflict or an `edit`, or
+    /// finishes.
     fn run_rebase(&self, state: &mut State, who: &Signature) -> Result<RebaseOutcome> {
         let style = self.conflict_style()?;
-        while let Some(commit_oid) = state.todo.pop_front() {
-            state.done.push(commit_oid);
+        while let Some(step) = state.todo.pop_front() {
+            state.done.push(step.clone());
             state.save(self)?;
+            if let RebaseStep::Drop(_) = step {
+                continue;
+            }
+            let commit_oid = *step.commit();
             let commit = self.commit(&commit_oid.to_hex())?;
             let subject = commit.subject();
             let head = self
@@ -540,9 +758,31 @@ impl Repository {
                     paths: conflicts.into_iter().map(PathBuf::from).collect(),
                 });
             }
-            self.commit_pick(state, &commit_oid, &head, who, "pick")?;
+            self.commit_step(state, &step, &head, who, false)?;
+            if let RebaseStep::Edit(_) = step {
+                self.record_edit(state, &commit_oid)?;
+                return Ok(RebaseOutcome::Stopped { commit: commit_oid });
+            }
         }
         self.finish_rebase(state, who)
+    }
+
+    /// Records a stop for an `edit` step the way Git does.
+    fn record_edit(&self, state: &mut State, commit_oid: &Oid) -> Result<()> {
+        let head = self
+            .optional_head_oid()?
+            .ok_or_else(|| Error::RefNotFound("HEAD".to_owned()))?;
+        write_locked(
+            state.dir.join("amend"),
+            format!("{}\n", head.to_hex()).as_bytes(),
+        )?;
+        write_locked(
+            state.dir.join("stopped-sha"),
+            format!("{}\n", commit_oid.to_hex()).as_bytes(),
+        )?;
+        state.stopped = Some(*commit_oid);
+        state.amend = Some(head);
+        Ok(())
     }
 
     /// Records a pick stopped on conflicts the way Git does.
@@ -585,8 +825,101 @@ impl Repository {
         Ok(())
     }
 
-    /// Commits the index as the replayed `commit_oid`, or drops it if it
-    /// became empty.
+    /// Commits the index for a step that picked `step`'s commit onto
+    /// `head`: a new commit for pick, reword and edit (dropped if it became
+    /// empty), or the previous commit amended for squash and fixup.
+    fn commit_step(
+        &self,
+        state: &mut State,
+        step: &RebaseStep,
+        head: &Oid,
+        who: &Signature,
+        continuing: bool,
+    ) -> Result<()> {
+        let oid = step.commit();
+        match step {
+            RebaseStep::Squash(_) | RebaseStep::Fixup(_) => {
+                let squash = matches!(step, RebaseStep::Squash(_));
+                self.amend_head(state, Some((oid, squash)), head, who, None)
+            }
+            RebaseStep::Reword(_, message) => {
+                let message = crate::commit::cleanup_message(message);
+                let message = if message.is_empty() {
+                    None
+                } else {
+                    Some(message)
+                };
+                self.commit_pick(state, oid, head, who, "reword", message)
+            }
+            _ => {
+                let action = if continuing { "continue" } else { "pick" };
+                self.commit_pick(state, oid, head, who, action, None)
+            }
+        }
+    }
+
+    /// Replaces HEAD's commit with one of the index, keeping its parents and
+    /// author: for a squash or fixup of `folded` (`(commit, squash)`), or to
+    /// add changes staged after an `edit` stop.
+    fn amend_head(
+        &self,
+        state: &mut State,
+        folded: Option<(&Oid, bool)>,
+        head: &Oid,
+        who: &Signature,
+        message: Option<String>,
+    ) -> Result<()> {
+        let previous = self.commit(&head.to_hex())?;
+        let idx = self.read_index()?;
+        let tree = self.build_tree_from_index(&idx)?;
+        let message = match (message, folded) {
+            (Some(message), _) => message,
+            // Git's squash message, with its comments stripped as its
+            // editor's result is.
+            (None, Some((oid, true))) => strip_message(&format!(
+                "{}\n{}",
+                raw_message(self, head)?,
+                raw_message(self, oid)?
+            )),
+            (None, _) => raw_message(self, head)?,
+        };
+        let content = Self::format_commit(
+            &tree,
+            previous.parents(),
+            &previous.author().to_git_string(),
+            &who.to_git_string(),
+            &message,
+        );
+        let new = self.object_store().write(ObjectType::Commit, &content)?;
+        let action = match folded {
+            Some((_, true)) => "squash",
+            Some((_, false)) => "fixup",
+            None => "amend",
+        };
+        self.update_head(
+            &new,
+            Some(*head),
+            who,
+            &format!(
+                "rebase ({}): {}",
+                action,
+                message.lines().next().unwrap_or("")
+            ),
+        )?;
+        // Every original commit folded into this one now maps to it.
+        for entry in &mut state.rewritten {
+            if entry.1 == *head {
+                entry.1 = new;
+            }
+        }
+        if let Some((oid, _)) = folded {
+            state.rewritten.push((*oid, new));
+        }
+        state.save(self)
+    }
+
+    /// Commits the index as the replayed `commit_oid` (with `message`, or
+    /// its own), or drops it if it became empty.
     fn commit_pick(
         &self,
         state: &mut State,
@@ -594,6 +927,7 @@ impl Repository {
         head: &Oid,
         who: &Signature,
         action: &str,
+        message: Option<String>,
     ) -> Result<()> {
         let commit = self.commit(&commit_oid.to_hex())?;
         let idx = self.read_index()?;
@@ -609,19 +943,21 @@ impl Repository {
             return Ok(());
         }
         let author = commit.author().to_git_string();
-        let content = Self::format_commit(
-            &tree,
-            &[*head],
-            &author,
-            &who.to_git_string(),
-            &raw_message(self, commit_oid)?,
-        );
+        let message = match message {
+            Some(message) => message,
+            None => raw_message(self, commit_oid)?,
+        };
+        let content = Self::format_commit(&tree, &[*head], &author, &who.to_git_string(), &message);
         let new = self.object_store().write(ObjectType::Commit, &content)?;
         self.update_head(
             &new,
             Some(*head),
             who,
-            &format!("rebase ({}): {}", action, commit.subject()),
+            &format!(
+                "rebase ({}): {}",
+                action,
+                message.lines().next().unwrap_or("")
+            ),
         )?;
         state.rewritten.push((*commit_oid, new));
         state.save(self)
@@ -667,18 +1003,21 @@ impl Repository {
         State::load(self)?.ok_or(Error::NoRebaseInProgress)
     }
 
-    /// Continues a rebase stopped on conflicts, like
-    /// `git rebase --continue`: the resolved index is committed as the
-    /// stopped commit (with its author and message; nothing is committed if
-    /// the resolution left no change), then the remaining commits are
-    /// picked.
+    /// Continues a stopped rebase, like `git rebase --continue`.
+    ///
+    /// After conflicts, the resolved index is committed as the stopped step
+    /// would have committed it (a pick or reword with the commit's author
+    /// and message, nothing if the resolution left no change; a squash or
+    /// fixup into the previous commit). After an `edit` stop, changes staged
+    /// since are added to the picked commit (as `git commit --amend`). Then
+    /// the remaining steps run.
     ///
     /// # Errors
     ///
     /// - `Error::NoRebaseInProgress` if no rebase is in progress.
     /// - `Error::UnmergedPaths` if conflicts are still unresolved.
     /// - `Error::UnsupportedRebase` for a rebase Git started with commands
-    ///   other than `pick` (for example an interactive rebase).
+    ///   zerogit does not run (`exec`, `break`, `label`, ...).
     pub fn rebase_continue(
         &self,
         committer_name: &str,
@@ -690,11 +1029,22 @@ impl Repository {
             return Err(Error::UnmergedPaths(idx.conflicted_paths()));
         }
         let who = Signature::now(committer_name, committer_email);
-        if let Some(stopped) = state.stopped {
-            let head = self
-                .optional_head_oid()?
-                .ok_or_else(|| Error::RefNotFound("HEAD".to_owned()))?;
-            self.commit_pick(&mut state, &stopped, &head, &who, "continue")?;
+        let head = self
+            .optional_head_oid()?
+            .ok_or_else(|| Error::RefNotFound("HEAD".to_owned()))?;
+        if state.amend.is_some() {
+            // Stopped by `edit`: staged changes amend the picked commit.
+            let tree = self.build_tree_from_index(&idx)?;
+            if tree != *self.commit(&head.to_hex())?.tree() {
+                self.amend_head(&mut state, None, &head, &who, None)?;
+            }
+            state.clear_stop(self)?;
+        } else if let Some(stopped) = state.stopped {
+            let step = match state.done.last() {
+                Some(step) if step.commit() == &stopped => step.clone(),
+                _ => RebaseStep::Pick(stopped),
+            };
+            self.commit_step(&mut state, &step, &head, &who, true)?;
             state.clear_stop(self)?;
         }
         self.run_rebase(&mut state, &who)

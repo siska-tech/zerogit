@@ -370,6 +370,7 @@ impl Repository {
         }
 
         let style = self.conflict_style()?;
+        let renames = self.merge_renames()?;
         let labels = Labels {
             ours: "Updated upstream",
             base: "Stash base",
@@ -377,7 +378,7 @@ impl Repository {
         };
         let store = self.object_store();
         let index_result = if restore_index {
-            let merged = merge_trees(&store, &base, &ours, &stashed_index, labels, style)?;
+            let merged = merge_trees(&store, &base, &ours, &stashed_index, labels, style, renames)?;
             if !merged.conflicted_paths().is_empty() {
                 return Err(Error::UnsupportedMerge(
                     "the stashed index conflicts with the current index".to_owned(),
@@ -387,7 +388,7 @@ impl Repository {
         } else {
             None
         };
-        let result = merge_trees(&store, &base, &ours, &stashed_work, labels, style)?;
+        let result = merge_trees(&store, &base, &ours, &stashed_work, labels, style, renames)?;
         self.check_overwrites(&idx, &ours, &result, &mut worktree)?;
         self.apply_merge(&mut idx, &mut worktree, &ours, &result)?;
 

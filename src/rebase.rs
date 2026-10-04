@@ -518,7 +518,15 @@ impl Repository {
                 base: &base_label,
                 theirs: &theirs_label,
             };
-            let result = merge_trees(&self.object_store(), &base, &ours, &theirs, labels, style)?;
+            let result = merge_trees(
+                &self.object_store(),
+                &base,
+                &ours,
+                &theirs,
+                labels,
+                style,
+                self.merge_renames()?,
+            )?;
             let mut worktree = self.worktree()?;
             self.check_overwrites(&idx, &ours, &result, &mut worktree)?;
             self.apply_merge(&mut idx, &mut worktree, &ours, &result)?;

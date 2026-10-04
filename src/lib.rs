@@ -58,6 +58,7 @@ pub mod index;
 pub mod log;
 pub mod merge;
 pub mod objects;
+pub mod rebase;
 pub mod refs;
 pub mod repository;
 pub mod stash;
@@ -91,6 +92,9 @@ pub use log::LogOptions;
 
 // Re-export merge types
 pub use merge::{FastForward, MergeOptions, MergeOutcome};
+
+// Re-export rebase types
+pub use rebase::RebaseOutcome;
 
 // Re-export stash types
 pub use stash::{StashApplyOutcome, StashEntry, StashOptions};

@@ -163,6 +163,17 @@ pub enum Error {
     /// that is a file on one side and a directory on the other); nothing
     /// was changed.
     UnsupportedMerge(String),
+
+    /// A rebase is already in progress (`.git/rebase-merge/` exists);
+    /// continue, skip or abort it first.
+    RebaseInProgress,
+
+    /// No rebase is in progress.
+    NoRebaseInProgress,
+
+    /// The rebase state uses something not supported (for example a todo
+    /// list with commands other than `pick`, from an interactive rebase).
+    UnsupportedRebase(String),
 }
 
 impl fmt::Display for Error {
@@ -244,6 +255,9 @@ impl fmt::Display for Error {
                 Ok(())
             }
             Error::UnsupportedMerge(reason) => write!(f, "unsupported merge: {}", reason),
+            Error::RebaseInProgress => write!(f, "a rebase is in progress"),
+            Error::NoRebaseInProgress => write!(f, "no rebase is in progress"),
+            Error::UnsupportedRebase(reason) => write!(f, "unsupported rebase: {}", reason),
             Error::IrreversibleLineEndings(path) => write!(
                 f,
                 "line ending conversion would not round-trip: {}",
@@ -356,6 +370,9 @@ mod tests {
             Error::NotFastForward,
             Error::LocalChangesWouldBeOverwritten(vec![PathBuf::from("a.txt")]),
             Error::UnsupportedMerge("reason".to_string()),
+            Error::RebaseInProgress,
+            Error::NoRebaseInProgress,
+            Error::UnsupportedRebase("reason".to_string()),
         ];
 
         // All variants should implement Display without panicking

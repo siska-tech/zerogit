@@ -390,14 +390,8 @@ impl Repository {
         if can_fast_forward && (options.fast_forward != FastForward::Never || head.is_none()) {
             let ours = self.flat_tree(head.as_ref())?;
             let target_tree = self.flat_tree(Some(&theirs))?;
-            let mut result = TreeMerge::default();
-            for path in ours.keys().chain(target_tree.keys()) {
-                let entry = target_tree.get(path).copied();
-                if ours.get(path).copied() != entry {
-                    result.paths.insert(path.clone(), Resolution::Clean(entry));
-                }
-            }
             let mut worktree = self.worktree()?;
+            let result = two_way(&ours, &target_tree);
             self.check_overwrites(&idx, &ours, &result, &mut worktree)?;
             if let Some(head) = head {
                 self.write_orig_head(&head)?;
@@ -505,7 +499,7 @@ impl Repository {
         Ok(MergeOutcome::Merged(commit))
     }
 
-    fn write_orig_head(&self, head: &Oid) -> Result<()> {
+    pub(crate) fn write_orig_head(&self, head: &Oid) -> Result<()> {
         write_file_atomic(
             self.git_dir().join("ORIG_HEAD"),
             format!("{}\n", head.to_hex()).as_bytes(),
@@ -737,6 +731,18 @@ impl Repository {
         }
         Ok(())
     }
+}
+
+/// The result that moves from one tree to another (a two-way merge).
+pub(crate) fn two_way(from: &Flat, to: &Flat) -> TreeMerge {
+    let mut result = TreeMerge::default();
+    for path in from.keys().chain(to.keys()) {
+        let entry = to.get(path).copied();
+        if from.get(path).copied() != entry {
+            result.paths.insert(path.clone(), Resolution::Clean(entry));
+        }
+    }
+    result
 }
 
 /// The stage 0 entries of an index as a flattened tree (intent-to-add

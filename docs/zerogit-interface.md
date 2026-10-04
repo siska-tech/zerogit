@@ -493,6 +493,25 @@ pub fn stash_drop(&self, index: usize) -> Result<()>
 | 適用 | stashのベースを共通祖先とする3-way merge。`restore_index`がfalseなら変更は未ステージ（stashで追加したファイルはステージ済み）、trueならindexの状態も戻す。コンフリクトは`Updated upstream`/`Stashed changes`のマーカーとindexのstageで記録し、`stash_pop`はstashを残す |
 | エラー | `RefNotFound`（stashがない）、`UnmergedPaths`、`MergeInProgress`、`LocalChangesWouldBeOverwritten`、`UnsupportedMerge`（`restore_index`でindexの変更がコンフリクト）。いずれも何も変更しない |
 
+##### `Repository::rebase` / `rebase_continue` / `rebase_skip` / `rebase_abort` / `is_rebasing`
+
+```rust
+pub fn rebase(&self, upstream: &str, onto: Option<&str>,
+              committer_name: &str, committer_email: &str) -> Result<RebaseOutcome>
+pub fn rebase_continue(&self, committer_name: &str, committer_email: &str) -> Result<RebaseOutcome>
+pub fn rebase_skip(&self, committer_name: &str, committer_email: &str) -> Result<RebaseOutcome>
+pub fn rebase_abort(&self) -> Result<()>
+pub fn is_rebasing(&self) -> bool
+```
+
+| 項目   | 説明 |
+| ------ | ---- |
+| 概要   | `git rebase [--onto <onto>] <upstream>`相当（mergeバックエンド、非対話）。HEADから到達でき`upstream`から到達できないコミットを古い順に`onto`（既定は`upstream`）へ3-way mergeで付け替える。作者・メッセージは元のまま、コミッターは引数と現在時刻 |
+| 対象 | マージコミットは除外、upstream側に同じ変更（patch-id）があるコミットは飛ばし、空になったコミットは捨てる |
+| 戻り値 | `RebaseOutcome::UpToDate` / `Completed(Oid)` / `Conflicts { commit, paths }` |
+| 状態 | `.git/rebase-merge/`（`head-name`・`onto`・`orig-head`・`git-rebase-todo`・`done`・`msgnum`・`end`・`stopped-sha`・`author-script`・`message`など）と`REBASE_HEAD`をGitと同じ形式で書き、`git rebase --continue`/`--skip`/`--abort`でも扱える。Gitが始めたrebase（`pick`のみ）もzerogitで再開できる |
+| エラー | `RebaseInProgress`・`MergeInProgress`・`DirtyWorkingTree`（indexか追跡ファイルに変更）・`RefNotFound`・`NoRebaseInProgress`・`UnmergedPaths`（continue時）・`UnsupportedRebase`（`pick`以外のコマンド） |
+
 ##### `Repository::reflog`
 
 ```rust

@@ -84,7 +84,7 @@ pub enum StashApplyOutcome {
 }
 
 /// Builds a tree object from a flattened tree.
-fn write_tree(repo: &Repository, flat: &Flat) -> Result<Oid> {
+pub(crate) fn write_tree(repo: &Repository, flat: &Flat) -> Result<Oid> {
     let mut idx = Index::empty(2);
     for (path, (oid, mode)) in flat {
         idx.add(IndexEntry::new(
@@ -117,7 +117,7 @@ fn write_commit(
 }
 
 /// The flattened tree of a tree object.
-fn flat_of_tree(repo: &Repository, tree: &Oid) -> Result<Flat> {
+pub(crate) fn flat_of_tree(repo: &Repository, tree: &Oid) -> Result<Flat> {
     let mut by_path = std::collections::BTreeMap::new();
     crate::status::flatten_with_modes(&repo.object_store(), tree, "", &mut by_path)?;
     Ok(by_path

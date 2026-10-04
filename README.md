@@ -228,6 +228,7 @@ repo.merge_base(&a, &b)?;                 // 共通祖先
 repo.stash_save(name, email, &StashOptions::new())?; // 変更の退避
 repo.stash_list()?;                       // stash一覧
 repo.stash_pop(0, false)?;                // 復元して削除（apply/dropも）
+repo.rebase("main", None, name, email)?;  // rebase（continue/skip/abortも）
 ```
 
 詳細は [APIドキュメント](https://docs.rs/zerogit) を参照してください。

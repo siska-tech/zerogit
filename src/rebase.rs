@@ -145,9 +145,11 @@ impl State {
         }))
     }
 
+    /// A todo line in the format of current Git (the subject after `#`;
+    /// older Git, which writes it without, reads it too).
     fn todo_line(repo: &Repository, oid: &Oid) -> Result<String> {
         Ok(format!(
-            "pick {} {}\n",
+            "pick {} # {}\n",
             oid.to_hex(),
             repo.commit(&oid.to_hex())?.subject()
         ))
@@ -553,7 +555,7 @@ impl Repository {
 
             let conflicts = result.conflicted_paths();
             if !conflicts.is_empty() {
-                self.record_stop(state, &commit_oid)?;
+                self.record_stop(state, &commit_oid, &conflicts)?;
                 return Ok(RebaseOutcome::Conflicts {
                     commit: commit_oid,
                     paths: conflicts.into_iter().map(PathBuf::from).collect(),
@@ -565,7 +567,7 @@ impl Repository {
     }
 
     /// Records a pick stopped on conflicts the way Git does.
-    fn record_stop(&self, state: &mut State, commit_oid: &Oid) -> Result<()> {
+    fn record_stop(&self, state: &mut State, commit_oid: &Oid, conflicts: &[String]) -> Result<()> {
         let commit = self.commit(&commit_oid.to_hex())?;
         let author = commit.author();
         let sign = if author.tz_offset() < 0 { '-' } else { '+' };
@@ -582,13 +584,15 @@ impl Repository {
                 tz % 60
             ))
         );
-        let message = raw_message(self, commit_oid)?;
+        // The message, an empty line and the conflicted paths as comments,
+        // which committing strips.
+        let mut message = raw_message(self, commit_oid)?;
+        message.push_str("\n# Conflicts:\n");
+        for path in conflicts {
+            message.push_str(&format!("#\t{}\n", path));
+        }
         write_file_atomic(state.dir.join("author-script"), script.as_bytes())?;
-        // Git keeps the message followed by an empty line.
-        write_file_atomic(
-            state.dir.join("message"),
-            format!("{}\n", message).as_bytes(),
-        )?;
+        write_file_atomic(state.dir.join("message"), message.as_bytes())?;
         write_file_atomic(
             state.dir.join("stopped-sha"),
             format!("{}\n", commit_oid.to_hex()).as_bytes(),

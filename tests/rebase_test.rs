@@ -73,7 +73,33 @@ fn assert_same(ours: &Path, theirs: &Path, base: &str) {
 }
 
 fn state_file(dir: &Path, name: &str) -> Option<String> {
-    fs::read_to_string(dir.join(".git").join(name)).ok()
+    let content = fs::read_to_string(dir.join(".git").join(name)).ok()?;
+    if name.ends_with("/message") {
+        // Git 2.46 and later list the conflicts after the message.
+        return Some(match content.find("\n# Conflicts:\n") {
+            Some(pos) => content[..=pos].to_owned(),
+            None => content,
+        });
+    }
+    if !name.ends_with("done") && !name.ends_with("git-rebase-todo") {
+        return Some(content);
+    }
+    // Git 2.50 and later write `pick <oid> # <subject>`, older Git
+    // `pick <oid> <subject>`.
+    Some(
+        content
+            .lines()
+            .map(|line| match line.splitn(3, ' ').collect::<Vec<_>>()[..] {
+                [command, oid, rest] => format!(
+                    "{} {} {}\n",
+                    command,
+                    oid,
+                    rest.strip_prefix("# ").unwrap_or(rest)
+                ),
+                _ => format!("{}\n", line),
+            })
+            .collect(),
+    )
 }
 
 #[test]
@@ -149,6 +175,9 @@ fn conflict_stops_like_git_and_continues() {
     ] {
         assert_eq!(state_file(o, name), state_file(t, name), "{}", name);
     }
+    assert!(fs::read_to_string(o.join(".git/rebase-merge/message"))
+        .unwrap()
+        .ends_with("\n# Conflicts:\n#\tf.txt\n"));
     assert!(Repository::open(o).unwrap().is_rebasing());
 
     // Resolve the same way in both and continue with each tool.

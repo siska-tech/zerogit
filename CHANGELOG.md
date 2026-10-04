@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+### Added
+- `zerogit-remote`: SSHクライアントをGitと同じ順で選ぶ: `GIT_SSH_COMMAND`（シェルで実行）、`GIT_SSH`（プログラム）、`core.sshCommand`（シェルで実行。`fetch`・`push`はリポジトリの設定を読む）、`ssh`。PuTTYの`plink`・`tortoiseplink`にはそのポート指定（`-P`）を使う。`ProcessConnector::ssh_command()`、`transport::open_for()` (#36)
+- `zerogit-remote`: `Error::Connection`: 接続が応答の前に切れたとき、SSHクライアントの終了状態とメッセージ（認証失敗、ホスト鍵の不一致など）を含めて返す (#36)
+- CI: localhostの`sshd`に対してSSH経由のclone・fetch・pushをGitと比べるジョブ（`zerogit-remote/tests/ssh_test.rs`。ほかの環境では`#[ignore]`）(#36)
+
+### Fixed
+- `zerogit-remote`: `-`で始まるホスト名・パスがSSHクライアントのオプションとして解釈されえた（CVE-2017-1000117と同じ問題）。Gitと同じく拒否する (#36)
+- `zerogit-remote`: `GIT_SSH_COMMAND`を空白で分割して実行していたため、クォートした引数（空白を含む鍵のパスなど）が扱えなかった。Gitと同じくシェルで実行する（Windowsで`sh`がない場合は従来どおり分割する）(#36)
+
 ## [0.7.0] - 2026-10-04
 
 日常の操作をそろえた: リビジョン指定（`rev_parse`）、`reset --soft/--mixed/--hard`、`commit --amend`、`restore`・`rm`・`mv`、変更を持ち越すcheckout。`zerogit-remote`は0.3.0として、zerogit 0.7に追従する。

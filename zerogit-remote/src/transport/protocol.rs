@@ -42,6 +42,12 @@ pub trait Session {
     fn reader(&mut self) -> &mut dyn Read;
     /// Sends a request.
     fn send(&mut self, request: &[u8]) -> Result<()>;
+    /// Ends the connection and describes why it failed, if the other side
+    /// reported anything (for a process: its exit status and error output).
+    /// Used to explain a connection that ended unexpectedly.
+    fn diagnostics(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// Opens connections to a server.
@@ -67,6 +73,24 @@ fn parse_oid(text: &str) -> Result<Oid> {
 
 fn zero() -> Oid {
     Oid::from_bytes([0; 20])
+}
+
+/// Reads the advertisement of a new connection. If the connection ends
+/// before it (an SSH client that cannot log in, a server that refuses the
+/// repository), the error says what the other side reported.
+fn open_session(session: &mut dyn Session) -> Result<Advertisement> {
+    let result = {
+        let mut reader = PacketReader::new(session.reader());
+        read_advertisement(&mut reader)
+    };
+    match result {
+        Ok(advertisement) => Ok(advertisement),
+        Err(e @ (Error::Protocol(_) | Error::Io(_))) => match session.diagnostics() {
+            Some(details) => Err(Error::Connection(format!("{} ({})", details, e))),
+            None => Err(e),
+        },
+        Err(e) => Err(e),
+    }
 }
 
 /// Reads the advertisement, skipping the `# service=...` preamble of smart
@@ -175,10 +199,7 @@ impl<C: Connector> GitTransport<C> {
     fn upload(&mut self) -> Result<&mut (Box<dyn Session>, Advertisement)> {
         if self.upload.is_none() {
             let mut session = self.connector.connect(Service::UploadPack)?;
-            let advertisement = {
-                let mut reader = PacketReader::new(session.reader());
-                read_advertisement(&mut reader)?
-            };
+            let advertisement = open_session(session.as_mut())?;
             self.upload = Some((session, advertisement));
         }
         Ok(self.upload.as_mut().unwrap())
@@ -187,10 +208,7 @@ impl<C: Connector> GitTransport<C> {
     fn receive(&mut self) -> Result<&mut ReceiveSession> {
         if self.receive.is_none() {
             let mut session = self.connector.connect(Service::ReceivePack)?;
-            let advertisement = {
-                let mut reader = PacketReader::new(session.reader());
-                read_advertisement(&mut reader)?
-            };
+            let advertisement = open_session(session.as_mut())?;
             let (refs, capabilities) = match advertisement {
                 Advertisement::V0 { refs, capabilities } => (refs, capabilities),
                 Advertisement::V2(_) => {

@@ -10,7 +10,7 @@ network side on top of it:
 | --- | --- | --- |
 | Local | paths, `file://` | none (the repository is read and written directly, without running Git) |
 | Smart HTTP(S) | `http://`, `https://` | Basic (in the URL or with `HttpAuth`), bearer token |
-| SSH | `user@host:path`, `ssh://` | keys, through the system's `ssh` client and agent (`GIT_SSH_COMMAND` is honored) |
+| SSH | `user@host:path`, `ssh://` | keys, through the system's `ssh` client and agent. The client is chosen as in Git: `GIT_SSH_COMMAND`, `GIT_SSH`, `core.sshCommand`, then `ssh` (PuTTY's `plink` and `tortoiseplink` are recognized) |
 
 Fetching uses Git protocol version 2 and falls back to the original
 protocol when a server does not offer it; pushing uses the receive-pack

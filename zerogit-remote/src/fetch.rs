@@ -89,7 +89,7 @@ pub fn fetch(repo: &Repository, remote: &str) -> Result<FetchOutcome> {
             crate::error::Error::UnsupportedUrl(format!("remote {} has no URL", remote))
         })?
         .to_owned();
-    let mut transport = transport::open(&url)?;
+    let mut transport = transport::open_for(repo, &url)?;
     fetch_with(
         repo,
         transport.as_mut(),

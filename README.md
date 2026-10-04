@@ -205,7 +205,7 @@ repo.log_with_options(opts)?; // フィルタリング付きログ
 repo.status()?;               // ワーキングツリー状態（パスごとに1つの状態）
 repo.detailed_status()?;      // index側・作業ツリー側を別々に（porcelain v2相当）
 repo.refresh_index()?;        // 変更のないファイルのstat情報を更新（git update-index --refresh）
-repo.commit("sha")?;          // コミット取得
+repo.commit("sha")?;          // コミット取得（"HEAD~1"・"v1.0^{}" などのリビジョンも可）
 repo.tree("sha")?;            // ツリー取得
 repo.blob("sha")?;            // Blob取得
 repo.index()?;                // インデックス取得
@@ -220,6 +220,7 @@ repo.diff_head_to_index()?;       // git diff --staged 相当
 repo.diff_head_to_workdir()?;     // git diff HEAD 相当
 repo.diff_blobs(old, new, &opts)?; // Blob間の行差分（旧新行番号付き）
 repo.resolve_short_oid("abc1234")?; // 短縮OIDの解決（loose・pack横断）
+repo.rev_parse("main~2")?;        // git rev-parse 相当（HEAD^2、v1^{}、@{u}、@{-1}、HEAD:path など）
 
 // 書き込み操作
 repo.add(path)?;              // ファイルをステージ（無視対象の未追跡ファイルは拒否）

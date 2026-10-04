@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 use crate::index::{Index, IndexEntry};
 use crate::infra::write_locked;
-use crate::objects::{ObjectType, Oid, Signature, TagObject};
+use crate::objects::{ObjectType, Oid, Signature};
 use crate::repository::Repository;
 use crate::worktree::{native_path, Worktree};
 
@@ -186,51 +186,22 @@ impl Repository {
     /// Resolves what to merge: a branch, tag, remote-tracking branch, full
     /// reference name or commit, peeling annotated tags.
     fn resolve_merge_target(&self, target: &str) -> Result<(Oid, TargetKind)> {
-        let store = self.ref_store();
-        let candidates = [
-            (format!("refs/heads/{}", target), TargetKind::Branch),
-            (format!("refs/tags/{}", target), TargetKind::Tag),
-            (format!("refs/remotes/{}", target), TargetKind::RemoteBranch),
-            (target.to_owned(), TargetKind::Commit),
-        ];
-        let mut found = None;
-        for (name, kind) in candidates {
-            if !name.starts_with("refs/") && name != "HEAD" {
-                continue;
-            }
-            match store.resolve_recursive(&name) {
-                Ok(resolved) => {
-                    found = Some((resolved.oid, kind));
-                    break;
-                }
-                Err(Error::RefNotFound(_)) | Err(Error::InvalidRefName(_)) => {}
-                Err(e) => return Err(e),
-            }
-        }
-        let (mut oid, kind) = match found {
-            Some(found) => found,
-            None => match self.resolve_short_oid(target) {
-                Ok(oid) => (oid, TargetKind::Commit),
-                Err(Error::ObjectNotFound(_) | Error::InvalidOid(_)) => {
-                    return Err(Error::RefNotFound(target.to_owned()))
-                }
-                Err(e) => return Err(e),
-            },
+        // The kind of reference names the merge in the default message.
+        let kind = match self.dwim_ref(target)? {
+            Some(full) if full.starts_with("refs/heads/") => TargetKind::Branch,
+            Some(full) if full.starts_with("refs/tags/") => TargetKind::Tag,
+            Some(full) if full.starts_with("refs/remotes/") => TargetKind::RemoteBranch,
+            _ => TargetKind::Commit,
+        };
+        let oid = match self.rev_parse(target) {
+            Ok(oid) => oid,
+            Err(
+                Error::InvalidRevision { .. } | Error::ObjectNotFound(_) | Error::InvalidOid(_),
+            ) => return Err(Error::RefNotFound(target.to_owned())),
+            Err(e) => return Err(e),
         };
         // Peel annotated tags to the commit.
-        loop {
-            let raw = self.object_store().read(&oid)?;
-            match raw.object_type {
-                ObjectType::Tag => oid = *TagObject::parse(raw)?.object(),
-                ObjectType::Commit => return Ok((oid, kind)),
-                other => {
-                    return Err(Error::TypeMismatch {
-                        expected: "commit",
-                        actual: other.as_str(),
-                    })
-                }
-            }
-        }
+        Ok((self.peel_to(oid, ObjectType::Commit)?, kind))
     }
 
     fn default_merge_message(&self, target: &str, kind: &TargetKind) -> Result<String> {

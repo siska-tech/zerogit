@@ -63,6 +63,7 @@ pub mod rebase;
 pub mod refs;
 pub mod remote;
 pub mod repository;
+pub mod revision;
 pub mod stash;
 pub mod status;
 pub mod transfer;

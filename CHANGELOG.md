@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+### Added
+- `Repository::rev_parse()`: `git rev-parse`と同じくリビジョンを解決する。参照名（Gitと同じ順: `refs/`・`refs/tags/`・`refs/heads/`・`refs/remotes/`・`refs/remotes/<name>/HEAD`）、短縮OID、`@`、`~<n>`・`^<n>`、`^{}`・`^{commit}`・`^{tree}`・`^{blob}`・`^{tag}`・`^{object}`、`<rev>:<path>`、`:<path>`・`:<n>:<path>`（index）、`<ref>@{<n>}`（reflog）、`@{-<n>}`、`@{upstream}`・`@{u}`に対応する。日付、`@{push}`、メッセージ検索（`^{/text}`・`:/text`）、範囲は未対応 (#44)
+- `Error::InvalidRevision`: 解決できないリビジョン。理由に問題の部分を含む (#44)
+
+### Changed
+- `Repository::commit()`・`tree()`・`blob()`・`object()`がリビジョンを受け付ける（`repo.commit("HEAD~1")`など）。短縮OIDの指定はこれまでどおり動く (#44)
+- `checkout`・`merge`・`rebase`の対象の解決を`rev_parse`にそろえた。参照名はGitと同じ順で探す（同名のタグとブランチではタグ、`origin`は`origin/HEAD`）。`checkout`は`-`・`@{-<n>}`がブランチを指すとき、Gitと同じくそのブランチに切り替える (#44)
+
+### Fixed
+- 参照名の解決で、ディレクトリ（`origin`に対する`refs/remotes/origin`など）を読もうとしてI/Oエラーになっていた。参照がないものとして扱う (#44)
+
 ## [0.6.0] - 2026-10-04
 
 Gitと並行して安全に使えるようにし（ロックファイル、正しいタイムゾーンとメッセージ）、大きな作業ツリーでのstatusを速くした。`zerogit-remote`は0.2.0として、zerogit 0.6に追従する。

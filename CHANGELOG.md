@@ -3,6 +3,13 @@
 このプロジェクトは [Keep a Changelog](https://keepachangelog.com/ja/1.0.0/) に準拠し、
 [Semantic Versioning](https://semver.org/lang/ja/) を採用しています。
 
+## [Unreleased]
+
+### Changed
+- crates.ioのパッケージから`issues/`・`docs/`・`tests/`を除外した
+
+---
+
 ## [0.4.0] - 2026-10-04
 
 ### Added

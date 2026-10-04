@@ -144,6 +144,25 @@ pub enum Error {
     /// Converting the line endings of the file is irreversible and
     /// `core.safecrlf` is `true`.
     IrreversibleLineEndings(PathBuf),
+
+    /// A merge is already in progress (`MERGE_HEAD` exists); conclude it
+    /// with a commit or abort it first.
+    MergeInProgress,
+
+    /// No merge is in progress (there is no `MERGE_HEAD`).
+    NoMergeInProgress,
+
+    /// A fast-forward was required but the histories have diverged.
+    NotFastForward,
+
+    /// The operation would overwrite local changes (staged or unstaged) or
+    /// untracked files at these paths; nothing was changed.
+    LocalChangesWouldBeOverwritten(Vec<PathBuf>),
+
+    /// The merge needs handling that is not supported (for example a path
+    /// that is a file on one side and a directory on the other); nothing
+    /// was changed.
+    UnsupportedMerge(String),
 }
 
 impl fmt::Display for Error {
@@ -214,6 +233,17 @@ impl fmt::Display for Error {
                 attribute,
                 path.display()
             ),
+            Error::MergeInProgress => write!(f, "a merge is in progress"),
+            Error::NoMergeInProgress => write!(f, "no merge is in progress"),
+            Error::NotFastForward => write!(f, "not possible to fast-forward"),
+            Error::LocalChangesWouldBeOverwritten(paths) => {
+                write!(f, "local changes would be overwritten:")?;
+                for path in paths {
+                    write!(f, " {}", path.display())?;
+                }
+                Ok(())
+            }
+            Error::UnsupportedMerge(reason) => write!(f, "unsupported merge: {}", reason),
             Error::IrreversibleLineEndings(path) => write!(
                 f,
                 "line ending conversion would not round-trip: {}",
@@ -321,6 +351,11 @@ mod tests {
                 attribute: "filter".to_string(),
             },
             Error::IrreversibleLineEndings(PathBuf::from("mixed.txt")),
+            Error::MergeInProgress,
+            Error::NoMergeInProgress,
+            Error::NotFastForward,
+            Error::LocalChangesWouldBeOverwritten(vec![PathBuf::from("a.txt")]),
+            Error::UnsupportedMerge("reason".to_string()),
         ];
 
         // All variants should implement Display without panicking

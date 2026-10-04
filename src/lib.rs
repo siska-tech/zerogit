@@ -88,6 +88,9 @@ pub use index::{Index, IndexEntry};
 // Re-export log types
 pub use log::LogOptions;
 
+// Re-export merge types
+pub use merge::{FastForward, MergeOptions, MergeOutcome};
+
 // Re-export diff types
 pub use diff::{
     BlobDiff, BlobDiffContent, DiffDelta, DiffHunk, DiffLine, DiffOptions, DiffStats, DiffStatus,

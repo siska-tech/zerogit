@@ -19,12 +19,15 @@
 - reflogの書き込み: `create_commit`（`commit:`・`commit (initial):`）、`create_branch`（`branch: Created from ...`）、`checkout`（`checkout: moving from ... to ...`）でHEADとブランチのreflogをGitと同じ形式で追記し、`delete_branch`でブランチのreflogを削除する。`core.logAllRefUpdates`に従う。記録する名前とメールは、コミットではコミッター、それ以外では`GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL`、`user.name`/`user.email`の順 (#25)
 - `Repository::reflog()`、`ReflogEntry`: reflogの読み取り（新しい順）
 - タグの作成・削除: `Repository::create_tag()`（軽量タグ）、`Repository::create_annotated_tag()`（tagオブジェクトを書き込む注釈付きタグ。対象は任意の型で、`type`は対象の実際の型。taggerは`create_commit`の作者と同じく引数で指定し、メッセージは`git tag -m`と同じく整形する）、`Repository::delete_tag()`。既存のタグは上書きしない (#27)
+- merge: `Repository::merge()`（fast-forward・3-way merge・コンフリクトの記録）、`Repository::merge_base()`/`merge_bases()`（`git merge-base [--all]`相当）、`Repository::merge_head()`、`Repository::abort_merge()`（`git merge --abort`相当）、`MergeOptions`、`FastForward`（`--ff`/`--ff-only`/`--no-ff`）、`MergeOutcome`。内容のマージは`git merge`と同じくhistogram diffで行い、競合マーカー（`merge.conflictStyle`の`merge`/`diff3`）の位置までGitと一致する。複数のmerge baseは仮想的な共通祖先にまとめる。コンフリクトはindexのstage 1〜3、`MERGE_HEAD`・`MERGE_MSG`・`MERGE_MODE`・`ORIG_HEAD`としてGitと同じ形で記録し、Gitで続行・中止できる。リネームは検出しない (#29)
+- `create_commit`は、マージ中（`MERGE_HEAD`あり）なら`MERGE_HEAD`を第二親にしてマージ状態を片付ける（reflogは`commit (merge):`）
+- `Error::MergeInProgress`、`NoMergeInProgress`、`NotFastForward`、`LocalChangesWouldBeOverwritten`、`UnsupportedMerge`
 - 設定の読み込みで`GIT_CONFIG_NOSYSTEM`・`GIT_CONFIG_SYSTEM`・`GIT_CONFIG_GLOBAL`に従う
 - symlinkをGitと同じくmode `120000`・リンク先パスを内容とするBlobとして扱う。`add`/`add_all`・status・作業ツリーとの差分・`checkout`に対応。リンク切れも`add`できる。`core.symlinks=false`や作成できない環境では、リンク先パスを内容とする通常ファイルとして書き出す (#22)
 
 ### Changed
 - crates.ioのパッケージから`issues/`・`docs/`・`tests/`を除外した
-- **破壊的変更**: `Error`に`UnmergedPaths`・`IgnoredPath`・`UnsupportedAttribute`・`IrreversibleLineEndings`を追加した
+- **破壊的変更**: `Error`に`UnmergedPaths`・`IgnoredPath`・`UnsupportedAttribute`・`IrreversibleLineEndings`・`MergeInProgress`・`NoMergeInProgress`・`NotFastForward`・`LocalChangesWouldBeOverwritten`・`UnsupportedMerge`を追加した
 - ブランチ名・タグ名を`git check-ref-format`の規則で検証する（空白、`@{`、`//`、末尾の`.`、`.`で始まる・`.lock`で終わる要素を追加で拒否。ブランチ名の`@`・`HEAD`も拒否）。`a`と`a/b`のように衝突する参照は`RefAlreadyExists`になる
 - グローバル設定は`$XDG_CONFIG_HOME/git/config`の後に`~/.gitconfig`を読む（Gitと同じく`~/.gitconfig`が優先）
 - 作業ツリーの走査で、名前が`.`で始まるファイル・ディレクトリ（`.github/`、`.env.example`など）を除外しない。除外するのは`.git`だけ (#20)

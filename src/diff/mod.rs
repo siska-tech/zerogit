@@ -13,8 +13,6 @@ use crate::infra::read_file;
 use crate::objects::{Blob, Commit, FileMode, Oid, Tree};
 
 pub mod blob;
-// Used by the merge being implemented for #29.
-#[allow(dead_code)]
 pub(crate) mod histogram;
 pub mod rename;
 

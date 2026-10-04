@@ -489,7 +489,7 @@ fn compare(old: Option<(Oid, FileMode)>, new: Option<(Oid, FileMode)>) -> Change
 }
 
 /// Flattens a tree into path -> (oid, mode), keyed like the index paths.
-fn flatten_with_modes(
+pub(crate) fn flatten_with_modes(
     store: &ObjectStore,
     tree_oid: &Oid,
     prefix: &str,

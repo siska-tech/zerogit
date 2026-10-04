@@ -381,7 +381,6 @@ fn line_ops(old: &[&str], new: &[&str], max_cost: u64) -> Option<Vec<Op>> {
 
 /// Returns the pairs of matching lines `(old index, new index)` of a
 /// minimal line diff, in order.
-#[allow(dead_code)] // Used by the merge being implemented for #29.
 pub(crate) fn matching_lines(old: &[&[u8]], new: &[&[u8]]) -> Vec<(usize, usize)> {
     byte_line_ops(old, new, u64::MAX)
         .unwrap_or_default()

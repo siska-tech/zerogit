@@ -392,12 +392,12 @@ impl Repository {
     }
 
     /// Returns the object store shared by this repository and its iterators.
-    fn object_store(&self) -> ObjectStore {
+    pub(crate) fn object_store(&self) -> ObjectStore {
         self.objects.clone()
     }
 
     /// Resolves HEAD while allowing a valid symbolic reference to an unborn branch.
-    fn optional_head_oid(&self) -> Result<Option<Oid>> {
+    pub(crate) fn optional_head_oid(&self) -> Result<Option<Oid>> {
         match self.head() {
             Ok(head) => Ok(Some(*head.oid())),
             Err(Error::RefNotFound(_)) => {
@@ -409,7 +409,7 @@ impl Repository {
         }
     }
 
-    fn head_tree_oid(&self) -> Result<Option<Oid>> {
+    pub(crate) fn head_tree_oid(&self) -> Result<Option<Oid>> {
         self.optional_head_oid()?
             .map(|oid| self.commit(&oid.to_hex()).map(|commit| *commit.tree()))
             .transpose()
@@ -610,7 +610,7 @@ impl Repository {
     }
 
     /// Returns a reference to the ref store.
-    fn ref_store(&self) -> RefStore {
+    pub(crate) fn ref_store(&self) -> RefStore {
         RefStore::new(&self.git_dir)
     }
 
@@ -919,7 +919,7 @@ impl Repository {
     }
 
     /// Reads the current index, or creates an empty one if it doesn't exist.
-    fn read_index(&self) -> Result<Index> {
+    pub(crate) fn read_index(&self) -> Result<Index> {
         let index_path = self.git_dir.join("index");
         if index_path.exists() {
             let index_data = read_file(&index_path)?;
@@ -930,7 +930,7 @@ impl Repository {
     }
 
     /// Writes the index to disk.
-    fn write_index(&self, idx: &Index) -> Result<()> {
+    pub(crate) fn write_index(&self, idx: &Index) -> Result<()> {
         let index_path = self.git_dir.join("index");
         let data = index::write(idx);
         write_file_atomic(&index_path, &data)
@@ -1184,7 +1184,7 @@ impl Repository {
     /// # Returns
     ///
     /// The OID of the root tree object.
-    fn build_tree_from_index(&self, idx: &Index) -> Result<Oid> {
+    pub(crate) fn build_tree_from_index(&self, idx: &Index) -> Result<Oid> {
         let store = self.object_store();
 
         // Group entries by directory
@@ -1305,7 +1305,7 @@ impl Repository {
     /// # Arguments
     ///
     /// * `tree_oid` - The OID of the tree object.
-    /// * `parent_oid` - The OID of the parent commit (None for root commits).
+    /// * `parents` - The parent commits (empty for a root commit).
     /// * `author` - The author signature string.
     /// * `committer` - The committer signature string.
     /// * `message` - The commit message.
@@ -1313,9 +1313,9 @@ impl Repository {
     /// # Returns
     ///
     /// The formatted commit content as bytes.
-    fn format_commit(
+    pub(crate) fn format_commit(
         tree_oid: &Oid,
-        parent_oid: Option<&Oid>,
+        parents: &[Oid],
         author: &str,
         committer: &str,
         message: &str,
@@ -1325,8 +1325,8 @@ impl Repository {
         // Tree line
         content.push_str(&format!("tree {}\n", tree_oid.to_hex()));
 
-        // Parent line (if not root commit)
-        if let Some(parent) = parent_oid {
+        // Parent lines (none for a root commit, two or more for a merge)
+        for parent in parents {
             content.push_str(&format!("parent {}\n", parent.to_hex()));
         }
 
@@ -1346,7 +1346,12 @@ impl Repository {
     ///
     /// If HEAD points to a branch, updates the branch reference.
     /// If HEAD is detached, updates HEAD directly.
-    fn update_head(&self, new_oid: &Oid, committer: &Signature, message: &str) -> Result<()> {
+    pub(crate) fn update_head(
+        &self,
+        new_oid: &Oid,
+        committer: &Signature,
+        message: &str,
+    ) -> Result<()> {
         let store = self.ref_store();
         let reflog = self.reflog_writer()?;
         let old_oid = self.optional_head_oid()?.unwrap_or_else(zero_oid);
@@ -1441,6 +1446,11 @@ impl Repository {
     ///   Nothing is written; resolve each path with [`Repository::add`] (or
     ///   [`Repository::reset`]) first.
     ///
+    /// While a merge is in progress (`MERGE_HEAD` exists, for example after
+    /// [`Repository::merge`] stopped on conflicts), the commit concludes it:
+    /// `MERGE_HEAD` becomes the second parent and the merge state files are
+    /// removed, as `git commit` does.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -1476,8 +1486,12 @@ impl Repository {
         // Build tree from index
         let tree_oid = self.build_tree_from_index(&idx)?;
 
-        // Get parent commit (current HEAD, if exists)
+        // Parents: the current HEAD (if any), then MERGE_HEAD when
+        // concluding a merge.
         let parent_oid = self.optional_head_oid()?;
+        let merge_heads = self.merge_heads()?;
+        let mut parents: Vec<Oid> = parent_oid.into_iter().collect();
+        parents.extend(merge_heads.iter().copied());
 
         // Format signature (using +0000 timezone for simplicity)
         let committer = Signature::new(author_name, author_email, now(), 0);
@@ -1485,10 +1499,7 @@ impl Repository {
 
         // Format commit content
         let commit_content = Self::format_commit(
-            &tree_oid,
-            parent_oid.as_ref(),
-            &signature,
-            &signature, // Use same for committer
+            &tree_oid, &parents, &signature, &signature, // Use same for committer
             message,
         );
 
@@ -1498,12 +1509,17 @@ impl Repository {
 
         // Update HEAD, logging "commit: <subject>" as Git does.
         let subject = message.lines().next().unwrap_or("");
-        let reflog_message = if parent_oid.is_some() {
+        let reflog_message = if !merge_heads.is_empty() {
+            format!("commit (merge): {}", subject)
+        } else if parent_oid.is_some() {
             format!("commit: {}", subject)
         } else {
             format!("commit (initial): {}", subject)
         };
         self.update_head(&commit_oid, &committer, &reflog_message)?;
+        if !merge_heads.is_empty() {
+            self.clear_merge_state()?;
+        }
 
         Ok(commit_oid)
     }
@@ -2194,7 +2210,7 @@ fn cleanup_message(message: &str) -> String {
 }
 
 /// The current time in seconds since the Unix epoch.
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -3125,7 +3141,7 @@ mod tests {
 
         let content = Repository::format_commit(
             &tree_oid,
-            Some(&parent_oid),
+            &[parent_oid],
             "Test User <test@example.com> 1234567890 +0000",
             "Test User <test@example.com> 1234567890 +0000",
             "Test message",
@@ -3146,7 +3162,7 @@ mod tests {
 
         let content = Repository::format_commit(
             &tree_oid,
-            None,
+            &[],
             "Test User <test@example.com> 1234567890 +0000",
             "Test User <test@example.com> 1234567890 +0000",
             "Initial commit",

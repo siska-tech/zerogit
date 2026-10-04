@@ -222,6 +222,9 @@ repo.checkout(target)?;                   // ブランチ切り替え
 repo.create_tag(name, target)?;           // 軽量タグ作成
 repo.create_annotated_tag(name, target, msg, tagger, email)?; // 注釈付きタグ作成
 repo.delete_tag(name)?;                   // タグ削除
+repo.merge(target, name, email, &MergeOptions::new())?; // マージ（ff・3-way）
+repo.abort_merge()?;                      // マージの中止
+repo.merge_base(&a, &b)?;                 // 共通祖先
 ```
 
 詳細は [APIドキュメント](https://docs.rs/zerogit) を参照してください。

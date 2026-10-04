@@ -86,8 +86,11 @@ fn append(changes: &mut Vec<Change>, change: Change) {
 /// A change on one side, with the matching unchanged range on the other
 /// side (`offset` converts base line numbers to the other side's).
 fn one_sided(kind: Kind, hunk: &Hunk, offset: isize) -> Change {
-    let other_start = (hunk.old_start as isize + offset) as usize;
-    let other = other_start..other_start + hunk.old_len;
+    // The start can only fall before the beginning when this change joins
+    // the previous one, which keeps its own start; the end is still exact.
+    let other_start = hunk.old_start as isize + offset;
+    let other_end = (other_start + hunk.old_len as isize).max(0) as usize;
+    let other = (other_start.max(0) as usize).min(other_end)..other_end;
     let own = hunk.new_start..hunk.new_end();
     let (ours, theirs) = if kind == Kind::Ours {
         (own, other)
@@ -134,8 +137,10 @@ fn combine(ours_diff: &[Hunk], theirs_diff: &[Hunk], lines: SideLines<'_>) -> Ve
             // Extend each side over the base lines only the other side changed.
             let before = x.old_start as isize - y.old_start as isize;
             let after = x.old_end() as isize - y.old_end() as isize;
-            let ours_start = x.new_start - before.max(0) as usize;
-            let theirs_start = y.new_start - (-before).max(0) as usize;
+            // A start before the beginning only happens when this change
+            // joins the previous one, which keeps its own start.
+            let ours_start = x.new_start.saturating_sub(before.max(0) as usize);
+            let theirs_start = y.new_start.saturating_sub((-before).max(0) as usize);
             let ours_end = x.new_end() + (-after).max(0) as usize;
             let theirs_end = y.new_end() + after.max(0) as usize;
             append(
@@ -350,5 +355,54 @@ mod tests {
     fn test_missing_final_newline_in_conflict() {
         let (text, _) = merge("a\n", "b", "c");
         assert_eq!(text, "<<<<<<< ours\nb\n=======\nc\n>>>>>>> theirs\n");
+    }
+}
+
+#[cfg(test)]
+mod fuzz {
+    use super::*;
+
+    #[test]
+    fn random_inputs_do_not_panic() {
+        let mut state = 0x243F6A8885A308D3u64;
+        let mut below = |n: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % n
+        };
+        for _ in 0..20000 {
+            let alphabet = 2 + below(6);
+            let gen = |below: &mut dyn FnMut(u64) -> u64, len: u64| -> String {
+                (0..len)
+                    .map(|_| format!("l{}\n", below(alphabet)))
+                    .collect()
+            };
+            let (n1, n2, n3) = (below(8), below(8), below(8));
+            let base = gen(&mut below, n1);
+            let ours = gen(&mut below, n2);
+            let theirs = gen(&mut below, n3);
+            let labels = Labels {
+                ours: "o",
+                base: "b",
+                theirs: "t",
+            };
+            let result = std::panic::catch_unwind(|| {
+                merge_lines(
+                    base.as_bytes(),
+                    ours.as_bytes(),
+                    theirs.as_bytes(),
+                    labels,
+                    ConflictStyle::Merge,
+                )
+            });
+            assert!(
+                result.is_ok(),
+                "base {:?} ours {:?} theirs {:?}",
+                base,
+                ours,
+                theirs
+            );
+        }
     }
 }

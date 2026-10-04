@@ -457,6 +457,26 @@ pub fn delete_tag(&self, name: &str) -> Result<()>
 | エラー | `Error::ObjectNotFound` - 対象が存在しない。エラー時は何も書き込まない |
 | エラー | `Error::RefNotFound` / `Error::PackedRefDeletionUnsupported` - 削除時、タグがない／packed-refsにある |
 
+##### `Repository::merge` / `abort_merge` / `merge_head` / `merge_base` / `merge_bases`
+
+```rust
+pub fn merge(&self, target: &str, author_name: &str, author_email: &str,
+             options: &MergeOptions) -> Result<MergeOutcome>
+pub fn abort_merge(&self) -> Result<()>
+pub fn merge_head(&self) -> Result<Option<Oid>>
+pub fn merge_base(&self, a: &Oid, b: &Oid) -> Result<Option<Oid>>
+pub fn merge_bases(&self, a: &Oid, b: &Oid) -> Result<Vec<Oid>>
+```
+
+| 項目   | 説明 |
+| ------ | ---- |
+| 概要   | `git merge <target>`相当。`target`はブランチ・タグ（peelする）・リモート追跡ブランチ・完全な参照名・コミット |
+| 戻り値 | `MergeOutcome::UpToDate` / `FastForward(Oid)` / `Merged(Oid)`（親はHEADとtarget）/ `Conflicts(Vec<PathBuf>)` |
+| オプション | `MergeOptions::new().fast_forward(FastForward::Allow / Only / Never).message(...)`。既定のメッセージはGitと同じ（`Merge branch 'x'`、`main`/`master`以外では` into <branch>`） |
+| エラー | `MergeInProgress`・`UnmergedPaths`・`NotFastForward`・`LocalChangesWouldBeOverwritten`（変更されるパスに作業ツリーの変更や未追跡ファイルがある、またはfast-forward以外でステージ済みの変更がある）・`UnsupportedMerge`（無関係な履歴、ファイルとディレクトリの衝突）・`RefNotFound`。いずれも何も変更しない |
+
+内容のマージは`git merge`と同じhistogram diffとzealousレベルの調整で行い、`merge.conflictStyle`（`merge`/`diff3`。`zdiff3`は`diff3`として扱う）に従う。片側だけの変更・同じ変更は採用し、両側の変更が重なるか接すればコンフリクトになる。変更/削除、型の変更（ファイル・symlink・submodule）、バイナリはマーカーを書かずにコンフリクトとする。実行ビットは内容と別にマージする。リネームは検出しない。コンフリクトはindexのstage 1〜3と`MERGE_HEAD`・`MERGE_MSG`・`MERGE_MODE`・`ORIG_HEAD`に記録し、`create_commit`（またはGitの`git commit`）で完了、`abort_merge`（または`git merge --abort`）で中止できる。`abort_merge`はマージで変わったパスだけをHEADに戻し、それ以外の作業ツリーの変更は残す。
+
 ##### `Repository::reflog`
 
 ```rust

@@ -18,12 +18,14 @@ use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::attributes::{AttrValue, Attributes};
 use crate::config::Config;
+use crate::eol::{CrlfAction, EolSettings};
 use crate::error::{Error, Result};
 use crate::ignore::IgnoreRules;
 use crate::index::{Index, IndexEntry};
 use crate::infra::{hash_object, write_file_atomic};
-use crate::objects::{tree::FileMode, Oid};
+use crate::objects::{tree::FileMode, ObjectStore, Oid};
 
 /// The result of walking the working tree.
 #[derive(Debug, Default)]
@@ -88,18 +90,48 @@ fn timestamp(time: Option<std::time::SystemTime>) -> (u64, u32) {
 pub(crate) struct Worktree {
     root: PathBuf,
     rules: IgnoreRules,
+    attributes: Attributes,
+    eol: EolSettings,
+    /// Filter drivers configured with `filter.<name>.clean`, `smudge` or
+    /// `process`, by name. Others are ignored, as Git ignores them.
+    filters: HashSet<String>,
+    /// Reads index blobs for the CRLF check of automatic conversion.
+    store: ObjectStore,
     /// `core.symlinks`: create symbolic links on checkout.
     symlinks: bool,
     /// `core.fileMode`: trust the executable bit of files.
     filemode: bool,
 }
 
+/// Attributes whose conversions are not implemented.
+const UNSUPPORTED: &[&str] = &["filter", "ident", "working-tree-encoding"];
+
 impl Worktree {
-    /// Loads the ignore rules and checkout settings of a working tree.
-    pub(crate) fn load(work_dir: &Path, git_dir: &Path, config: &Config) -> Result<Self> {
+    /// Loads the ignore rules, attributes and checkout settings of a
+    /// working tree.
+    pub(crate) fn load(
+        work_dir: &Path,
+        git_dir: &Path,
+        config: &Config,
+        store: ObjectStore,
+    ) -> Result<Self> {
+        let filters = config
+            .subsections("filter")
+            .into_iter()
+            .filter(|name| {
+                ["clean", "smudge", "process"]
+                    .iter()
+                    .any(|key| config.get_subsection("filter", name, key).is_some())
+            })
+            .map(str::to_owned)
+            .collect();
         Ok(Worktree {
             root: work_dir.to_path_buf(),
             rules: IgnoreRules::load(work_dir, git_dir, config)?,
+            attributes: Attributes::load(work_dir, git_dir, config)?,
+            eol: EolSettings::from_config(config),
+            filters,
+            store,
             symlinks: config.get_bool_or("core", "symlinks", true),
             // Without an executable bit, the index keeps the recorded mode.
             filemode: cfg!(unix) && config.get_bool_or("core", "filemode", true),
@@ -109,6 +141,11 @@ impl Worktree {
     /// The ignore rules of this working tree.
     pub(crate) fn rules(&mut self) -> &mut IgnoreRules {
         &mut self.rules
+    }
+
+    /// The attributes of this working tree.
+    pub(crate) fn attributes(&mut self) -> &mut Attributes {
+        &mut self.attributes
     }
 
     /// Walks the working tree, sorting files into kept and ignored.
@@ -156,17 +193,77 @@ impl Worktree {
         }
     }
 
-    /// Reads a file of the working tree as Git would store it.
+    /// The line ending conversion for a path, or an error if the path has an
+    /// attribute whose conversion is not implemented.
+    fn conversion(&mut self, path: &Path) -> Result<CrlfAction> {
+        let mut names: Vec<&str> = crate::eol::ATTRIBUTES.to_vec();
+        names.extend_from_slice(UNSUPPORTED);
+        let attrs = self.attributes.lookup(path, &names)?;
+        for name in UNSUPPORTED {
+            let unsupported = match (attrs.get(*name), *name) {
+                // A filter without a configured driver is ignored, as in Git.
+                (Some(AttrValue::Value(driver)), "filter") => self.filters.contains(driver),
+                (Some(AttrValue::Set), "ident") => true,
+                (Some(AttrValue::Value(_)), "working-tree-encoding") => true,
+                _ => false,
+            };
+            if unsupported {
+                return Err(Error::UnsupportedAttribute {
+                    path: path.to_path_buf(),
+                    attribute: (*name).to_owned(),
+                });
+            }
+        }
+        Ok(self.eol.action(&attrs))
+    }
+
+    /// Checks that a path can be converted in both directions.
+    pub(crate) fn check_supported(&mut self, path: &Path) -> Result<()> {
+        self.conversion(path).map(|_| ())
+    }
+
+    /// Reads a file of the working tree as Git would store it: line endings
+    /// converted per `core.autocrlf`, `core.eol` and `.gitattributes`.
     ///
-    /// `tracked_mode` is the mode recorded in the index, used where the file
-    /// system cannot tell: the executable bit with `core.fileMode=false`, and
-    /// a symlink checked out as a plain file. Returns `None` if the path does
+    /// `tracked` is the path's index entry. Its mode is used where the file
+    /// system cannot tell (the executable bit with `core.fileMode=false`, a
+    /// symlink checked out as a plain file), and its blob decides whether
+    /// automatic conversion leaves CRLF alone. Returns `None` if the path does
     /// not exist or is a directory.
+    ///
+    /// # Errors
+    ///
+    /// `Error::UnsupportedAttribute` if the path has a `filter` (with a
+    /// configured driver), `ident` or `working-tree-encoding` attribute.
     pub(crate) fn read(
-        &self,
+        &mut self,
         path: &Path,
-        tracked_mode: Option<FileMode>,
+        tracked: Option<&IndexEntry>,
     ) -> Result<Option<WorkFile>> {
+        let Some(file) = self.read_raw(path, tracked.map(IndexEntry::mode))? else {
+            return Ok(None);
+        };
+        // A link target (or a link checked out as a file) is not text to convert.
+        if file.mode == FileMode::Symlink {
+            return Ok(Some(file));
+        }
+        let action = self.conversion(path)?;
+        let store = &self.store;
+        let cleaned = crate::eol::to_git(&self.eol, action, &file.content, || {
+            tracked
+                .filter(|e| e.mode() != FileMode::Symlink)
+                .and_then(|e| store.read(e.oid()).ok())
+                .is_some_and(|raw| crate::eol::has_crlf_text(&raw.content))
+        });
+        if cleaned.irreversible && self.eol.safecrlf {
+            return Err(Error::IrreversibleLineEndings(path.to_path_buf()));
+        }
+        let content = cleaned.content.into_owned();
+        Ok(Some(WorkFile { content, ..file }))
+    }
+
+    /// Reads a file without converting its content.
+    fn read_raw(&self, path: &Path, tracked_mode: Option<FileMode>) -> Result<Option<WorkFile>> {
         let Some(metadata) = self.metadata(path)? else {
             return Ok(None);
         };
@@ -200,23 +297,66 @@ impl Worktree {
 
     /// Returns the blob OID and mode of a work tree file, or `None` if it
     /// does not exist.
+    ///
+    /// A file whose conversion is not supported (see [`Worktree::read`]) is
+    /// compared by its stat data: if size and modification time still match
+    /// the index entry it is taken as unchanged, otherwise its unconverted
+    /// content is hashed (and so differs from the index).
     pub(crate) fn hash(
+        &mut self,
+        path: &Path,
+        tracked: Option<&IndexEntry>,
+    ) -> Result<Option<(Oid, FileMode)>> {
+        match self.read(path, tracked) {
+            Ok(file) => Ok(file.map(|file| (file.oid(), file.mode))),
+            Err(Error::UnsupportedAttribute { .. }) | Err(Error::IrreversibleLineEndings(_)) => {
+                let Some(file) = self.read_raw(path, tracked.map(IndexEntry::mode))? else {
+                    return Ok(None);
+                };
+                if let Some(entry) = tracked {
+                    if stat_matches(entry, &file.metadata) {
+                        return Ok(Some((*entry.oid(), entry.mode())));
+                    }
+                }
+                Ok(Some((file.oid(), file.mode)))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Builds a stage 0 index entry with the stat data of the file at `path`
+    /// (zeros if it is missing), for a blob just checked out.
+    pub(crate) fn stat_entry(
         &self,
         path: &Path,
-        tracked_mode: Option<FileMode>,
-    ) -> Result<Option<(Oid, FileMode)>> {
-        Ok(self
-            .read(path, tracked_mode)?
-            .map(|file| (file.oid(), file.mode)))
+        index_path: PathBuf,
+        oid: Oid,
+        mode: FileMode,
+    ) -> Result<IndexEntry> {
+        Ok(match self.metadata(path)? {
+            Some(metadata) => WorkFile {
+                content: Vec::new(),
+                mode,
+                metadata,
+            }
+            .index_entry(index_path, oid),
+            None => IndexEntry::new(0, 0, 0, 0, mode, 0, 0, 0, oid, index_path, 0),
+        })
     }
 
     /// Writes a blob to the working tree, replacing whatever is at `path`.
     ///
-    /// A symlink is created as a link when `core.symlinks` allows and the
-    /// platform supports it, and otherwise written as a file containing the
-    /// target, as Git does.
-    pub(crate) fn write(&self, path: &Path, content: &[u8], mode: FileMode) -> Result<()> {
+    /// Line endings are converted for the working tree. A symlink is created
+    /// as a link when `core.symlinks` allows and the platform supports it,
+    /// and otherwise written as a file containing the target, as Git does.
+    pub(crate) fn write(&mut self, path: &Path, content: &[u8], mode: FileMode) -> Result<()> {
         let full = self.root.join(path);
+        let converted = if mode == FileMode::Symlink {
+            std::borrow::Cow::Borrowed(content)
+        } else {
+            let action = self.conversion(path)?;
+            crate::eol::to_worktree(&self.eol, action, content)
+        };
         if let Some(parent) = full.parent() {
             self.make_dirs(parent)?;
         }
@@ -230,7 +370,7 @@ impl Worktree {
         if mode == FileMode::Symlink && self.symlinks && create_symlink(content, &full).is_ok() {
             return Ok(());
         }
-        write_file_atomic(&full, content)?;
+        write_file_atomic(&full, &converted)?;
         set_executable(&full, mode == FileMode::Executable)?;
         Ok(())
     }
@@ -282,6 +422,14 @@ impl Worktree {
         }
         Ok(())
     }
+}
+
+/// Whether a file's size and modification time match its index entry.
+fn stat_matches(entry: &IndexEntry, metadata: &fs::Metadata) -> bool {
+    let (mtime, mtime_nsec) = timestamp(metadata.modified().ok());
+    entry.size() == metadata.len() as u32
+        && entry.mtime() == mtime
+        && entry.mtime_nsec() == mtime_nsec
 }
 
 /// The mode of a regular file from its executable bit.
@@ -433,8 +581,13 @@ mod tests {
     }
 
     fn files_of(temp: &TempDir, index: Option<&Index>, collect: bool) -> Scan {
-        let mut worktree =
-            Worktree::load(temp.path(), &temp.path().join(".git"), &Config::new()).unwrap();
+        let mut worktree = Worktree::load(
+            temp.path(),
+            &temp.path().join(".git"),
+            &Config::new(),
+            ObjectStore::new(temp.path().join(".git/objects")),
+        )
+        .unwrap();
         worktree.scan(index, collect).unwrap()
     }
 

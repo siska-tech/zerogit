@@ -130,6 +130,20 @@ pub enum Error {
     /// The path is ignored by `.gitignore`, `.git/info/exclude` or
     /// `core.excludesFile`, and is not tracked.
     IgnoredPath(PathBuf),
+
+    /// The path has an attribute whose conversion is not supported
+    /// (`filter` with a configured driver, `ident`, `working-tree-encoding`),
+    /// so its content cannot be converted the way Git would.
+    UnsupportedAttribute {
+        /// The path.
+        path: PathBuf,
+        /// The attribute name.
+        attribute: String,
+    },
+
+    /// Converting the line endings of the file is irreversible and
+    /// `core.safecrlf` is `true`.
+    IrreversibleLineEndings(PathBuf),
 }
 
 impl fmt::Display for Error {
@@ -194,6 +208,17 @@ impl fmt::Display for Error {
             Error::IgnoredPath(path) => {
                 write!(f, "path is ignored: {}", path.display())
             }
+            Error::UnsupportedAttribute { path, attribute } => write!(
+                f,
+                "unsupported attribute '{}' for {}",
+                attribute,
+                path.display()
+            ),
+            Error::IrreversibleLineEndings(path) => write!(
+                f,
+                "line ending conversion would not round-trip: {}",
+                path.display()
+            ),
         }
     }
 }
@@ -291,6 +316,11 @@ mod tests {
             Error::AlreadyARepository(PathBuf::from("/test/repo")),
             Error::UnmergedPaths(vec![PathBuf::from("file.txt")]),
             Error::IgnoredPath(PathBuf::from("debug.log")),
+            Error::UnsupportedAttribute {
+                path: PathBuf::from("big.bin"),
+                attribute: "filter".to_string(),
+            },
+            Error::IrreversibleLineEndings(PathBuf::from("mixed.txt")),
         ];
 
         // All variants should implement Display without panicking

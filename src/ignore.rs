@@ -19,9 +19,9 @@ use std::path::{Path, PathBuf};
 use crate::config::Config;
 use crate::error::Result;
 
-/// One parsed pattern.
+/// One parsed pattern, as used by `.gitignore` and `.gitattributes`.
 #[derive(Debug, Clone)]
-struct Pattern {
+pub(crate) struct Pattern {
     /// The pattern text, without `!`, a leading `/` or a trailing `/`.
     glob: Vec<u8>,
     negative: bool,
@@ -69,15 +69,7 @@ impl PatternList {
             None => relative,
         };
         for pattern in self.patterns.iter().rev() {
-            if pattern.dir_only && !is_dir {
-                continue;
-            }
-            let text = if pattern.basename_only {
-                basename
-            } else {
-                relative
-            };
-            if wildmatch(&pattern.glob, text, icase) {
+            if pattern.matches_relative(relative, basename, is_dir, icase) {
                 return Some(!pattern.negative);
             }
         }
@@ -85,8 +77,66 @@ impl PatternList {
     }
 }
 
+impl Pattern {
+    /// Parses one pattern line (already stripped of comments and trailing
+    /// spaces). Returns `None` for an empty pattern.
+    pub(crate) fn parse(line: &[u8]) -> Option<Pattern> {
+        parse_pattern(line)
+    }
+
+    /// Whether this pattern was negated with `!`.
+    pub(crate) fn is_negative(&self) -> bool {
+        self.negative
+    }
+
+    /// Whether this pattern ended with `/` and matches directories only.
+    pub(crate) fn is_dir_only(&self) -> bool {
+        self.dir_only
+    }
+
+    /// Matches a path relative to the directory the pattern is defined in.
+    fn matches_relative(
+        &self,
+        relative: &[u8],
+        basename: &[u8],
+        is_dir: bool,
+        icase: bool,
+    ) -> bool {
+        if self.dir_only && !is_dir {
+            return false;
+        }
+        let text = if self.basename_only {
+            basename
+        } else {
+            relative
+        };
+        wildmatch(&self.glob, text, icase)
+    }
+
+    /// Matches a `/`-separated path relative to the work tree, for a pattern
+    /// defined in the directory `base` (empty for the root).
+    pub(crate) fn matches(&self, base: &[u8], path: &[u8], is_dir: bool, icase: bool) -> bool {
+        let relative = if base.is_empty() {
+            path
+        } else {
+            match path
+                .strip_prefix(base)
+                .and_then(|rest| rest.strip_prefix(b"/"))
+            {
+                Some(rest) => rest,
+                None => return false,
+            }
+        };
+        let basename = match relative.iter().rposition(|&b| b == b'/') {
+            Some(pos) => &relative[pos + 1..],
+            None => relative,
+        };
+        self.matches_relative(relative, basename, is_dir, icase)
+    }
+}
+
 /// Removes trailing spaces that are not escaped with a backslash.
-fn trim_trailing_spaces(line: &[u8]) -> &[u8] {
+pub(crate) fn trim_trailing_spaces(line: &[u8]) -> &[u8] {
     let mut end = line.len();
     while end > 0 && line[end - 1] == b' ' {
         // Count the backslashes before this space.
@@ -228,7 +278,7 @@ impl IgnoreRules {
 }
 
 /// Reads a file, treating a missing file (or a directory in its place) as absent.
-fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
+pub(crate) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
     match std::fs::read(path) {
         Ok(content) => Ok(Some(content)),
         Err(e)

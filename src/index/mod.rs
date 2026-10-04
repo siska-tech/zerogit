@@ -349,11 +349,6 @@ impl IndexEntry {
         self
     }
 
-    pub(crate) fn with_mode(mut self, mode: FileMode) -> Self {
-        self.mode = mode;
-        self
-    }
-
     pub(crate) fn with_extended_flags(mut self, skip_worktree: bool, intent_to_add: bool) -> Self {
         self.skip_worktree = skip_worktree;
         self.intent_to_add = intent_to_add;

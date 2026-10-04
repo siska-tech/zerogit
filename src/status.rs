@@ -163,13 +163,9 @@ pub fn compute_status(
 ) -> Result<Vec<StatusEntry>> {
     let git_dir = work_dir.join(".git");
     let config = crate::config::load_config(&git_dir)?;
-    let mut worktree = Worktree::load(work_dir, &git_dir, &config)?;
-    compute_status_with_store(
-        &ObjectStore::from_loose(store),
-        head_tree_oid,
-        index,
-        &mut worktree,
-    )
+    let store = ObjectStore::from_loose(store);
+    let mut worktree = Worktree::load(work_dir, &git_dir, &config, store.clone())?;
+    compute_status_with_store(&store, head_tree_oid, index, &mut worktree)
 }
 
 pub(crate) fn compute_status_with_store(
@@ -265,7 +261,7 @@ pub(crate) fn compute_status_with_store(
                 let index_oid = index_entry.oid();
                 let head_modified = head_oid != index_oid;
                 // Content or mode (executable bit, symlink) differs from the index.
-                let working_modified = worktree.hash(&path, Some(index_entry.mode()))?
+                let working_modified = worktree.hash(&path, Some(index_entry))?
                     != Some((*index_oid, index_entry.mode()));
 
                 match (head_modified, working_modified) {

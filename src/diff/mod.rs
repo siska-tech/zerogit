@@ -671,8 +671,8 @@ impl Repository {
         for file_path in files {
             // Normalize path for cross-platform consistency
             let normalized_path = normalize_path(&file_path);
-            let tracked_mode = index.get(&normalized_path).map(|e| e.mode());
-            if let Some((oid, mode)) = worktree.hash(&file_path, tracked_mode)? {
+            let tracked = index.get(&normalized_path);
+            if let Some((oid, mode)) = worktree.hash(&file_path, tracked)? {
                 map.insert(normalized_path, FlatEntry { oid, mode });
             }
         }

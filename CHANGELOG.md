@@ -11,11 +11,16 @@
 - `.gitignore`・`.git/info/exclude`・`core.excludesFile`の解釈（否定、ディレクトリ指定、固定、`*`・`?`・`[...]`・`**`、エスケープ、`core.ignoreCase`）。status・`add_all`・作業ツリーとの差分に適用する (#20)
 - `Repository::is_ignored()`、`Repository::ignored_files()`、`Repository::add_force()`
 - `Error::IgnoredPath`: 無視された未追跡ファイルを`add`した場合のエラー
+- 改行コードの変換: `core.autocrlf`（true/input/false）・`core.eol`・`.gitattributes`（`text`、`text=auto`、`-text`、`binary`、`eol=lf|crlf`、旧形式の`crlf`）・`core.attributesFile`・`.git/info/attributes`に従い、`add`/`add_all`・status・作業ツリーとの差分ではCRLF→LF、`checkout`ではLF→CRLFに変換する。`text=auto`の判定とindexにCRLFがあるファイルの扱いはGitと同じ (#21)
+- `core.safecrlf=true`で往復できない変換（改行の混在など）を`add`すると`Error::IrreversibleLineEndings`を返す。既定（warn）では変換して続行する
+- `filter`（driverが設定されている場合）・`ident`・`working-tree-encoding`属性は未対応として扱い、`add`/`checkout`は`Error::UnsupportedAttribute`を返す。statusと作業ツリーとの差分は、サイズと更新時刻がindexと一致すれば変更なしとし、一致しなければ変更ありとする。driverが設定されていない`filter`はGitと同じく無視する
+- 設定の読み込みで`GIT_CONFIG_NOSYSTEM`・`GIT_CONFIG_SYSTEM`・`GIT_CONFIG_GLOBAL`に従う
 - symlinkをGitと同じくmode `120000`・リンク先パスを内容とするBlobとして扱う。`add`/`add_all`・status・作業ツリーとの差分・`checkout`に対応。リンク切れも`add`できる。`core.symlinks=false`や作成できない環境では、リンク先パスを内容とする通常ファイルとして書き出す (#22)
 
 ### Changed
 - crates.ioのパッケージから`issues/`・`docs/`・`tests/`を除外した
-- **破壊的変更**: `Error`に`UnmergedPaths`・`IgnoredPath`を追加した
+- **破壊的変更**: `Error`に`UnmergedPaths`・`IgnoredPath`・`UnsupportedAttribute`・`IrreversibleLineEndings`を追加した
+- グローバル設定は`$XDG_CONFIG_HOME/git/config`の後に`~/.gitconfig`を読む（Gitと同じく`~/.gitconfig`が優先）
 - 作業ツリーの走査で、名前が`.`で始まるファイル・ディレクトリ（`.github/`、`.env.example`など）を除外しない。除外するのは`.git`だけ (#20)
 - `Repository::add`は、無視された未追跡ファイルを`IgnoredPath`で拒否する（`git add`と同じ）
 - status・作業ツリーとの差分は、内容に加えてmode（実行ビット、symlink）の違いも変更として報告する。`core.fileMode=false`（およびUnix以外）ではindexのmodeを使う

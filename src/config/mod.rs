@@ -444,8 +444,10 @@ impl ConfigLevel {
 /// Loads configuration with the standard Git precedence.
 ///
 /// Configuration is loaded in the following order (later overrides earlier):
-/// 1. System configuration (`/etc/gitconfig`)
-/// 2. Global configuration (`~/.gitconfig`)
+/// 1. System configuration (`/etc/gitconfig`, or `$GIT_CONFIG_SYSTEM`;
+///    skipped when `GIT_CONFIG_NOSYSTEM` is true)
+/// 2. Global configuration (`$XDG_CONFIG_HOME/git/config`, then
+///    `~/.gitconfig`; or only `$GIT_CONFIG_GLOBAL` when set)
 /// 3. Local repository configuration (`.git/config`)
 ///
 /// # Arguments
@@ -458,24 +460,38 @@ impl ConfigLevel {
 pub fn load_config<P: AsRef<Path>>(git_dir: P) -> Result<Config> {
     let mut config = Config::new();
 
-    // Load system config
-    if let Some(system_path) = ConfigLevel::System.default_path() {
-        if let Ok(system_config) = Config::from_file_with_includes(&system_path) {
-            config.merge(&system_config);
+    // Load system config, unless disabled as Git allows.
+    if !env_flag("GIT_CONFIG_NOSYSTEM") {
+        let system_path = match std::env::var_os("GIT_CONFIG_SYSTEM") {
+            Some(path) => Some(PathBuf::from(path)),
+            None => ConfigLevel::System.default_path(),
+        };
+        if let Some(system_path) = system_path {
+            if let Ok(system_config) = Config::from_file_with_includes(&system_path) {
+                config.merge(&system_config);
+            }
         }
     }
 
-    // Load global config
-    if let Some(global_path) = ConfigLevel::Global.default_path() {
-        if let Ok(global_config) = Config::from_file_with_includes(&global_path) {
-            config.merge(&global_config);
+    // Load global config: GIT_CONFIG_GLOBAL replaces both default locations.
+    match std::env::var_os("GIT_CONFIG_GLOBAL") {
+        Some(path) => {
+            if let Ok(global_config) = Config::from_file_with_includes(PathBuf::from(path)) {
+                config.merge(&global_config);
+            }
         }
-    }
-
-    // Also check XDG config location
-    if let Some(xdg_config) = xdg_config_path() {
-        if let Ok(xdg_config) = Config::from_file_with_includes(&xdg_config) {
-            config.merge(&xdg_config);
+        None => {
+            // The XDG file is read first, so ~/.gitconfig overrides it.
+            if let Some(xdg_config) = xdg_config_path() {
+                if let Ok(xdg_config) = Config::from_file_with_includes(&xdg_config) {
+                    config.merge(&xdg_config);
+                }
+            }
+            if let Some(global_path) = ConfigLevel::Global.default_path() {
+                if let Ok(global_config) = Config::from_file_with_includes(&global_path) {
+                    config.merge(&global_config);
+                }
+            }
         }
     }
 
@@ -486,6 +502,14 @@ pub fn load_config<P: AsRef<Path>>(git_dir: P) -> Result<Config> {
     }
 
     Ok(config)
+}
+
+/// Whether a boolean environment variable such as `GIT_CONFIG_NOSYSTEM` is set
+/// to a true value.
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .is_some_and(|v| parse_bool(&v).unwrap_or(false))
 }
 
 /// Returns the XDG config path for Git (~/.config/git/config).

@@ -48,8 +48,10 @@
 //! - [`index`] - Index (staging area) operations
 //! - [`status`] - Working tree status
 
+pub(crate) mod attributes;
 pub mod config;
 pub mod diff;
+pub(crate) mod eol;
 pub mod error;
 pub(crate) mod ignore;
 pub mod index;

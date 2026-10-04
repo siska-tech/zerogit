@@ -256,7 +256,9 @@ pub fn status(&self) -> Result<Vec<StatusEntry>>
 
 作業ツリーの走査は`.git`だけを除外し、名前が`.`で始まるファイルも対象にする。未追跡ファイルには`.gitignore`（各ディレクトリ）・`.git/info/exclude`・`core.excludesFile`（既定は`$XDG_CONFIG_HOME/git/ignore`）をGitと同じ規則・優先順位で適用し、無視されたファイルは`Untracked`に含めない（`git ls-files --others --exclude-standard`と一致）。追跡中のファイルは無視指定に一致しても通常どおり比較する。
 
-作業ツリーのファイルは内容とmodeの両方で比較する。symlinkは辿らず、リンク先パス（区切りは`/`）を内容とするmode `120000`として扱う。実行ビットは`core.fileMode`がtrue（既定）のUnixでのみ参照し、それ以外ではindexのmodeを使う。`checkout`は`core.symlinks`がtrue（既定）ならsymlinkを作成し、falseの場合や作成できない場合はリンク先パスを内容とする通常ファイルを書き出す（indexのmodeは`120000`のまま）。`core.ignoreCase`がtrueなら大文字・小文字を区別しない。
+作業ツリーのファイルは内容とmodeの両方で比較する。symlinkは辿らず、リンク先パス（区切りは`/`）を内容とするmode `120000`として扱う。実行ビットは`core.fileMode`がtrue（既定）のUnixでのみ参照し、それ以外ではindexのmodeを使う。改行コードは`core.autocrlf`・`core.eol`・`.gitattributes`（`text`、`text=auto`、`-text`、`binary`、`eol`、旧形式の`crlf`。`core.attributesFile`と`.git/info/attributes`を含む）に従ってGitと同じく変換する（読み取り時はCRLF→LF、`checkout`ではLF→CRLF）。`filter`（driver設定あり）・`ident`・`working-tree-encoding`は未対応で、`add`/`checkout`は`Error::UnsupportedAttribute`、statusはサイズと更新時刻での比較になる。
+
+`checkout`は`core.symlinks`がtrue（既定）ならsymlinkを作成し、falseの場合や作成できない場合はリンク先パスを内容とする通常ファイルを書き出す（indexのmodeは`120000`のまま）。`core.ignoreCase`がtrueなら大文字・小文字を区別しない。
 
 ##### `Repository::is_ignored` / `Repository::ignored_files`
 
@@ -1858,6 +1860,12 @@ pub enum Error {
 
     /// 未追跡で無視指定に一致するパス（addを拒否）
     IgnoredPath(PathBuf),
+
+    /// 未対応の属性（filter・ident・working-tree-encoding）を持つパス
+    UnsupportedAttribute { path: PathBuf, attribute: String },
+
+    /// core.safecrlf=trueで、往復できない改行コードの変換
+    IrreversibleLineEndings(PathBuf),
 }
 ```
 

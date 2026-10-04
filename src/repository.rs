@@ -811,7 +811,12 @@ impl Repository {
     /// Loads the working tree: its ignore rules (`.gitignore` files,
     /// `.git/info/exclude`, `core.excludesFile`) and checkout settings.
     pub(crate) fn worktree(&self) -> Result<Worktree> {
-        Worktree::load(&self.work_dir, &self.git_dir, &self.config()?)
+        Worktree::load(
+            &self.work_dir,
+            &self.git_dir,
+            &self.config()?,
+            self.object_store(),
+        )
     }
 
     /// Returns whether a path is ignored by `.gitignore` files,
@@ -916,11 +921,12 @@ impl Repository {
     fn add_impl(&self, path: &Path, force: bool) -> Result<()> {
         let mut idx = self.read_index()?;
         let mut worktree = self.worktree()?;
-        let tracked_mode = idx.get(path).map(IndexEntry::mode);
+        let tracked = idx.get(path).cloned();
+        let tracked_mode = tracked.as_ref().map(IndexEntry::mode);
 
         // A tracked file that was deleted has its removal staged, as
         // `git add` does; this also resolves a conflict by deletion.
-        let Some(file) = worktree.read(path, tracked_mode)? else {
+        let Some(file) = worktree.read(path, tracked.as_ref())? else {
             if idx.remove(path) {
                 return self.write_index(&idx);
             }
@@ -967,8 +973,8 @@ impl Repository {
 
         // Add all working tree files
         for path in &working_files {
-            let tracked_mode = idx.get(path).map(IndexEntry::mode);
-            let Some(file) = worktree.read(path, tracked_mode)? else {
+            let tracked = idx.get(path).cloned();
+            let Some(file) = worktree.read(path, tracked.as_ref())? else {
                 continue;
             };
             let oid = store.write(ObjectType::Blob, &file.content)?;
@@ -1673,7 +1679,7 @@ impl Repository {
     /// Updates the working tree and index to match a tree object.
     fn checkout_tree(&self, tree_oid: &Oid) -> Result<()> {
         let store = self.object_store();
-        let worktree = self.worktree()?;
+        let mut worktree = self.worktree()?;
 
         // Flatten the current HEAD tree (if any) and the target tree.
         let current_files = match self.head_tree_oid()? {
@@ -1684,6 +1690,29 @@ impl Repository {
             .flatten_tree(&self.tree(&tree_oid.to_hex())?, PathBuf::new())?
             .into_iter()
             .collect();
+
+        // Convert line endings with the target tree's .gitattributes, as Git
+        // does, and refuse unsupported conversions before changing anything.
+        for path in current_files.keys().chain(target_files.keys()) {
+            if path.file_name() == Some(std::ffi::OsStr::new(".gitattributes")) {
+                let dir = path
+                    .parent()
+                    .map(|d| normalize_index_path(d).to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let content = match target_files.get(path) {
+                    Some(entry) => Some(store.read(&entry.oid)?.content),
+                    None => None,
+                };
+                worktree
+                    .attributes()
+                    .set_dir_file(dir.as_bytes(), content.as_deref());
+            }
+        }
+        for (path, entry) in &target_files {
+            if matches!(entry.mode, FileMode::Regular | FileMode::Executable) {
+                worktree.check_supported(path)?;
+            }
+        }
 
         // Remove files that exist in current but not in target
         for path in current_files.keys() {
@@ -1717,15 +1746,13 @@ impl Repository {
         let version = self.read_index()?.version();
         let mut idx = Index::empty(version);
         for (path, entry) in &target_files {
-            let index_path = normalize_index_path(path);
-            let index_entry = match worktree.read(path, Some(entry.mode))? {
-                // The stat data of the file just written, with the tree's mode.
-                Some(file) => file
-                    .index_entry(index_path, entry.oid)
-                    .with_mode(entry.mode),
-                None => IndexEntry::new(0, 0, 0, 0, entry.mode, 0, 0, 0, entry.oid, index_path, 0),
-            };
-            idx.add(index_entry);
+            // The stat data of the file just written, with the tree's mode.
+            idx.add(worktree.stat_entry(
+                path,
+                normalize_index_path(path),
+                entry.oid,
+                entry.mode,
+            )?);
         }
 
         self.write_index(&idx)?;

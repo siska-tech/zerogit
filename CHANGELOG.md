@@ -3,7 +3,7 @@
 このプロジェクトは [Keep a Changelog](https://keepachangelog.com/ja/1.0.0/) に準拠し、
 [Semantic Versioning](https://semver.org/lang/ja/) を採用しています。
 
-## [Unreleased]
+## [0.4.0] - 2026-10-04
 
 ### Added
 
@@ -27,6 +27,7 @@
 - `IndexEntry::ctime_nsec()`、`mtime_nsec()`、`skip_worktree()`、`intent_to_add()`
 
 ### Changed
+- **破壊的変更**: `Error`にvariantを9つ追加した（上記「エラー」）。`Error`を網羅的に`match`しているコードは、新しいvariantへの対応が必要
 - `Repository::open`/`discover`/`init`は`.git/config`を読み、SHA-256（`extensions.objectFormat`）・reftable・未知の`repositoryformatversion`を`UnsupportedRepositoryFormat`として拒否する。configが壊れている場合もopen時にエラーになる
 - packed参照を含むブランチの削除は`PackedRefDeletionUnsupported`を返す
 
@@ -224,6 +225,7 @@ Phase 1: Repository Layer（読み取り操作）の完全実装。
 - 対応プラットフォーム: Linux, macOS, Windows
 - テストカバレッジ: 94%以上
 
+[0.4.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.4.0
 [0.3.7]: https://github.com/siska-tech/zerogit/releases/tag/v0.3.7
 [0.3.6]: https://github.com/siska-tech/zerogit/releases/tag/v0.3.6
 [0.3.5]: https://github.com/siska-tech/zerogit/releases/tag/v0.3.5

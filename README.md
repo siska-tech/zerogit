@@ -19,7 +19,7 @@ Pure Rust製の軽量Gitクライアントライブラリ。最小限の依存�
 
 ```toml
 [dependencies]
-zerogit = "0.3"
+zerogit = "0.4"
 ```
 
 ### 必要環境

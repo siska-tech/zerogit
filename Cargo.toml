@@ -9,6 +9,8 @@ repository = "https://github.com/siska-tech/zerogit"
 readme = "README.md"
 keywords = ["git", "vcs", "pure-rust"]
 categories = ["development-tools"]
+# Planning notes, design documents and the test suite are for development only.
+exclude = ["issues/", "docs/", "tests/"]
 
 [dependencies]
 miniz_oxide = "0.8"

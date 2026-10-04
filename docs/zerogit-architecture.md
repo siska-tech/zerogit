@@ -37,10 +37,13 @@
 | Public API     | `repository`  | リポジトリ操作の統合エントリーポイント                |
 | Public API     | `status`      | ワーキングツリー状態の取得                            |
 | Public API     | `log`         | コミット履歴の取得・走査                              |
+| Public API     | `diff`        | Tree差分（変更一覧・完全一致リネーム）と行差分（`diff::blob`） |
 | Domain         | `objects`     | Gitオブジェクト（blob/tree/commit/tag）のパースと生成 |
-| Domain         | `refs`        | 参照（HEAD/branches/tags）の解決と管理                |
+| Domain         | `objects::database` | loose・複数packを横断する統一ストア（crate内部）  |
+| Domain         | `objects::pack` | pack index・packの解析、delta復元                   |
+| Domain         | `refs`        | 参照（HEAD/branches/tags、packed-refs）の解決と管理   |
 | Domain         | `index`       | ステージング領域（.git/index）の読み書き              |
-| Infrastructure | `hash`        | SHA-1ハッシュ計算（自前実装）                         |
+| Infrastructure | `hash`        | SHA-1・CRC32計算（自前実装）                          |
 | Infrastructure | `compression` | zlib圧縮・解凍（miniz_oxide wrapper）                 |
 | Infrastructure | `fs`          | ファイルシステム操作の抽象化                          |
 

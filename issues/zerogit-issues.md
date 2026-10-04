@@ -1010,3 +1010,11 @@ Commitから直接変更ファイル一覧を取得できるようにする。
                           │
                           └─> #027 RemoteBranch/Tag
 ```
+
+---
+
+## Phase 3: KazeNhanh向け読み取り基盤・行差分（2026-10-04追加）
+
+親計画: [実装計画](kazenhanh-phase3-plan.md) / [GitHub #6](https://github.com/siska-tech/zerogit/issues/6)
+
+ローカル計画ID 037〜044が初期リリースの必須項目、045は後続項目。詳細な依存関係・受け入れ条件は親計画と個別Issueを参照。ローカル計画IDとGitHub Issue番号は別体系。

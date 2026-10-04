@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 use crate::index::{Index, IndexEntry};
 use crate::infra::{hash_object, list_working_tree, read_file};
-use crate::objects::{LooseObjectStore, ObjectType, Oid, Tree};
+use crate::objects::{LooseObjectStore, ObjectStore, ObjectType, Oid, Tree};
 
 /// The status of a file in the working tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +82,15 @@ pub fn flatten_tree(
     prefix: &Path,
     result: &mut BTreeMap<PathBuf, Oid>,
 ) -> Result<()> {
+    flatten_tree_with_store(&ObjectStore::from_loose(store), tree_oid, prefix, result)
+}
+
+pub(crate) fn flatten_tree_with_store(
+    store: &ObjectStore,
+    tree_oid: &Oid,
+    prefix: &Path,
+    result: &mut BTreeMap<PathBuf, Oid>,
+) -> Result<()> {
     let raw = store.read(tree_oid)?;
 
     if raw.object_type != ObjectType::Tree {
@@ -98,7 +107,7 @@ pub fn flatten_tree(
 
         if entry.is_directory() {
             // Recursively flatten subdirectory
-            flatten_tree(store, entry.oid(), &entry_path, result)?;
+            flatten_tree_with_store(store, entry.oid(), &entry_path, result)?;
         } else {
             // Add blob entry
             result.insert(entry_path, *entry.oid());
@@ -151,12 +160,26 @@ pub fn compute_status(
     head_tree_oid: Option<&Oid>,
     index: Option<&Index>,
 ) -> Result<Vec<StatusEntry>> {
+    compute_status_with_store(
+        work_dir,
+        &ObjectStore::from_loose(store),
+        head_tree_oid,
+        index,
+    )
+}
+
+pub(crate) fn compute_status_with_store(
+    work_dir: &Path,
+    store: &ObjectStore,
+    head_tree_oid: Option<&Oid>,
+    index: Option<&Index>,
+) -> Result<Vec<StatusEntry>> {
     let mut entries = Vec::new();
 
     // Flatten HEAD tree into path -> OID map
     let mut head_files: BTreeMap<PathBuf, Oid> = BTreeMap::new();
     if let Some(tree_oid) = head_tree_oid {
-        flatten_tree(store, tree_oid, Path::new(""), &mut head_files)?;
+        flatten_tree_with_store(store, tree_oid, Path::new(""), &mut head_files)?;
     }
 
     // Build index map: path -> IndexEntry

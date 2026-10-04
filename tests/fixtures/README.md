@@ -9,8 +9,17 @@
 | `simple/` | 基本的なリポジトリ（2コミット） |
 | `empty/` | 空のリポジトリ（コミットなし） |
 | `branches/` | 複数ブランチを持つリポジトリ |
+| `remotes/` | リモート追跡ブランチ（origin、upstream、ネスト名）を持つリポジトリ |
+| `tags/` | 軽量タグと注釈付きタグを持つリポジトリ |
+| `diff/` | 追加・削除・変更（ネストしたパスを含む）の2コミット |
+| `rename/` | 完全一致リネームの2コミット |
+| `merge/` | `--no-ff` のマージコミットを持つリポジトリ |
+
+すべて `main` ブランチで作成されます。ユーザー・システムのGit設定（既定ブランチ名、`core.autocrlf` など）は無視し、作成者と日時も固定するため、どの環境でも同じ内容になります。
 
 ## フィクスチャの作成
+
+フィクスチャの定義は `create_fixtures.sh` に一本化しています。
 
 ### Linux / macOS
 
@@ -21,48 +30,15 @@ bash create_fixtures.sh
 
 ### Windows
 
+Git for Windows 付属のbashで `create_fixtures.sh` を実行します。
+
 ```powershell
-cd tests\fixtures
-powershell -ExecutionPolicy Bypass -File create_fixtures.ps1
+powershell -ExecutionPolicy Bypass -File tests\fixtures\create_fixtures.ps1
 ```
 
 ## CI設定
 
-GitHub Actionsでの使用例:
-
-```yaml
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Create test fixtures
-        run: |
-          cd tests/fixtures
-          bash create_fixtures.sh
-
-      - name: Run tests
-        run: cargo test
-```
-
-Windows CIでの使用例:
-
-```yaml
-jobs:
-  test:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Create test fixtures
-        run: |
-          cd tests\fixtures
-          powershell -ExecutionPolicy Bypass -File create_fixtures.ps1
-
-      - name: Run tests
-        run: cargo test
-```
+`.github/workflows/ci.yml` では、全OSで `bash create_fixtures.sh` を実行してからテストします。
 
 ## 注意事項
 

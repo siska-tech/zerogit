@@ -39,6 +39,21 @@ pub mod zerogit {
     pub enum DiffStatus;
     pub struct DiffStats;
 
+    // 行差分（Phase 3）
+    pub struct BlobDiff;
+    pub enum BlobDiffContent;
+    pub struct DiffHunk;
+    pub struct DiffLine;
+    pub struct DiffOptions;
+    pub enum LineKind;
+    pub enum LineEnding;
+    pub enum NonTextReason;
+    pub enum SkipReason;
+
+    // Pack（Phase 3、zerogit::objects::pack）
+    // pub struct PackIndex; pub struct PackIndexEntry;
+    // pub struct PackFile; pub struct PackLimits; pub type BaseResolver;
+
     // ログ
     pub struct LogOptions;
 
@@ -77,6 +92,13 @@ pub mod zerogit {
 | 差分         | `DiffStatus`   | enum   | 2.5   |
 | 差分         | `DiffStats`    | struct | 2.5   |
 | ログ         | `LogOptions`   | struct | 2.5   |
+| 行差分       | `BlobDiff`     | struct | 3     |
+| 行差分       | `BlobDiffContent` | enum | 3     |
+| 行差分       | `DiffHunk`     | struct | 3     |
+| 行差分       | `DiffLine`     | struct | 3     |
+| 行差分       | `DiffOptions`  | struct | 3     |
+| 行差分       | `LineKind` / `LineEnding` / `NonTextReason` / `SkipReason` | enum | 3 |
+| Pack         | `objects::pack::{PackIndex, PackFile, PackLimits}` | struct | 3 |
 | エラー       | `Error`        | enum   | 1     |
 | 定数         | `FileMode`     | enum   | 1     |
 
@@ -1767,8 +1789,37 @@ pub enum Error {
     
     /// 設定が見つからない（Phase 2）
     ConfigNotFound(String),
+
+    /// 既にリポジトリが存在（Phase 2.5）
+    AlreadyARepository(PathBuf),
+
+    /// packed-refsの不正な行（Phase 3）
+    InvalidPackedRefs { line: usize, reason: String },
+
+    /// packed参照の削除は未対応（Phase 3）
+    PackedRefDeletionUnsupported(String),
+
+    /// 不正・破損したpack index（Phase 3）
+    InvalidPackIndex { reason: String },
+
+    /// 未対応のpack indexバージョン（v1等）（Phase 3）
+    UnsupportedPackIndexVersion(u32),
+
+    /// 不正・破損したpack、または適用できないdelta（Phase 3）
+    InvalidPack { reason: String },
+
+    /// 未対応のpackバージョン（Phase 3）
+    UnsupportedPackVersion(u32),
+
+    /// 未対応のリポジトリ形式（SHA-256、reftable等）（Phase 3）
+    UnsupportedRepositoryFormat(String),
+
+    /// pack読み取りのサイズ・delta深度の上限超過（Phase 3）
+    PackLimitExceeded { reason: String },
 }
 ```
+
+`ObjectNotFound`は「どこにも存在しない」場合のみで、破損や未対応は上記の個別エラーとなる。行差分の非テキスト・上限超過はエラーではなく`BlobDiffContent`で表す（2.24）。
 
 #### トレイト実装
 
@@ -1777,6 +1828,99 @@ impl std::fmt::Display for Error { /* ... */ }
 impl std::error::Error for Error { /* ... */ }
 impl From<std::io::Error> for Error { /* ... */ }
 ```
+
+### 2.24 BlobDiff / DiffHunk / DiffLine / DiffOptions（Phase 3）
+
+2つのBlobの行差分。`TreeDiff`は変更ファイル一覧として維持し、本文の比較はこの型で行う。
+
+```rust
+impl Repository {
+    /// None は片側不在（追加・削除）。Blobでない・読めない場合はエラー
+    pub fn diff_blobs(&self, old: Option<&Oid>, new: Option<&Oid>, options: &DiffOptions)
+        -> Result<BlobDiff>;
+}
+
+impl BlobDiff {
+    pub fn compute(old: Option<&[u8]>, new: Option<&[u8]>, options: &DiffOptions) -> BlobDiff;
+    pub fn old_exists(&self) -> bool;       // 片側不在と実在する空Blobを区別
+    pub fn new_exists(&self) -> bool;
+    pub fn old_size(&self) -> usize;
+    pub fn new_size(&self) -> usize;
+    pub fn is_identical(&self) -> bool;     // bytes比較。NonText/Skippedでも正確
+    pub fn content(&self) -> &BlobDiffContent;
+    pub fn hunks(&self) -> Option<&[DiffHunk]>;   // Text以外はNone
+    pub fn lines_added(&self) -> Option<usize>;
+    pub fn lines_removed(&self) -> Option<usize>;
+}
+
+pub enum BlobDiffContent {
+    Text(Vec<DiffHunk>),        // 完全な行差分。同一内容なら空
+    NonText(NonTextReason),     // ContainsNul / InvalidUtf8（暗黙置換しない）
+    Skipped(SkipReason),        // InputTooLarge { limit } / TooComplex { limit }
+}
+
+impl DiffHunk {
+    pub fn old_start(&self) -> usize;   // 1始まり。範囲が空なら直前の行番号（先頭は0）
+    pub fn old_lines(&self) -> usize;
+    pub fn new_start(&self) -> usize;
+    pub fn new_lines(&self) -> usize;
+    pub fn lines(&self) -> &[DiffLine]; // 変更内では削除が追加より先
+    pub fn header(&self) -> String;     // "@@ -1,3 +1,4 @@"
+}
+
+impl DiffLine {
+    pub fn kind(&self) -> LineKind;               // Context / Added / Removed
+    pub fn old_lineno(&self) -> Option<usize>;    // 追加行はNone
+    pub fn new_lineno(&self) -> Option<usize>;    // 削除行はNone
+    pub fn content(&self) -> &str;                // 改行込み
+    pub fn text(&self) -> &str;                   // 改行（\n / \r\n）を除く
+    pub fn ending(&self) -> LineEnding;           // Lf / CrLf / None
+}
+
+impl DiffOptions {
+    pub fn new() -> Self;                         // 文脈3行、8 MiB、5,000万ステップ
+    pub fn context_lines(self, lines: usize) -> Self;
+    pub fn max_input_size(self, bytes: usize) -> Self;
+    pub fn max_cost(self, steps: u64) -> Self;
+}
+```
+
+判定順はサイズ上限 → NUL → UTF-8 → 行差分（計算量上限）。同じ入力とオプションでは常に同じ結果になる。既定値の根拠はREADMEの「処理上限の既定値」を参照。
+
+### 2.25 RenameOptions / RenameDetection / RenameLimit（Phase 3、任意）
+
+```rust
+impl Repository {
+    pub fn diff_trees_with_options(&self, old: Option<&Tree>, new: &Tree, options: &RenameOptions)
+        -> Result<TreeDiff>;
+    pub fn commit_diff_with_options(&self, commit: &Commit, options: &RenameOptions)
+        -> Result<TreeDiff>;
+}
+
+pub enum RenameDetection { Off, Exact /* 既定 */, Similar }
+
+impl RenameOptions {
+    pub fn new() -> Self;                              // Exact、50%、10万ペア、1 MiB
+    pub fn detection(self, detection: RenameDetection) -> Self;
+    pub fn threshold(self, percent: u8) -> Self;       // 0..=100
+    pub fn max_pairs(self, pairs: usize) -> Self;      // 削除数×追加数の上限
+    pub fn max_file_size(self, bytes: usize) -> Self;
+}
+
+pub enum RenameLimit {
+    TooManyPairs { pairs: usize, limit: usize },       // 類似度検出を行わなかった
+    FileTooLarge { files: usize, limit: usize },       // 一部のファイルを比較しなかった
+}
+
+impl TreeDiff { pub fn rename_limits(&self) -> &[RenameLimit]; }   // 空なら検出は完全
+impl DiffDelta { pub fn similarity(&self) -> Option<u8>; }        // 完全一致は100
+```
+
+- `diff_trees`/`commit_diff`は従来どおり完全一致のみ（`RenameOptions::default()`と同じ結果）。
+- 類似度は、`\n`の直後で区切った行を多重集合として比べ、共通する行のバイト数を大きい方のファイルサイズで割った値（%、切り捨て）。行の順序は問わない。
+- 対象は通常ファイルと実行ファイルだけ。空ファイル、NULを含むファイル、サイズ上限を超えるファイルは類似度では対応付けない（完全一致の対応付けは従来どおり行う）。
+- 完全一致の対応付けの後に、残った削除と追加の全組を比較する。しきい値以上の組を、類似度の降順 → ファイル名が同じもの → 新パス → 旧パスの順に、一対一で貪欲に選ぶ。入力の順序に依存しない。
+- 対応付かなかったもの、上限で比較しなかったものは、追加・削除のまま残る。
 
 ---
 
@@ -2109,3 +2253,13 @@ fn main() -> Result<()> {
     Ok(())
 }
 ```
+
+### 3.15 文書差分フロー（Phase 3）
+
+KazeNhanh等で想定する、コミット確定 → 変更一覧 → 選択ファイルの行差分の流れ。完全なコードは`examples/document_diff.rs`、受け入れテストは`tests/document_flow_test.rs`。
+
+1. 比較開始時にコミットをOIDへ解決して固定する（`repo.head()?.oid()`や`resolve_short_oid`）。以降はOIDのみで読むため、参照の更新や`git gc`の影響を受けない。
+2. 比較元を決める。既定は第一親（`commit_diff`）、初回コミットは空Tree（`diff_trees(None, &tree)`）、マージの別の親は`diff_trees(Some(&parent_tree), &tree)`で明示する。
+3. 変更一覧は`diff_trees`の結果のみで作り、Blobは読まない。`DiffDelta`のstatus・旧新パス・旧新mode・旧新OIDを表示する。
+4. 詳細表示時に`diff_blobs(delta.old_oid(), delta.new_oid(), &options)`を呼ぶ。gitlink（`FileMode::Submodule`）はこのリポジトリのBlobではないため読まずにコミットOIDの変化として扱う。symlinkはリンク先文字列の差分になる。
+5. `BlobDiffContent::NonText`/`Skipped`と`Err`は、それぞれ「テキストでない」「省略」「エラー」として表示し、空の差分として扱わない。

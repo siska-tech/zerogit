@@ -10,8 +10,18 @@ use std::path::{Path, PathBuf};
 use crate::error::Result;
 use crate::index::Index;
 use crate::infra::{hash_object, list_working_tree, read_file};
-use crate::objects::{Commit, FileMode, Oid, Tree};
+use crate::objects::{Blob, Commit, FileMode, Oid, Tree};
+
+pub mod blob;
+pub mod rename;
+
 use crate::Repository;
+pub use blob::{
+    BlobDiff, BlobDiffContent, DiffHunk, DiffLine, DiffOptions, LineEnding, LineKind,
+    NonTextReason, SkipReason,
+};
+use rename::detect_similar_renames;
+pub use rename::{RenameDetection, RenameLimit, RenameOptions};
 
 /// The status of a file in a diff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +90,8 @@ pub struct DiffDelta {
     old_mode: Option<FileMode>,
     /// The file mode after the change.
     new_mode: Option<FileMode>,
+    /// Similarity in percent for renames (100 for exact renames).
+    similarity: Option<u8>,
 }
 
 impl DiffDelta {
@@ -120,6 +132,12 @@ impl DiffDelta {
         self.new_mode
     }
 
+    /// Returns the similarity in percent for renames: 100 for exact renames,
+    /// the score for similarity renames, and `None` for other changes.
+    pub fn similarity(&self) -> Option<u8> {
+        self.similarity
+    }
+
     /// Returns a single character representing the status.
     pub fn status_char(&self) -> char {
         self.status.as_char()
@@ -135,6 +153,7 @@ impl DiffDelta {
             new_oid: Some(oid),
             old_mode: None,
             new_mode: Some(mode),
+            similarity: None,
         }
     }
 
@@ -148,6 +167,7 @@ impl DiffDelta {
             new_oid: None,
             old_mode: Some(mode),
             new_mode: None,
+            similarity: None,
         }
     }
 
@@ -167,19 +187,27 @@ impl DiffDelta {
             new_oid: Some(new_oid),
             old_mode: Some(old_mode),
             new_mode: Some(new_mode),
+            similarity: None,
         }
     }
 
-    /// Creates a new Renamed delta.
-    fn renamed(old_path: PathBuf, new_path: PathBuf, oid: Oid, mode: FileMode) -> Self {
+    /// Creates a new Renamed delta for an exact (same OID) rename.
+    fn renamed(
+        old_path: PathBuf,
+        new_path: PathBuf,
+        oid: Oid,
+        old_mode: FileMode,
+        new_mode: FileMode,
+    ) -> Self {
         DiffDelta {
             status: DiffStatus::Renamed,
             path: new_path,
             old_path: Some(old_path),
             old_oid: Some(oid),
             new_oid: Some(oid),
-            old_mode: Some(mode),
-            new_mode: Some(mode),
+            old_mode: Some(old_mode),
+            new_mode: Some(new_mode),
+            similarity: Some(100),
         }
     }
 }
@@ -189,12 +217,22 @@ impl DiffDelta {
 pub struct TreeDiff {
     /// The list of changes.
     deltas: Vec<DiffDelta>,
+    /// Limits that left similarity rename detection incomplete.
+    rename_limits: Vec<RenameLimit>,
 }
 
 impl TreeDiff {
     /// Returns the deltas (changes) in this diff.
     pub fn deltas(&self) -> &[DiffDelta] {
         &self.deltas
+    }
+
+    /// Returns the limits that left similarity rename detection incomplete.
+    ///
+    /// Empty when detection was complete or not requested. Files affected
+    /// by a limit are still reported as additions and deletions.
+    pub fn rename_limits(&self) -> &[RenameLimit] {
+        &self.rename_limits
     }
 
     /// Computes statistics about this diff.
@@ -280,6 +318,41 @@ impl Repository {
     /// }
     /// ```
     pub fn diff_trees(&self, old_tree: Option<&Tree>, new_tree: &Tree) -> Result<TreeDiff> {
+        self.diff_trees_with_options(old_tree, new_tree, &RenameOptions::default())
+    }
+
+    /// Computes the diff between two trees with explicit rename detection.
+    ///
+    /// [`RenameDetection::Exact`] (the default) matches [`Repository::diff_trees`];
+    /// [`RenameDetection::Similar`] additionally pairs edited moves, reading
+    /// the contents of added and deleted files. See [`RenameOptions`] for the
+    /// similarity definition and limits.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::{RenameDetection, RenameOptions, Repository};
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// let old_tree = repo.tree("abc1234").unwrap();
+    /// let new_tree = repo.tree("def5678").unwrap();
+    /// let options = RenameOptions::new().detection(RenameDetection::Similar);
+    /// let diff = repo
+    ///     .diff_trees_with_options(Some(&old_tree), &new_tree, &options)
+    ///     .unwrap();
+    /// for delta in diff.deltas() {
+    ///     println!("{} {} {:?}", delta.status_char(), delta.path().display(), delta.similarity());
+    /// }
+    /// if !diff.rename_limits().is_empty() {
+    ///     println!("rename detection was limited: {:?}", diff.rename_limits());
+    /// }
+    /// ```
+    pub fn diff_trees_with_options(
+        &self,
+        old_tree: Option<&Tree>,
+        new_tree: &Tree,
+        options: &RenameOptions,
+    ) -> Result<TreeDiff> {
         // Flatten both trees
         let old_map = match old_tree {
             Some(tree) => self.flatten_tree(tree, PathBuf::new())?,
@@ -310,7 +383,9 @@ impl Repository {
                 (Some(old), Some(new)) => {
                     // Check if modified
                     if old.oid != new.oid || old.mode != new.mode {
-                        deltas.push(DiffDelta::modified(path, old.oid, new.oid, old.mode, new.mode));
+                        deltas.push(DiffDelta::modified(
+                            path, old.oid, new.oid, old.mode, new.mode,
+                        ));
                     }
                     // If OID and mode are the same, no change
                 }
@@ -318,10 +393,22 @@ impl Repository {
             }
         }
 
-        // Detect renames
-        detect_renames(&mut deltas);
+        let mut rename_limits = Vec::new();
+        match options.get_detection() {
+            RenameDetection::Off => {}
+            RenameDetection::Exact => detect_renames(&mut deltas),
+            RenameDetection::Similar => {
+                detect_renames(&mut deltas);
+                rename_limits = detect_similar_renames(&mut deltas, options, &mut |oid| {
+                    Ok(self.blob(&oid.to_hex())?.content().to_vec())
+                })?;
+            }
+        }
 
-        Ok(TreeDiff { deltas })
+        Ok(TreeDiff {
+            deltas,
+            rename_limits,
+        })
     }
 
     /// Computes the diff for a commit against its first parent.
@@ -351,6 +438,16 @@ impl Repository {
     /// }
     /// ```
     pub fn commit_diff(&self, commit: &Commit) -> Result<TreeDiff> {
+        self.commit_diff_with_options(commit, &RenameOptions::default())
+    }
+
+    /// Computes the diff for a commit against its first parent with explicit
+    /// rename detection (see [`Repository::diff_trees_with_options`]).
+    pub fn commit_diff_with_options(
+        &self,
+        commit: &Commit,
+        options: &RenameOptions,
+    ) -> Result<TreeDiff> {
         // Get the tree of the current commit
         let new_tree = self.tree(&commit.tree().to_hex())?;
 
@@ -364,15 +461,64 @@ impl Repository {
         };
 
         // Compute the diff between the trees
-        self.diff_trees(old_tree.as_ref(), &new_tree)
+        self.diff_trees_with_options(old_tree.as_ref(), &new_tree, options)
+    }
+
+    /// Computes the line diff between two blobs.
+    ///
+    /// `None` stands for a missing side, such as the old side of an added
+    /// file; it is compared as empty content but reported as missing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a blob cannot be read or an OID is not a blob.
+    /// Binary content and exceeded limits are not errors; they are reported
+    /// in [`BlobDiff::content`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::{BlobDiffContent, DiffOptions, Repository};
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// let commit = repo.commit("abc1234").unwrap();
+    /// for delta in repo.commit_diff(&commit).unwrap().deltas() {
+    ///     let diff = repo
+    ///         .diff_blobs(delta.old_oid(), delta.new_oid(), &DiffOptions::new())
+    ///         .unwrap();
+    ///     match diff.content() {
+    ///         BlobDiffContent::Text(hunks) => {
+    ///             for hunk in hunks {
+    ///                 println!("{}", hunk.header());
+    ///                 for line in hunk.lines() {
+    ///                     println!("{:?} {:?} {}", line.old_lineno(), line.new_lineno(), line.text());
+    ///                 }
+    ///             }
+    ///         }
+    ///         BlobDiffContent::NonText(reason) => println!("not text: {:?}", reason),
+    ///         BlobDiffContent::Skipped(reason) => println!("skipped: {}", reason),
+    ///     }
+    /// }
+    /// ```
+    pub fn diff_blobs(
+        &self,
+        old: Option<&Oid>,
+        new: Option<&Oid>,
+        options: &DiffOptions,
+    ) -> Result<BlobDiff> {
+        let read = |oid: Option<&Oid>| -> Result<Option<Blob>> {
+            oid.map(|oid| self.blob(&oid.to_hex())).transpose()
+        };
+        let (old, new) = (read(old)?, read(new)?);
+        Ok(BlobDiff::compute(
+            old.as_ref().map(Blob::content),
+            new.as_ref().map(Blob::content),
+            options,
+        ))
     }
 
     /// Flattens a tree into a map of path -> (oid, mode).
-    fn flatten_tree(
-        &self,
-        tree: &Tree,
-        prefix: PathBuf,
-    ) -> Result<HashMap<PathBuf, FlatEntry>> {
+    fn flatten_tree(&self, tree: &Tree, prefix: PathBuf) -> Result<HashMap<PathBuf, FlatEntry>> {
         let mut result = HashMap::new();
 
         for entry in tree.entries() {
@@ -585,70 +731,71 @@ fn detect_file_mode(path: &Path) -> FileMode {
     FileMode::Regular
 }
 
-/// Detects renames by matching deleted and added files with the same OID.
+/// Groups modes whose contents may be renamed into each other.
+///
+/// Regular and executable files are interchangeable (a rename may also flip
+/// the executable bit); symlinks and gitlinks only match their own kind.
+fn rename_kind(mode: FileMode) -> u8 {
+    match mode {
+        FileMode::Regular | FileMode::Executable => 0,
+        FileMode::Symlink => 1,
+        FileMode::Submodule => 2,
+        FileMode::Directory => 3,
+    }
+}
+
+/// Detects exact renames by pairing deleted and added entries with the same OID.
+///
+/// Pairing is one-to-one and deterministic: added paths are visited in path
+/// order, and each takes the unmatched deleted path of the same OID and kind
+/// that has the same file name, or else the first one in path order.
 fn detect_renames(deltas: &mut Vec<DiffDelta>) {
-    // Collect indices of deleted and added entries
-    let mut deleted_indices: Vec<usize> = Vec::new();
-    let mut added_indices: Vec<usize> = Vec::new();
-
+    deltas.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut sources: HashMap<(Oid, u8), Vec<usize>> = HashMap::new();
     for (i, delta) in deltas.iter().enumerate() {
-        match delta.status {
-            DiffStatus::Deleted => deleted_indices.push(i),
-            DiffStatus::Added => added_indices.push(i),
-            _ => {}
+        if let (DiffStatus::Deleted, Some(oid), Some(mode)) =
+            (delta.status, delta.old_oid, delta.old_mode)
+        {
+            sources.entry((oid, rename_kind(mode))).or_default().push(i);
         }
     }
 
-    // Find matching pairs (same OID = exact rename)
-    let mut to_remove: BTreeSet<usize> = BTreeSet::new();
-    let mut renames: Vec<DiffDelta> = Vec::new();
-
-    for &del_idx in &deleted_indices {
-        if to_remove.contains(&del_idx) {
+    let mut matched = vec![false; deltas.len()];
+    let mut renames = Vec::new();
+    for (i, added) in deltas.iter().enumerate() {
+        let (DiffStatus::Added, Some(oid), Some(new_mode)) =
+            (added.status, added.new_oid, added.new_mode)
+        else {
             continue;
-        }
-        let deleted = &deltas[del_idx];
-        let deleted_oid = match deleted.old_oid {
-            Some(oid) => oid,
-            None => continue,
         };
-
-        for &add_idx in &added_indices {
-            if to_remove.contains(&add_idx) {
-                continue;
-            }
-            let added = &deltas[add_idx];
-            let added_oid = match added.new_oid {
-                Some(oid) => oid,
-                None => continue,
-            };
-
-            if deleted_oid == added_oid {
-                // Found a rename
-                renames.push(DiffDelta::renamed(
-                    deleted.path.clone(),
-                    added.path.clone(),
-                    deleted_oid,
-                    deleted.old_mode.unwrap_or(FileMode::Regular),
-                ));
-                to_remove.insert(del_idx);
-                to_remove.insert(add_idx);
-                break;
-            }
+        let Some(candidates) = sources.get(&(oid, rename_kind(new_mode))) else {
+            continue;
+        };
+        let source = candidates
+            .iter()
+            .copied()
+            .filter(|&s| !matched[s])
+            .min_by_key(|&s| (deltas[s].path.file_name() != added.path.file_name(), s));
+        if let Some(source) = source {
+            matched[source] = true;
+            matched[i] = true;
+            let deleted = &deltas[source];
+            renames.push(DiffDelta::renamed(
+                deleted.path.clone(),
+                added.path.clone(),
+                oid,
+                deleted.old_mode.unwrap_or(FileMode::Regular),
+                new_mode,
+            ));
         }
     }
 
-    // Remove matched entries (in reverse order to preserve indices)
-    let mut indices_to_remove: Vec<usize> = to_remove.into_iter().collect();
-    indices_to_remove.sort_by(|a, b| b.cmp(a)); // Reverse sort
-    for idx in indices_to_remove {
-        deltas.remove(idx);
-    }
-
-    // Add rename entries
+    let mut index = 0;
+    deltas.retain(|_| {
+        index += 1;
+        !matched[index - 1]
+    });
     deltas.extend(renames);
-
-    // Re-sort by path
     deltas.sort_by(|a, b| a.path.cmp(&b.path));
 }
 
@@ -683,7 +830,9 @@ fn diff_flat_maps(
             (Some(old), Some(new)) => {
                 // Check if modified
                 if old.oid != new.oid || old.mode != new.mode {
-                    deltas.push(DiffDelta::modified(path, old.oid, new.oid, old.mode, new.mode));
+                    deltas.push(DiffDelta::modified(
+                        path, old.oid, new.oid, old.mode, new.mode,
+                    ));
                 }
                 // If OID and mode are the same, no change
             }
@@ -694,7 +843,10 @@ fn diff_flat_maps(
     // Detect renames
     detect_renames(&mut deltas);
 
-    TreeDiff { deltas }
+    TreeDiff {
+        deltas,
+        rename_limits: Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -735,7 +887,10 @@ mod tests {
 
     #[test]
     fn test_tree_diff_is_empty() {
-        let diff = TreeDiff { deltas: vec![] };
+        let diff = TreeDiff {
+            deltas: vec![],
+            rename_limits: Vec::new(),
+        };
         assert!(diff.is_empty());
         assert_eq!(diff.len(), 0);
     }
@@ -754,7 +909,10 @@ mod tests {
                 FileMode::Regular,
             ),
         ];
-        let diff = TreeDiff { deltas };
+        let diff = TreeDiff {
+            deltas,
+            rename_limits: Vec::new(),
+        };
 
         let stats = diff.stats();
         assert_eq!(stats.added, 1);
@@ -786,6 +944,7 @@ mod tests {
             PathBuf::from("new.txt"),
             oid,
             FileMode::Regular,
+            FileMode::Executable,
         );
 
         assert_eq!(delta.status(), DiffStatus::Renamed);
@@ -793,7 +952,94 @@ mod tests {
         assert_eq!(delta.old_path(), Some(Path::new("old.txt")));
         assert_eq!(delta.old_oid(), Some(&oid));
         assert_eq!(delta.new_oid(), Some(&oid));
+        assert_eq!(delta.old_mode(), Some(FileMode::Regular));
+        assert_eq!(delta.new_mode(), Some(FileMode::Executable));
         assert_eq!(delta.status_char(), 'R');
+    }
+
+    fn summary(deltas: &[DiffDelta]) -> Vec<String> {
+        deltas
+            .iter()
+            .map(|d| {
+                format!(
+                    "{} {:?} -> {} {:?} {:?}",
+                    d.status_char(),
+                    d.old_path(),
+                    d.path().display(),
+                    d.old_mode(),
+                    d.new_mode()
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_detect_renames_keeps_both_modes() {
+        let oid = Oid::from_hex("da39a3ee5e6b4b0d3255bfef95601890afd80709").unwrap();
+        let mut deltas = vec![
+            DiffDelta::deleted(PathBuf::from("run.sh"), oid, FileMode::Regular),
+            DiffDelta::added(PathBuf::from("bin/run.sh"), oid, FileMode::Executable),
+        ];
+        detect_renames(&mut deltas);
+        assert_eq!(
+            summary(&deltas),
+            ["R Some(\"run.sh\") -> bin/run.sh Some(Regular) Some(Executable)"]
+        );
+    }
+
+    #[test]
+    fn test_detect_renames_pairs_duplicates_deterministically() {
+        let oid = Oid::from_hex("da39a3ee5e6b4b0d3255bfef95601890afd80709").unwrap();
+        let build = |order: &[usize]| {
+            let all = [
+                DiffDelta::deleted(PathBuf::from("a/x.txt"), oid, FileMode::Regular),
+                DiffDelta::deleted(PathBuf::from("b/y.txt"), oid, FileMode::Regular),
+                DiffDelta::deleted(PathBuf::from("c/z.txt"), oid, FileMode::Regular),
+                DiffDelta::added(PathBuf::from("d/y.txt"), oid, FileMode::Regular),
+                DiffDelta::added(PathBuf::from("e/new.txt"), oid, FileMode::Regular),
+            ];
+            let mut deltas: Vec<_> = order.iter().map(|&i| all[i].clone()).collect();
+            detect_renames(&mut deltas);
+            summary(&deltas)
+        };
+        let expected = build(&[0, 1, 2, 3, 4]);
+        // The same file name wins, then path order; leftovers stay deletions.
+        assert_eq!(
+            expected,
+            [
+                "D None -> c/z.txt Some(Regular) None",
+                "R Some(\"b/y.txt\") -> d/y.txt Some(Regular) Some(Regular)",
+                "R Some(\"a/x.txt\") -> e/new.txt Some(Regular) Some(Regular)",
+            ]
+        );
+        assert_eq!(build(&[4, 3, 2, 1, 0]), expected);
+        assert_eq!(build(&[2, 4, 0, 3, 1]), expected);
+    }
+
+    #[test]
+    fn test_detect_renames_respects_file_kinds() {
+        let oid = Oid::from_hex("da39a3ee5e6b4b0d3255bfef95601890afd80709").unwrap();
+        for (old, new) in [
+            (FileMode::Regular, FileMode::Symlink),
+            (FileMode::Symlink, FileMode::Executable),
+            (FileMode::Submodule, FileMode::Regular),
+        ] {
+            let mut deltas = vec![
+                DiffDelta::deleted(PathBuf::from("old"), oid, old),
+                DiffDelta::added(PathBuf::from("new"), oid, new),
+            ];
+            detect_renames(&mut deltas);
+            assert_eq!(deltas.len(), 2, "{:?} -> {:?}", old, new);
+        }
+        for mode in [FileMode::Symlink, FileMode::Submodule] {
+            let mut deltas = vec![
+                DiffDelta::deleted(PathBuf::from("old"), oid, mode),
+                DiffDelta::added(PathBuf::from("new"), oid, mode),
+            ];
+            detect_renames(&mut deltas);
+            assert_eq!(deltas.len(), 1);
+            assert_eq!(deltas[0].status(), DiffStatus::Renamed);
+        }
     }
 
     #[test]

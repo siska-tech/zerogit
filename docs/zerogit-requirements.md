@@ -161,14 +161,20 @@ LogOptionsでサポートするフィルタ:
 | `config()`         | -                 | `Result<Config>` |
 | `Config::get(key)` | "section.key"形式 | `Option<&str>`   |
 
-### Phase 3: 差分・マージ（将来）
+### Phase 3: Packfile・行差分（✅ 読み取りと差分）・マージ（将来）
 
 | 機能                  | 入力                  | 出力         | 優先度 | 状態      |
 | --------------------- | --------------------- | ------------ | ------ | --------- |
 | `diff()`              | 2つのコミット or tree | 差分情報     | 中     | ✅ 完了   |
+| packfile読み取り      | -                     | -            | 高     | ✅ 完了（pack v2/v3、idx v2、両delta形式） |
+| packed-refs           | -                     | -            | 高     | ✅ 完了   |
+| `diff_blobs()`        | 旧新Blob OID          | `BlobDiff`（旧新行番号付き） | 高 | ✅ 完了 |
+| 完全一致リネームのmode保持 | -                | -            | 中     | ✅ 完了   |
+| 類似度リネーム（任意）| 2つのtree + `RenameOptions` | `TreeDiff`（`similarity()`付き） | 中 | ✅ 完了 |
 | merge（fast-forward） | ブランチ名            | `Result<()>` | 低     | 未着手    |
 | merge（3-way）        | ブランチ名            | `Result<()>` | 低     | 未着手    |
-| packfile読み取り      | -                     | -            | 中     | 未着手    |
+
+対応形式はSHA-1、loose/pack、loose refs/packed-refsに限る。SHA-256・reftableは開く時点で`Error::UnsupportedRepositoryFormat`とする。実行時にGit CLIへ依存しない。
 
 ### Phase 4: リモート操作（将来・別crate検討）
 

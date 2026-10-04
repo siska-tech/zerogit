@@ -13,8 +13,8 @@ const H4: u32 = 0xC3D2E1F0;
 /// SHA-1 round constants.
 const K: [u32; 4] = [0x5A827999, 0x6ED9EBA1, 0x8F1BBCDC, 0xCA62C1D6];
 
-/// Internal state for SHA-1 computation.
-struct Sha1State {
+/// Incremental SHA-1 state, for hashing data that is read in pieces.
+pub(crate) struct Sha1State {
     h: [u32; 5],
     buffer: [u8; 64],
     buffer_len: usize,
@@ -23,7 +23,7 @@ struct Sha1State {
 
 impl Sha1State {
     /// Creates a new SHA-1 state with initial values.
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             h: [H0, H1, H2, H3, H4],
             buffer: [0u8; 64],
@@ -33,7 +33,7 @@ impl Sha1State {
     }
 
     /// Updates the hash state with input data.
-    fn update(&mut self, data: &[u8]) {
+    pub(crate) fn update(&mut self, data: &[u8]) {
         let mut offset = 0;
         self.total_len += data.len() as u64;
 
@@ -125,7 +125,7 @@ impl Sha1State {
     }
 
     /// Finalizes the hash computation and returns the digest.
-    fn finalize(mut self) -> [u8; SHA1_SIZE] {
+    pub(crate) fn finalize(mut self) -> [u8; SHA1_SIZE] {
         let bit_len = self.total_len * 8;
 
         // Append padding bit
@@ -185,9 +185,48 @@ pub fn hash_object(object_type: &str, content: &[u8]) -> [u8; SHA1_SIZE] {
     state.finalize()
 }
 
+const CRC32_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut c = i as u32;
+        let mut k = 0;
+        while k < 8 {
+            c = if c & 1 != 0 {
+                0xedb8_8320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
+            k += 1;
+        }
+        table[i] = c;
+        i += 1;
+    }
+    table
+};
+
+/// Computes the CRC-32 (IEEE, as used by zlib) recorded in pack indexes.
+pub fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for &byte in data {
+        crc = CRC32_TABLE[((crc ^ u32::from(byte)) & 0xff) as usize] ^ (crc >> 8);
+    }
+    !crc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_crc32_known_values() {
+        assert_eq!(crc32(b""), 0);
+        assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
+        assert_eq!(
+            crc32(b"The quick brown fox jumps over the lazy dog"),
+            0x414f_a339
+        );
+    }
 
     /// Converts a byte slice to a hex string.
     fn to_hex(bytes: &[u8]) -> String {

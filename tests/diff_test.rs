@@ -120,7 +120,10 @@ fn test_td004_same_tree_no_changes() {
 
     let diff = repo.diff_trees(Some(&tree), &tree).unwrap();
 
-    assert!(diff.is_empty(), "Comparing same tree should produce no changes");
+    assert!(
+        diff.is_empty(),
+        "Comparing same tree should produce no changes"
+    );
 }
 
 // TD-005: Empty old tree (initial commit)
@@ -137,7 +140,9 @@ fn test_td005_empty_old_tree() {
 
     // All files should be marked as added
     assert!(
-        diff.deltas().iter().all(|d| d.status() == DiffStatus::Added),
+        diff.deltas()
+            .iter()
+            .all(|d| d.status() == DiffStatus::Added),
         "All files in initial commit should be Added"
     );
 
@@ -184,7 +189,10 @@ fn test_td007_nested_paths() {
         .iter()
         .any(|d| d.path() == Path::new("src/main.rs"));
 
-    assert!(found, "Nested path src/main.rs should be correctly reported");
+    assert!(
+        found,
+        "Nested path src/main.rs should be correctly reported"
+    );
 }
 
 // TD-008: Multiple changes (A, D, M mixed)
@@ -255,7 +263,8 @@ fn test_td010_stats_calculation() {
     let stats = diff.stats();
 
     // Verify total
-    let expected_total = stats.added + stats.deleted + stats.modified + stats.renamed + stats.copied;
+    let expected_total =
+        stats.added + stats.deleted + stats.modified + stats.renamed + stats.copied;
     assert_eq!(stats.total(), expected_total);
 
     // We know the fixture: 1 added, 1 deleted, 2 modified
@@ -419,7 +428,9 @@ fn test_cd002_initial_commit() {
 
     // All files should be marked as added
     assert!(
-        diff.deltas().iter().all(|d| d.status() == DiffStatus::Added),
+        diff.deltas()
+            .iter()
+            .all(|d| d.status() == DiffStatus::Added),
         "All files in initial commit should be Added"
     );
 
@@ -520,7 +531,9 @@ fn test_cd006_log_integration() {
         // First commit has various changes, second (initial) has 3 added files
         if commit.is_root() {
             assert!(
-                diff.deltas().iter().all(|d| d.status() == DiffStatus::Added),
+                diff.deltas()
+                    .iter()
+                    .all(|d| d.status() == DiffStatus::Added),
                 "Initial commit should only have Added files"
             );
         }
@@ -685,7 +698,9 @@ fn test_wd005_staged_addition() {
         .collect();
 
     assert!(
-        added.iter().any(|d| d.path() == Path::new("new_staged.txt")),
+        added
+            .iter()
+            .any(|d| d.path() == Path::new("new_staged.txt")),
         "new_staged.txt should be detected as added in staged diff"
     );
 }

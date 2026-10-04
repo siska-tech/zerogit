@@ -1684,14 +1684,51 @@ impl Repository {
 
 ### 8.3 拡張ポイント
 
-```rust
-/// 将来の拡張: Packfileサポート
-trait ObjectReader {
-    fn read(&self, oid: &Oid) -> Result<Object>;
-    fn exists(&self, oid: &Oid) -> bool;
-}
+Packfile対応は、トレイトではなく内部の統一ストア`ObjectStore`（9.1）で実現した。新しい格納形式を足す場合も、`ObjectStore`の探索順に加える。
 
-// LooseObjectStore は ObjectReader を実装
-// PackfileStore は ObjectReader を実装（Phase 3）
-// ChainedStore は複数の ObjectReader を連結
-```
+---
+
+## 9. Phase 3 詳細設計
+
+### 9.1 統一オブジェクトストア（`objects::database::ObjectStore`、crate内部）
+
+- `Arc`で共有するハンドル。`Repository`が1つ保持し、`LogIterator`と共有する。packディレクトリの走査とidx解析は初回利用時に行い、`Repository`の寿命の間は再利用する。
+- 読み取り順はloose → pack（ファイル名順）。同一OIDは先に見つかったものを返し、短縮OID検索は重複を除いて返す。
+- read・existsで見つからない場合だけpackディレクトリを1回再走査し、変化があれば1回だけ再検索する（外部の`git repack`/`git gc`への追従。無限に再試行はしない）。短縮OID検索は、古いpack一覧で曖昧なprefixを一意と誤判定しないよう毎回再走査する（開いているpackは再利用）。
+- 開けないpackは読み飛ばさずエラーにする。`.idx`のない`.pack`は書き込み中とみなして無視する。multi-pack-indexは使わない。
+- pack外にあるREF_DELTAの基底は、ストア経由で他のpackやlooseから解決する。残り深度を引き継ぎ、pack間の移動は64回までとする。
+- 書き込みは従来どおりloose objectのみ。存在確認にはpackも含める。
+- `Repository::open`/`discover`/`init`で`extensions.objectFormat`（sha1以外）、`extensions.refStorage`（files以外）、`repositoryformatversion`（0/1以外）を検査する。
+
+### 9.2 Pack読み取り（`objects::pack`）
+
+| 段階 | 検証内容 |
+| --- | --- |
+| idx解析（`PackIndex::parse`） | magic・version（v1は`UnsupportedPackIndexVersion(1)`）、idxのchecksum、fanoutの単調性とOIDテーブルとの一致、OIDの昇順、offsetの重複・範囲・64bit offsetスロット、切り詰め・整数overflow |
+| pack open（`PackFile::open`） | signature、version 2/3、オブジェクト数とidxの一致、trailerとidxのpack checksumの一致、エントリが先頭12バイトからtrailer直前まで連続していること |
+| 読み取り | 触れたエントリのCRC32、zlibが宣言サイズちょうどに展開され入力を使い切ること、delta命令の範囲、復元したオブジェクトのOID |
+| `PackFile::verify` | pack全体のSHA-1と全オブジェクトの読み取り（明示的に呼んだ時のみ） |
+
+- 各エントリの範囲はidxのoffsetを並べ替えて決める（次のエントリの先頭、またはtrailerの手前まで）。宣言サイズは`PackLimits::max_object_size`以下、かつ圧縮長×1032+64以下でなければならない。
+- deltaはOFS/REFとも反復的に辿り（再帰しない）、最後に逆順に適用する。pack内の循環はoffsetの訪問済み集合で検出する。
+- 復元結果はpackごとのFIFOキャッシュ（offsetをキー、既定32 MiB）に保持する。各結果のチェーン深度も記録し、キャッシュの有無で深度上限の判定が変わらないようにする。
+
+### 9.3 行差分（`diff::blob`）
+
+1. 片側ずつサイズ上限を確認 → NUL → UTF-8の順で判定する。
+2. `\n`の直後で行を分割し、改行コードは各行に含めたまま保持する。行を整数IDに置き換える。
+3. 反対側に一度も現れない行はどの行とも対応しえないため、比較対象から除外する。最長共通部分列（LCS）は変わらないので最小性は保たれ、全置換が実質線形時間になる。
+4. 残りを線形空間のMyers法（middle snake）で比較し、ステップ数が`max_cost`を超えたら打ち切って`Skipped(TooComplex)`とする。
+5. 一致した行の組から、間の削除→追加の順に操作列を組み立てる。2×文脈行数以内の間隔の変更は同じhunkにまとめる。
+
+完全一致リネーム（`diff::detect_renames`）は、追加された側をパス順に処理し、同じOIDかつ同じ種類（通常/実行ファイル、symlink、gitlink）の削除された側から、basenameが同じもの、次にパス順で最初のものを一対一で選ぶ。
+
+### 9.4 類似度リネーム（`diff::rename`、任意）
+
+1. 完全一致の対応付けの後に残った削除（候補元）と追加（候補先）のうち、通常ファイルと実行ファイルだけを対象にする。組数（候補元の数×候補先の数）が`max_pairs`を超える場合は、Blobを読まずに`RenameLimit::TooManyPairs`を返して終える。
+2. 候補のBlobを読む。サイズ上限を超えるもの（件数を`FileTooLarge`として報告）、空のもの、NULを含むものは除外する。
+3. 各ファイルについて「行 → 出現回数」の表を作る。
+4. サイズ比だけでしきい値に届かない組（小さい方×100 < しきい値×大きい方）は比較しない。それ以外は、2つの表の共通部分（各行の出現回数の小さい方×行のバイト数の合計）から類似度を求める。
+5. しきい値以上の組を、類似度の降順 → basenameが同じもの → 新パス → 旧パスの順に並べ、未使用の組から一対一で選ぶ。Renamedのdeltaは、旧新OID、旧新mode、類似度を持つ。
+
+計算量は、組数×（行の種類数）程度。既定の上限は10万組・1 MiB/ファイル。

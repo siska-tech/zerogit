@@ -3,6 +3,38 @@
 このプロジェクトは [Keep a Changelog](https://keepachangelog.com/ja/1.0.0/) に準拠し、
 [Semantic Versioning](https://semver.org/lang/ja/) を採用しています。
 
+## [Unreleased]
+
+### Added
+
+#### Packfile・packed-refs読み取り
+- pack v2/v3とidx v2（64bit offsetを含む）の読み取り。OFS_DELTA/REF_DELTAと多段deltaの復元に対応
+- looseと複数packを横断して読み取る（read・存在確認・短縮OID検索）。外部の`git repack`/`git gc`にも追従
+- `packed-refs`によるHEAD・ブランチ・リモートブランチ・タグの解決と一覧
+- `objects::pack::{PackIndex, PackFile, PackLimits}`
+
+#### 行単位差分
+- `Repository::diff_blobs()`、`BlobDiff::compute()`: 旧新行番号付きの行差分（Myers法）
+- `BlobDiff`、`BlobDiffContent`、`DiffHunk`、`DiffLine`、`DiffOptions`、`LineKind`、`LineEnding`、`NonTextReason`、`SkipReason`
+- 利用例 `examples/document_diff.rs`、測定 `examples/measure_document_diff.rs`
+
+#### 類似度リネーム検出（任意）
+- `Repository::diff_trees_with_options()`、`Repository::commit_diff_with_options()`、`RenameOptions`、`RenameDetection`、`RenameLimit`
+- `DiffDelta::similarity()`（完全一致は100）、`TreeDiff::rename_limits()`
+
+#### エラー
+- `InvalidPackedRefs`、`PackedRefDeletionUnsupported`、`InvalidPackIndex`、`UnsupportedPackIndexVersion`、`InvalidPack`、`UnsupportedPackVersion`、`UnsupportedRepositoryFormat`、`PackLimitExceeded`
+
+### Changed
+- `Repository::open`/`discover`/`init`は`.git/config`を読み、SHA-256（`extensions.objectFormat`）・reftable・未知の`repositoryformatversion`を`UnsupportedRepositoryFormat`として拒否する。configが壊れている場合もopen時にエラーになる
+- packed参照を含むブランチの削除は`PackedRefDeletionUnsupported`を返す
+
+### Fixed
+- 完全一致リネームで、移動と同時に実行権限が変わった場合も旧新modeを正しく保持する。同じ内容のファイルが複数ある場合の対応付けを決定的・一対一にした
+- 製品コードでI/Oエラーや破損を「オブジェクトなし」として扱っていた箇所を、明示的なエラーにした
+
+---
+
 ## [0.3.7] - 2026-01-20
 
 ### Added

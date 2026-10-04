@@ -171,6 +171,10 @@ fn main() -> Result<()> {
 | `TreeDiff`     | Tree間の差分                               |
 | `DiffDelta`    | 差分の各エントリ                           |
 | `LogOptions`   | ログ取得オプション                         |
+| `BlobDiff`     | 2つのBlob間の行差分（Text/NonText/Skipped） |
+| `DiffHunk`     | 行差分のhunk（旧新の開始行・行数）         |
+| `DiffLine`     | hunk内の1行（種別・旧新行番号・内容）      |
+| `DiffOptions`  | 文脈行数・入力サイズ・計算量の上限         |
 
 ### Repository メソッド
 
@@ -199,6 +203,8 @@ repo.commit_diff(&commit)?;       // コミットの変更ファイル一覧
 repo.diff_index_to_workdir()?;    // git diff 相当
 repo.diff_head_to_index()?;       // git diff --staged 相当
 repo.diff_head_to_workdir()?;     // git diff HEAD 相当
+repo.diff_blobs(old, new, &opts)?; // Blob間の行差分（旧新行番号付き）
+repo.resolve_short_oid("abc1234")?; // 短縮OIDの解決（loose・pack横断）
 
 // 書き込み操作
 repo.add(path)?;              // ファイルをステージ
@@ -250,6 +256,43 @@ fn main() -> Result<()> {
     Ok(())
 }
 ```
+
+### 行単位差分（旧新行番号付き）
+
+変更一覧はTreeの比較だけで取得し、Blobは詳細表示するファイルについてのみ読み込みます。比較開始時にOIDを固定しておけば、途中でブランチが動いたり`git gc`が走ったりしても同じ比較を続けられます。
+
+```rust
+use zerogit::{BlobDiffContent, DiffOptions, FileMode, Repository, Result};
+
+fn main() -> Result<()> {
+    let repo = Repository::discover(".")?;
+    let commit_oid = *repo.head()?.oid(); // 比較対象をOIDで固定
+    let commit = repo.commit(&commit_oid.to_hex())?;
+    let changes = repo.commit_diff(&commit)?; // 第一親との比較（初回コミットは空Treeとの比較）
+
+    for delta in changes.deltas() {
+        if delta.new_mode() == Some(FileMode::Submodule) {
+            continue; // gitlinkはこのリポジトリのBlobではない
+        }
+        let diff = repo.diff_blobs(delta.old_oid(), delta.new_oid(), &DiffOptions::new())?;
+        match diff.content() {
+            BlobDiffContent::Text(hunks) => {
+                for hunk in hunks {
+                    println!("{}", hunk.header());
+                    for line in hunk.lines() {
+                        println!("{:?} {:?} {:?} {}", line.kind(), line.old_lineno(), line.new_lineno(), line.text());
+                    }
+                }
+            }
+            BlobDiffContent::NonText(reason) => println!("テキストではありません: {:?}", reason),
+            BlobDiffContent::Skipped(reason) => println!("差分を省略: {}", reason),
+        }
+    }
+    Ok(())
+}
+```
+
+マージコミットの別の親や任意の2コミットを比較する場合は、`diff_trees(Some(&base_tree), &tree)`を使います。一連の流れは[`examples/document_diff.rs`](examples/document_diff.rs)にまとめています（`cargo run --example document_diff -- <repo> [--commit <oid>] [--parent <n>] [<path>...]`）。
 
 ### ログフィルタリング
 
@@ -383,29 +426,41 @@ fn main() -> Result<()> {
 - [x] コミット変更一覧（`commit_diff()`）
 - [x] ワーキングツリー差分（`diff_index_to_workdir()`, `diff_head_to_index()`）
 
-### Phase 3: Packfile・行単位差分・マージ
+### Phase 3: Packfile・行単位差分（✅ 読み取りと差分） / マージ（将来）
 
-Packfile対応と行単位差分を提供します。
+- [x] Packfile読み取り - pack v2/v3、idx v2（64bit offset含む）、OFS_DELTA/REF_DELTA、多段delta。looseと複数packを透過的に扱い、`git repack`/`git gc`後も開いたままの`Repository`で読み続けられる
+- [x] `packed-refs` - loose参照を優先し、HEAD・ブランチ・リモートブランチ・タグを解決・列挙。packed参照の削除は参照の復活を防ぐため`Error::PackedRefDeletionUnsupported`
+- [x] 行単位差分（`diff_blobs()` / `BlobDiff::compute()`）- 最小編集のMyers法、旧新行番号、文脈行数指定、LF/CRLF・末尾改行の保持
+- [x] 完全一致リネームの旧新mode保持と決定的な対応付け
+- [x] 類似度によるリネーム検出（任意）- `diff_trees_with_options()`/`commit_diff_with_options()`に`RenameOptions::new().detection(RenameDetection::Similar)`を渡す。既定は完全一致のみ
+- [ ] 3-way merge - 共通祖先ベースのマージ（将来）
 
-| 機能                 | 説明                                  | 難易度 |
-| -------------------- | ------------------------------------- | ------ |
-| Blob diff            | ファイル内容の行単位差分（Myers算法） | 高     |
-| Packfile読み取り     | `.git/objects/pack/*.pack` の読み取り | 高     |
-| Packfileインデックス | `.idx` ファイルによる高速検索         | 中     |
-| Delta復元            | ofs_delta / ref_delta の展開          | 高     |
-| 3-way merge          | 共通祖先ベースのマージ                | 高     |
+#### 対応形式と制限
 
-**想定API:**
-```rust
-// Packfile対応（内部的に自動処理）
-let obj = repo.object("abc123")?;  // looseまたはpackから透過的に取得
+| 項目 | 対応 |
+| --- | --- |
+| オブジェクト形式 | SHA-1のみ。SHA-256（`extensions.objectFormat`）は`Error::UnsupportedRepositoryFormat` |
+| オブジェクト格納 | loose、pack v2/v3（idx v2）。idx v1・multi-pack-index・commit-graph・bitmapは使用しない（packの`.idx`を直接読む） |
+| 参照 | loose refs、`packed-refs`。reftableは`Error::UnsupportedRepositoryFormat` |
+| 未対応 | 3-way merge、リモート通信、worktree、shallow/partial clone、alternates |
+| 差分の結果 | `Text`（完全な行差分）、`NonText`（NULを含む・不正UTF-8。暗黙の置換はしない）、`Skipped`（サイズ・計算量の上限超過。部分結果は返さない） |
+| リネーム検出 | 既定は完全一致のみ。類似度検出（任意）は通常・実行ファイルのテキストが対象で、類似度は「共通する行のバイト数 ÷ 大きい方のサイズ」。既定しきい値50%、候補ペア10万組、1ファイル1 MiBまで。上限に達した分は追加・削除のまま残り、`TreeDiff::rename_limits()`で識別できる |
+| パス | `DiffDelta::path()`はプラットフォームの`PathBuf`（Windowsでは`\`区切り）。比較は`Path`同士で行う |
 
-// 行単位差分（将来）
-let blob_diff = repo.diff_blobs(&old_blob, &new_blob)?;
-for hunk in blob_diff.hunks() {
-    println!("@@ -{},{} +{},{} @@", ...);
-}
-```
+破損したpack・idx・deltaは`Error::InvalidPack`/`Error::InvalidPackIndex`、上限超過は`Error::PackLimitExceeded`となり、空の履歴や差分として扱われることはありません。
+
+#### 処理上限の既定値
+
+| 設定 | 既定値 | 根拠 |
+| --- | --- | --- |
+| `DiffOptions::context_lines` | 3 | `git diff`と同じ |
+| `DiffOptions::max_input_size` | 8 MiB/片側 | 20,000行（1.3 MB）の全置換でも約16 ms。8 MiBは一般的な文書を十分に上回る |
+| `DiffOptions::max_cost` | 5,000万ステップ | 最悪ケース（同じ行が多数繰り返される5,000行文書の全置換）が約1,700万ステップ・約90 ms。2万行の同ケースは約2.7億ステップ・約3.4秒のため省略される |
+| `PackLimits::max_object_size` | 1 GiB | 宣言サイズによる過大な確保を防止 |
+| `PackLimits::max_delta_depth` | 10,000 | Gitの`--depth`上限4,095を上回る |
+| `PackLimits::delta_cache_size` | 32 MiB/pack | 多段deltaの再展開を回避 |
+
+測定は`cargo run --release --example measure_document_diff`で再現できます（Windows 11、release build。1,000コミット・50文書をpack化したリポジトリで、全履歴の走査50〜220 ms、全コミットの変更一覧160〜670 ms、全変更ファイルの行差分は1件あたり0.6〜2.5 ms、ピークメモリ約46 MiB）。
 
 ### Phase 4: リモート操作（別crate: `zerogit-remote`）
 

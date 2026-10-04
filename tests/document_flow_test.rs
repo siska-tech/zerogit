@@ -66,9 +66,10 @@ fn document_repository() -> TempDir {
         "# 仕様\n\n概要を更新\n詳細\n追記\n".as_bytes(),
     );
     git(dir, &["mv", "tools/build.sh", "build.sh"]);
-    git(dir, &["update-index", "--chmod=+x", "build.sh"]);
     write(dir, "image.bin", b"\x00\x01\x02");
     git(dir, &["add", "-A"]);
+    // After `add -A`: with core.filemode (Linux/macOS) it would reset the mode.
+    git(dir, &["update-index", "--chmod=+x", "build.sh"]);
     let target = git(dir, &["hash-object", "-w", "docs/仕様.md"])
         .trim()
         .to_owned();

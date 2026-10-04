@@ -199,6 +199,23 @@ pub enum Error {
     Locked(PathBuf),
 
     /// A revision (as accepted by `git rev-parse`) cannot be resolved.
+    /// A pathspec matched no file known to Git (tracked, or in the
+    /// source of a restore).
+    PathspecNotMatched(String),
+
+    /// A file operation (`git mv`, `git rm`) was refused, as Git refuses
+    /// it; nothing was changed.
+    InvalidPathOperation {
+        /// The path concerned.
+        path: PathBuf,
+        /// Why the operation was refused.
+        reason: String,
+    },
+
+    /// Removing these paths would lose changes that are not committed
+    /// (staged, or in the work tree); nothing was changed.
+    UncommittedChanges(Vec<PathBuf>),
+
     InvalidRevision {
         /// The revision as given.
         revision: String,
@@ -294,6 +311,19 @@ impl fmt::Display for Error {
             Error::RemoteNotFound(name) => write!(f, "remote not found: {}", name),
             Error::RemoteAlreadyExists(name) => write!(f, "remote already exists: {}", name),
             Error::StaleReference(name) => write!(f, "reference changed concurrently: {}", name),
+            Error::PathspecNotMatched(spec) => {
+                write!(f, "pathspec '{}' did not match any file known to git", spec)
+            }
+            Error::InvalidPathOperation { path, reason } => {
+                write!(f, "{}: {}", path.display(), reason)
+            }
+            Error::UncommittedChanges(paths) => {
+                write!(f, "uncommitted changes would be lost:")?;
+                for path in paths {
+                    write!(f, " {}", path.display())?;
+                }
+                Ok(())
+            }
             Error::InvalidRevision { revision, reason } => {
                 write!(f, "invalid revision '{}': {}", revision, reason)
             }
@@ -423,6 +453,12 @@ mod tests {
             Error::RemoteAlreadyExists("origin".to_string()),
             Error::StaleReference("refs/heads/main".to_string()),
             Error::Locked(PathBuf::from(".git/index.lock")),
+            Error::PathspecNotMatched("*.txt".to_string()),
+            Error::InvalidPathOperation {
+                path: PathBuf::from("a.txt"),
+                reason: "destination exists".to_string(),
+            },
+            Error::UncommittedChanges(vec![PathBuf::from("a.txt")]),
             Error::InvalidRevision {
                 revision: "main~9".to_string(),
                 reason: "'main~8' has no parent".to_string(),

@@ -59,6 +59,8 @@ pub mod index;
 pub mod log;
 pub mod merge;
 pub mod objects;
+pub mod path_ops;
+pub(crate) mod pathspec;
 pub mod rebase;
 pub mod refs;
 pub mod remote;
@@ -77,6 +79,7 @@ pub(crate) mod infra;
 pub use commit::CommitOptions;
 pub use config::{Config, ConfigLevel};
 pub use error::{Error, Result};
+pub use path_ops::{RemoveOptions, RestoreOptions};
 pub use repository::Repository;
 pub use reset::ResetMode;
 

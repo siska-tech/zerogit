@@ -460,6 +460,12 @@ impl IndexEntry {
         self.intent_to_add
     }
 
+    /// The same entry (blob, mode, stat data, flags) at another path.
+    pub(crate) fn with_path(mut self, path: PathBuf) -> Self {
+        self.path = path;
+        self
+    }
+
     pub(crate) fn with_nanos(mut self, ctime_nsec: u32, mtime_nsec: u32) -> Self {
         self.ctime_nsec = ctime_nsec;
         self.mtime_nsec = mtime_nsec;

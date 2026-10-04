@@ -63,6 +63,7 @@ pub mod rebase;
 pub mod refs;
 pub mod remote;
 pub mod repository;
+pub mod reset;
 pub mod revision;
 pub mod stash;
 pub mod status;
@@ -77,6 +78,7 @@ pub use commit::CommitOptions;
 pub use config::{Config, ConfigLevel};
 pub use error::{Error, Result};
 pub use repository::Repository;
+pub use reset::ResetMode;
 
 // Re-export object types
 pub use objects::{Blob, Commit, FileMode, Object, Oid, Signature, Tree, TreeEntry};

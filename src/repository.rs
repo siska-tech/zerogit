@@ -933,6 +933,20 @@ impl Repository {
     pub fn refresh_index(&self) -> Result<usize> {
         let (lock, mut idx) = self.lock_index()?;
         let mut worktree = self.worktree()?;
+        let count = self.refresh_entries(&mut idx, &mut worktree)?;
+        if count > 0 {
+            lock.write(&idx)?;
+        }
+        Ok(count)
+    }
+
+    /// Gives the entries of `idx` whose files are unchanged the files'
+    /// current stat data, and returns how many were updated.
+    pub(crate) fn refresh_entries(
+        &self,
+        idx: &mut Index,
+        worktree: &mut Worktree,
+    ) -> Result<usize> {
         let mut refreshed = Vec::new();
         for entry in idx.entries() {
             if entry.stage() != 0 || entry.skip_worktree() || entry.intent_to_add() {
@@ -955,11 +969,8 @@ impl Repository {
             }
         }
         let count = refreshed.len();
-        if count > 0 {
-            for entry in refreshed {
-                idx.add(entry);
-            }
-            lock.write(&idx)?;
+        for entry in refreshed {
+            idx.refresh(entry);
         }
         Ok(count)
     }
@@ -1377,40 +1388,36 @@ impl Repository {
         committer: &Signature,
         message: &str,
     ) -> Result<()> {
-        let store = self.ref_store();
-        let reflog = self.reflog_writer()?;
-        let mut head_lock = LockFile::acquire(self.git_dir.join("HEAD"))?;
-        let branch = match store.read_ref_file("HEAD")? {
-            crate::refs::RefValue::Symbolic(target) => Some(target),
-            crate::refs::RefValue::Direct(_) => None,
-        };
-        let mut branch_lock = match &branch {
-            Some(target) => Some(LockFile::acquire(self.git_dir.join(target))?),
-            None => None,
-        };
-        let old = self.optional_head_oid()?;
-        if old != expected {
+        let lock = self.lock_head()?;
+        if lock.old != expected {
             return Err(Error::StaleReference(
-                branch.unwrap_or_else(|| "HEAD".to_owned()),
+                lock.branch
+                    .map(|(name, _)| name)
+                    .unwrap_or_else(|| "HEAD".to_owned()),
             ));
         }
-        let old_oid = old.unwrap_or_else(zero_oid);
-        let content = format!("{}\n", new_oid.to_hex());
+        lock.update(self, new_oid, committer, message)
+    }
 
-        // Write the new value and the reflogs while holding the locks.
-        match (&branch, branch_lock.as_mut()) {
-            (Some(target), Some(lock)) => {
-                lock.write_all(content.as_bytes())?;
-                reflog.append(target, &old_oid, new_oid, committer, message)?;
+    /// Locks HEAD and the branch it points to (if any), as Git does before
+    /// moving HEAD, and reads the commit HEAD points to under the lock.
+    /// Taking the lock first lets an operation fail before changing
+    /// anything when another process holds it.
+    ///
+    /// # Errors
+    ///
+    /// `Error::Locked` if HEAD or the branch is locked.
+    pub(crate) fn lock_head(&self) -> Result<HeadLock> {
+        let head = LockFile::acquire(self.git_dir.join("HEAD"))?;
+        let branch = match self.ref_store().read_ref_file("HEAD")? {
+            crate::refs::RefValue::Symbolic(target) => {
+                let lock = LockFile::acquire(self.git_dir.join(&target))?;
+                Some((target, lock))
             }
-            _ => head_lock.write_all(content.as_bytes())?,
-        }
-        reflog.append("HEAD", &old_oid, new_oid, committer, message)?;
-        match branch_lock {
-            // HEAD itself is unchanged; dropping its lock leaves it as it is.
-            Some(lock) => lock.commit(),
-            None => head_lock.commit(),
-        }
+            crate::refs::RefValue::Direct(_) => None,
+        };
+        let old = self.optional_head_oid()?;
+        Ok(HeadLock { head, branch, old })
     }
 
     /// The reflog writer, configured by `core.logAllRefUpdates`.
@@ -1519,6 +1526,7 @@ impl Repository {
             &signature,
             &signature,
             EmptyCheck::EmptyIndex,
+            false,
         )
     }
 
@@ -2240,6 +2248,55 @@ pub(crate) fn validate_ref_name(kind: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// The locks on HEAD and its branch taken by [`Repository::lock_head`].
+pub(crate) struct HeadLock {
+    head: LockFile,
+    /// The branch HEAD points to, with its lock; `None` when detached.
+    branch: Option<(String, LockFile)>,
+    /// The commit HEAD pointed to when locked (`None`: unborn branch).
+    pub(crate) old: Option<Oid>,
+}
+
+impl HeadLock {
+    /// Moves HEAD (its branch, or HEAD itself when detached) to `new_oid`,
+    /// recording `message` in the reflogs of the branch and HEAD while the
+    /// locks are held, and releases the locks.
+    pub(crate) fn update(
+        mut self,
+        repo: &Repository,
+        new_oid: &Oid,
+        committer: &Signature,
+        message: &str,
+    ) -> Result<()> {
+        let reflog = repo.reflog_writer()?;
+        let old_oid = self.old.unwrap_or_else(zero_oid);
+        if self.old == Some(*new_oid) {
+            // Nothing moves. As in Git, HEAD's reflog still records the
+            // operation when HEAD points to a branch (whose own reflog does
+            // not), and a detached HEAD records nothing; dropping the locks
+            // leaves the files as they are.
+            if self.branch.is_some() {
+                reflog.append("HEAD", &old_oid, new_oid, committer, message)?;
+            }
+            return Ok(());
+        }
+        let content = format!("{}\n", new_oid.to_hex());
+        match &mut self.branch {
+            Some((target, lock)) => {
+                lock.write_all(content.as_bytes())?;
+                reflog.append(target, &old_oid, new_oid, committer, message)?;
+            }
+            None => self.head.write_all(content.as_bytes())?,
+        }
+        reflog.append("HEAD", &old_oid, new_oid, committer, message)?;
+        match self.branch {
+            // HEAD itself is unchanged; dropping its lock leaves it as it is.
+            Some((_, lock)) => lock.commit(),
+            None => self.head.commit(),
+        }
+    }
+}
+
 /// The lock on the index taken by [`Repository::lock_index`].
 pub(crate) struct IndexLock(LockFile);
 
@@ -2344,7 +2401,7 @@ fn normalize_index_path(path: &Path) -> PathBuf {
 
 /// Rejects operations that would rebuild the index and silently end a
 /// sparse checkout by dropping skip-worktree flags.
-fn reject_sparse_checkout(index: &Index, operation: &str) -> Result<()> {
+pub(crate) fn reject_sparse_checkout(index: &Index, operation: &str) -> Result<()> {
     if index.entries().iter().any(IndexEntry::skip_worktree) {
         return Err(Error::UnsupportedIndex {
             version: index.version(),

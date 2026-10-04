@@ -227,8 +227,11 @@ repo.add(path)?;              // ファイルをステージ（無視対象の�
 repo.add_force(path)?;        // 無視対象でもステージ（git add -f）
 repo.add_all()?;              // 全変更をステージ
 repo.reset(path)?;            // ステージを解除
+repo.reset_to("HEAD~1", ResetMode::Soft)?; // git reset --soft/--mixed/--hard
+repo.reset_paths("HEAD~2", &["src"])?;     // git reset <rev> -- <paths>
 repo.create_commit(msg, author, email)?;  // コミット作成
 repo.create_commit_with(msg, &CommitOptions::new())?; // 作者・コミッター・日時を指定（既定はGitと同じ解決）
+repo.amend_commit(None, &CommitOptions::new())?;     // git commit --amend --no-edit
 repo.create_branch(name, target)?;        // ブランチ作成
 repo.delete_branch(name)?;                // ブランチ削除
 repo.checkout(target)?;                   // ブランチ切り替え

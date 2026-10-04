@@ -85,6 +85,16 @@ fn main() -> Result<()> {
 }
 ```
 
+statusは、Gitと同じくindexに記録したstat情報（サイズ・更新時刻など）が一致するファイルを読みません。indexの書き込みと同じ秒に変更されたファイル（racy-git）は内容で比較します。`status()`はindexを書き換えないので、ファイルに触れただけ（内容は同じ）のときは`repo.refresh_index()`でstat情報を更新すると、以降のstatusが速くなります。
+
+4,000ファイル・220 MB、変更なしの作業ツリーでの計測（Windows 11、release build、`cargo run --release --example measure_status`）:
+
+| | 時間 | `git status`との比 |
+|---|---|---|
+| `git status --porcelain` | 97 ms | 1.0 |
+| `status()`（Gitが書いたindex） | 128 ms | 1.3 |
+| `status()`（zerogitが書いたindex） | 147 ms | 1.5 |
+
 ### 特定コミットの詳細を取得
 
 ```rust
@@ -194,6 +204,7 @@ repo.reflog("HEAD")?;         // reflog（新しい順）
 repo.log_with_options(opts)?; // フィルタリング付きログ
 repo.status()?;               // ワーキングツリー状態（パスごとに1つの状態）
 repo.detailed_status()?;      // index側・作業ツリー側を別々に（porcelain v2相当）
+repo.refresh_index()?;        // 変更のないファイルのstat情報を更新（git update-index --refresh）
 repo.commit("sha")?;          // コミット取得
 repo.tree("sha")?;            // ツリー取得
 repo.blob("sha")?;            // Blob取得

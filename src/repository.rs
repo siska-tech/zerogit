@@ -893,6 +893,69 @@ impl Repository {
         )
     }
 
+    /// Updates the stat data of index entries whose files are unchanged,
+    /// like `git update-index --refresh`, and returns how many entries were
+    /// updated.
+    ///
+    /// [`Repository::status`] and the other operations that compare the
+    /// work tree with the index skip reading files whose stat data (size,
+    /// modification time and, as Git compares them, ctime, inode and owner)
+    /// matches the index entry. After files are touched without changing
+    /// (for example by a build tool, or a fresh clone of the work tree),
+    /// their content is read and hashed each time until the index is
+    /// refreshed. `status()` itself never writes the index; call this to
+    /// save the refreshed stat data, as `git status` does when it can.
+    ///
+    /// Files modified within the current second are recorded so that the
+    /// next comparison still reads them (Git's racy-git handling).
+    ///
+    /// # Errors
+    ///
+    /// `Error::Locked` if the index is locked by another process.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// repo.refresh_index().unwrap();
+    /// let status = repo.status().unwrap(); // reads only changed files
+    /// ```
+    pub fn refresh_index(&self) -> Result<usize> {
+        let (lock, mut idx) = self.lock_index()?;
+        let mut worktree = self.worktree()?;
+        let mut refreshed = Vec::new();
+        for entry in idx.entries() {
+            if entry.stage() != 0 || entry.skip_worktree() || entry.intent_to_add() {
+                continue;
+            }
+            let path = crate::worktree::native_path(entry.path());
+            if worktree.is_stat_clean(&path, entry)? {
+                continue;
+            }
+            // Only an unchanged file gets new stat data; a changed one keeps
+            // its entry, so it stays reported as modified.
+            let wanted = Some((*entry.oid(), entry.mode()));
+            if worktree.hash(&path, Some(entry))? == wanted {
+                refreshed.push(worktree.stat_entry(
+                    &path,
+                    entry.path().to_path_buf(),
+                    *entry.oid(),
+                    entry.mode(),
+                )?);
+            }
+        }
+        let count = refreshed.len();
+        if count > 0 {
+            for entry in refreshed {
+                idx.add(entry);
+            }
+            lock.write(&idx)?;
+        }
+        Ok(count)
+    }
+
     /// Returns whether a path is ignored by `.gitignore` files,
     /// `.git/info/exclude` or `core.excludesFile`.
     ///
@@ -2229,9 +2292,13 @@ pub(crate) fn validate_ref_name(kind: &str, name: &str) -> Result<()> {
 pub(crate) struct IndexLock(LockFile);
 
 impl IndexLock {
-    /// Saves `idx` as the new index and releases the lock.
+    /// Saves `idx` as the new index and releases the lock. Entries of files
+    /// modified this second are smudged first (see
+    /// [`Index::smudge_racy_entries`]).
     pub(crate) fn write(mut self, idx: &Index) -> Result<()> {
-        self.0.write_all(&index::write(idx))?;
+        let mut idx = idx.clone();
+        idx.smudge_racy_entries(crate::infra::time::now() as u64);
+        self.0.write_all(&index::write(&idx))?;
         self.0.commit()
     }
 }

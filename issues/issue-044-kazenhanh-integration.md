@@ -7,7 +7,7 @@
 | Phase | 3: KazeNhanh向け読み取り・差分 |
 | 優先度 | 必須・高 |
 | 依存（ローカル計画ID） | 041、042、043 |
-| ステータス | 実装済み（ローカル・未コミット。CIはpush後に確認） |
+| ステータス | 実装済み（PR #17） |
 
 ## 背景・目的
 
@@ -19,7 +19,7 @@
 - [x] 追加削除の片側不在、リネームの旧新パス、mode変更、symlink、gitlinkを明示的に扱う
 - [x] 初期コミットは空Tree比較、マージは第一親を既定とし、別親は明示選択したTree比較を例示する
 - [x] README・API文書・設計書に対応形式と制限を反映する
-- [ ] Windows/macOS/Linux、Rust stable/1.70で既存CI・fmt・clippyを実施する（ローカルのWindowsでstable/1.70・fmt・clippyは確認済み。CIはpush後）
+- [x] Windows/macOS/Linux、Rust stable/1.70で既存CI・fmt・clippyを実施する（PR #17のCIで全ジョブ成功）
 - [x] 代表fixtureで読み取り時間とメモリを測定し、処理上限の初期値と根拠を記録する
 
 ## 受け入れ条件

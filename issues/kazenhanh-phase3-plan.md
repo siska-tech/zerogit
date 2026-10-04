@@ -20,7 +20,7 @@ Packfileとpacked-refsを含むSHA-1リポジトリから変更ファイルと�
 - [x] 行差分、旧新行番号、追加削除・改行・バイナリ・処理省略を適切に扱える。
 - [x] 不存在・破損・未対応形式を区別し、黙った情報欠落を起こさない。
 - [x] 既存の読み書きAPIの回帰確認が通る。
-- [ ] Windows/macOS/LinuxおよびRust stable/1.70のCI、fmt、clippyが通る。（ローカルのWindowsでstable/1.70・fmt・clippyは確認済み。CIはpush後に確認）
+- [x] Windows/macOS/LinuxおよびRust stable/1.70のCI、fmt、clippyが通る。（PR #17）
 - [x] 対応範囲・制限・利用例と性能測定結果が文書化されている。
 
 ## 対象外

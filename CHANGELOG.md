@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-04
+
+日常の操作をそろえた: リビジョン指定（`rev_parse`）、`reset --soft/--mixed/--hard`、`commit --amend`、`restore`・`rm`・`mv`、変更を持ち越すcheckout。`zerogit-remote`は0.3.0として、zerogit 0.7に追従する。
+
+`checkout`は、変更があると一律に`Error::DirtyWorkingTree`で止まる動作から、Gitと同じく切り替えで失われない変更を持ち越す動作に変わった（下記「Changed」）。
+
 ### Added
 - `Repository::rev_parse()`: `git rev-parse`と同じくリビジョンを解決する。参照名（Gitと同じ順: `refs/`・`refs/tags/`・`refs/heads/`・`refs/remotes/`・`refs/remotes/<name>/HEAD`）、短縮OID、`@`、`~<n>`・`^<n>`、`^{}`・`^{commit}`・`^{tree}`・`^{blob}`・`^{tag}`・`^{object}`、`<rev>:<path>`、`:<path>`・`:<n>:<path>`（index）、`<ref>@{<n>}`（reflog）、`@{-<n>}`、`@{upstream}`・`@{u}`に対応する。日付、`@{push}`、メッセージ検索（`^{/text}`・`:/text`）、範囲は未対応 (#44)
 - `Error::InvalidRevision`: 解決できないリビジョン。理由に問題の部分を含む (#44)
@@ -339,6 +345,7 @@ Phase 1: Repository Layer（読み取り操作）の完全実装。
 - 対応プラットフォーム: Linux, macOS, Windows
 - テストカバレッジ: 94%以上
 
+[0.7.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.7.0
 [0.6.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.6.0
 [0.5.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.5.0
 [0.4.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.4.0

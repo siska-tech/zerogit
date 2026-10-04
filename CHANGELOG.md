@@ -5,6 +5,10 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-05
+
+Gitとの互換性を広げた: merge・rebase・stashでのリネームの追従とリネームのコンフリクト、対話的rebase、SSHトランスポートの強化と実サーバーでの検証。`zerogit-remote`は0.4.0として、zerogit 0.8に追従する（`Error::Connection`の追加など）。
+
 ### Added
 - `zerogit-remote`: SSHクライアントをGitと同じ順で選ぶ: `GIT_SSH_COMMAND`（シェルで実行）、`GIT_SSH`（プログラム）、`core.sshCommand`（シェルで実行。`fetch`・`push`はリポジトリの設定を読む）、`ssh`。PuTTYの`plink`・`tortoiseplink`にはそのポート指定（`-P`）を使う。`ProcessConnector::ssh_command()`、`transport::open_for()` (#36)
 - `zerogit-remote`: `Error::Connection`: 接続が応答の前に切れたとき、SSHクライアントの終了状態とメッセージ（認証失敗、ホスト鍵の不一致など）を含めて返す (#36)
@@ -356,6 +360,7 @@ Phase 1: Repository Layer（読み取り操作）の完全実装。
 - 対応プラットフォーム: Linux, macOS, Windows
 - テストカバレッジ: 94%以上
 
+[0.8.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.8.0
 [0.7.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.7.0
 [0.6.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.6.0
 [0.5.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.5.0

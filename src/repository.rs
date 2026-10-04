@@ -1603,7 +1603,8 @@ impl Repository {
         Ok(Branch::new(name, target_oid))
     }
 
-    /// Deletes a branch.
+    /// Deletes a branch (loose, packed in `packed-refs`, or both) and its
+    /// reflog.
     ///
     /// # Arguments
     ///
@@ -1617,7 +1618,7 @@ impl Repository {
     ///
     /// - `Error::RefNotFound` if the branch does not exist.
     /// - `Error::CannotDeleteCurrentBranch` if trying to delete the current branch.
-    /// - `Error::PackedRefDeletionUnsupported` if the branch also exists in packed-refs.
+    /// - `Error::Locked` if the branch or `packed-refs` is locked.
     ///
     /// # Examples
     ///
@@ -1635,7 +1636,7 @@ impl Repository {
             return Err(Error::CannotDeleteCurrentBranch);
         }
 
-        self.delete_loose_ref(&format!("refs/heads/{}", name), "refs/heads")
+        self.delete_ref(&format!("refs/heads/{}", name), "refs/heads")
     }
 
     /// Checks out a branch or commit.
@@ -2125,7 +2126,7 @@ impl Repository {
     /// # Errors
     ///
     /// - `Error::RefNotFound` if the tag does not exist.
-    /// - `Error::PackedRefDeletionUnsupported` if the tag is in `packed-refs`.
+    /// - `Error::Locked` if the tag or `packed-refs` is locked.
     ///
     /// # Examples
     ///
@@ -2138,7 +2139,7 @@ impl Repository {
     pub fn delete_tag(&self, name: &str) -> Result<()> {
         validate_ref_name("tag", name)?;
         let ref_name = format!("refs/tags/{}", name);
-        self.delete_loose_ref(&ref_name, "refs/tags")
+        self.delete_ref(&ref_name, "refs/tags")
     }
 
     /// Removes a reference (and its peeled line) from `packed-refs`.
@@ -2171,31 +2172,46 @@ impl Repository {
         lock.commit()
     }
 
-    /// Deletes a loose reference, its reflog and the directories under
-    /// `root` it leaves empty.
-    fn delete_loose_ref(&self, ref_name: &str, root: &str) -> Result<()> {
+    /// Deletes a reference, loose or packed (or both), its reflog and the
+    /// directories under `root` it leaves empty.
+    fn delete_ref(&self, ref_name: &str, root: &str) -> Result<()> {
         let store = self.ref_store();
-        if store.is_packed(ref_name)? {
-            return Err(Error::PackedRefDeletionUnsupported(ref_name.to_owned()));
-        }
         let path = self.git_dir.join(ref_name);
         let lock = LockFile::acquire(&path)?;
         store.read_ref_file(ref_name)?;
-        fs::remove_file(&path)?;
+        // The packed record first: removing only the loose file would
+        // uncover an older packed value.
+        if store.is_packed(ref_name)? {
+            self.remove_packed_ref(ref_name)?;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
         self.reflog_writer()?.delete(ref_name)?;
         // Release the lock first: its file would keep the directory non-empty.
         drop(lock);
+        self.remove_empty_ref_dirs(&path, &self.git_dir.join(root))
+    }
 
-        let root = self.git_dir.join(root);
+    /// Removes the directories above a deleted reference file that are now
+    /// empty, up to (not including) `root`.
+    pub(crate) fn remove_empty_ref_dirs(&self, path: &Path, root: &Path) -> Result<()> {
         let mut parent = path.parent();
         while let Some(dir) = parent {
-            if dir == root {
+            if dir == root || !dir.starts_with(root) {
                 break;
             }
-            if dir.read_dir()?.next().is_none() {
-                fs::remove_dir(dir)?;
-            } else {
-                break;
+            match dir.read_dir() {
+                Ok(mut entries) => {
+                    if entries.next().is_some() {
+                        break;
+                    }
+                    fs::remove_dir(dir)?;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
             }
             parent = dir.parent();
         }

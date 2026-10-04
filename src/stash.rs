@@ -489,11 +489,17 @@ impl Repository {
                 lock.write_all(format!("{}\n", newest.new_oid().to_hex()).as_bytes())?;
                 lock.commit()
             }
-            None => match std::fs::remove_file(&ref_path) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(e) => Err(e.into()),
-            },
+            None => {
+                // `git pack-refs` may have moved it into packed-refs.
+                if self.ref_store().is_packed("refs/stash")? {
+                    self.remove_packed_ref("refs/stash")?;
+                }
+                match std::fs::remove_file(&ref_path) {
+                    Ok(()) => Ok(()),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(e) => Err(e.into()),
+                }
+            }
         }
     }
 }

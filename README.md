@@ -242,6 +242,7 @@ repo.checkout_with(target, &CheckoutOptions::new().force(true))?; // git checkou
 repo.create_tag(name, target)?;           // 軽量タグ作成
 repo.create_annotated_tag(name, target, msg, tagger, email)?; // 注釈付きタグ作成
 repo.delete_tag(name)?;                   // タグ削除
+repo.pack_refs()?;                        // 参照をpacked-refsにまとめる（git pack-refs --all）
 repo.merge(target, name, email, &MergeOptions::new())?; // マージ（ff・3-way）
 repo.abort_merge()?;                      // マージの中止
 repo.merge_base(&a, &b)?;                 // 共通祖先
@@ -473,7 +474,7 @@ fn main() -> Result<()> {
 ### Phase 3: Packfile・行単位差分・マージ ✅
 
 - [x] Packfile読み取り - pack v2/v3、idx v2（64bit offset含む）、OFS_DELTA/REF_DELTA、多段delta。looseと複数packを透過的に扱い、`git repack`/`git gc`後も開いたままの`Repository`で読み続けられる
-- [x] `packed-refs` - loose参照を優先し、HEAD・ブランチ・リモートブランチ・タグを解決・列挙。packed参照の削除は参照の復活を防ぐため`Error::PackedRefDeletionUnsupported`
+- [x] `packed-refs` - loose参照を優先し、HEAD・ブランチ・リモートブランチ・タグを解決・列挙。ブランチ・タグの削除はpacked-refsの記録も消す（古い値が復活しない）。`pack_refs()`（`git pack-refs --all`）
 - [x] 行単位差分（`diff_blobs()` / `BlobDiff::compute()`）- 最小編集のMyers法、旧新行番号、文脈行数指定、LF/CRLF・末尾改行の保持
 - [x] 完全一致リネームの旧新mode保持と決定的な対応付け
 - [x] 類似度によるリネーム検出（任意）- `diff_trees_with_options()`/`commit_diff_with_options()`に`RenameOptions::new().detection(RenameDetection::Similar)`を渡す。既定は完全一致のみ

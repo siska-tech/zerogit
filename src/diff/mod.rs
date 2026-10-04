@@ -286,9 +286,9 @@ impl<'a> IntoIterator for &'a TreeDiff {
 
 /// Entry in a flattened tree.
 #[derive(Debug, Clone)]
-struct FlatEntry {
-    oid: Oid,
-    mode: FileMode,
+pub(crate) struct FlatEntry {
+    pub(crate) oid: Oid,
+    pub(crate) mode: FileMode,
 }
 
 impl Repository {
@@ -518,7 +518,11 @@ impl Repository {
     }
 
     /// Flattens a tree into a map of path -> (oid, mode).
-    fn flatten_tree(&self, tree: &Tree, prefix: PathBuf) -> Result<HashMap<PathBuf, FlatEntry>> {
+    pub(crate) fn flatten_tree(
+        &self,
+        tree: &Tree,
+        prefix: PathBuf,
+    ) -> Result<HashMap<PathBuf, FlatEntry>> {
         let mut result = HashMap::new();
 
         for entry in tree.entries() {
@@ -685,15 +689,31 @@ impl Repository {
             map.insert(normalized_path, FlatEntry { oid, mode });
         }
 
+        // Skip-worktree (sparse checkout) entries are taken as up to date,
+        // whether or not a file is present, as Git does.
+        for entry in index.entries().iter().filter(|e| e.skip_worktree()) {
+            map.insert(
+                normalize_path(entry.path()),
+                FlatEntry {
+                    oid: *entry.oid(),
+                    mode: entry.mode(),
+                },
+            );
+        }
+
         Ok(map)
     }
 }
 
 /// Converts an Index to a flat entry map.
+///
+/// Intent-to-add entries carry no staged content, so they are left out: like
+/// Git, they do not appear against HEAD and show as new in the working tree.
 fn index_to_flat_map(index: &Index) -> HashMap<PathBuf, FlatEntry> {
     index
         .entries()
         .iter()
+        .filter(|e| !e.intent_to_add())
         .map(|e| {
             (
                 normalize_path(e.path()),

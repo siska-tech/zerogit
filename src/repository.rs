@@ -16,7 +16,7 @@ use crate::status::{
 
 use std::fs;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// A Git repository.
 ///
@@ -1053,11 +1053,19 @@ impl Repository {
         if let Some(tree_oid) = head_tree_oid {
             flatten_tree(&store, &tree_oid, Path::new(""), &mut head_files)?;
         }
+        let head_modes = self.tree_modes(head_tree_oid.as_ref())?;
+        let mode_of = |path: &Path| {
+            head_modes
+                .get(&normalize_index_path(path))
+                .copied()
+                .unwrap_or(FileMode::Regular)
+        };
 
         match path {
             Some(p) => {
                 // Reset specific path
                 let path = p.as_ref();
+                let skip_worktree = idx.get(path).is_some_and(|e| e.skip_worktree());
                 if let Some(head_oid) = head_files.get(path) {
                     // File exists in HEAD, restore it to index
                     let raw = store.read(head_oid)?;
@@ -1066,14 +1074,16 @@ impl Repository {
                         0, // mtime
                         0,
                         0,
-                        FileMode::Regular, // Simplified: assume regular file
+                        mode_of(path),
                         0,
                         0,
                         raw.content.len() as u32,
                         *head_oid,
                         path.to_path_buf(),
                         0,
-                    );
+                    )
+                    // A sparse checkout entry stays outside the working tree.
+                    .with_extended_flags(skip_worktree, false);
                     idx.add(entry);
                 } else {
                     // File doesn't exist in HEAD, remove from index
@@ -1081,6 +1091,8 @@ impl Repository {
                 }
             }
             None => {
+                // Rebuilding would drop skip-worktree flags and end the sparse checkout.
+                reject_sparse_checkout(&idx, "reset of the whole index")?;
                 // Reset all: rebuild index from HEAD
                 idx.clear();
 
@@ -1091,7 +1103,7 @@ impl Repository {
                         0,
                         0,
                         0,
-                        FileMode::Regular,
+                        mode_of(path),
                         0,
                         0,
                         raw.content.len() as u32,
@@ -1107,6 +1119,19 @@ impl Repository {
         self.write_index(&idx)?;
 
         Ok(())
+    }
+
+    /// Returns the mode of every file in a tree, keyed by `/`-separated path.
+    fn tree_modes(&self, tree_oid: Option<&Oid>) -> Result<HashMap<PathBuf, FileMode>> {
+        let Some(oid) = tree_oid else {
+            return Ok(HashMap::new());
+        };
+        let tree = self.tree(&oid.to_hex())?;
+        Ok(self
+            .flatten_tree(&tree, PathBuf::new())?
+            .into_iter()
+            .map(|(path, entry)| (normalize_index_path(&path), entry.mode))
+            .collect())
     }
 
     /// Builds a tree object from the current index.
@@ -1126,7 +1151,8 @@ impl Repository {
         let mut dir_entries: BTreeMap<PathBuf, Vec<(String, FileMode, Oid)>> = BTreeMap::new();
 
         // First, collect all blobs by their parent directory
-        for entry in idx.entries() {
+        // Intent-to-add entries (git add -N) have no staged content to commit.
+        for entry in idx.entries().iter().filter(|e| !e.intent_to_add()) {
             let path = entry.path();
             let parent = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
             let name = path
@@ -1148,7 +1174,7 @@ impl Repository {
         let mut all_dirs: Vec<PathBuf> = dir_entries.keys().cloned().collect();
 
         // Also add parent directories that might only contain subdirectories
-        for entry in idx.entries() {
+        for entry in idx.entries().iter().filter(|e| !e.intent_to_add()) {
             let mut current = entry.path().parent();
             while let Some(p) = current {
                 if !p.as_os_str().is_empty() && !all_dirs.contains(&p.to_path_buf()) {
@@ -1606,6 +1632,10 @@ impl Repository {
     /// repo.checkout("abc1234").unwrap();
     /// ```
     pub fn checkout(&self, target: &str) -> Result<()> {
+        // Rebuilding the index would drop skip-worktree flags; refuse before
+        // touching the working tree.
+        reject_sparse_checkout(&self.read_index()?, "checkout")?;
+
         // Check for uncommitted changes
         if self.has_uncommitted_changes()? {
             return Err(Error::DirtyWorkingTree);
@@ -1709,7 +1739,10 @@ impl Repository {
         }
 
         // Rebuild index from target tree
-        let mut idx = Index::empty(2);
+        // Keep the index version the user configured (e.g. v4).
+        let version = self.read_index()?.version();
+        let target_modes = self.tree_modes(Some(tree_oid))?;
+        let mut idx = Index::empty(version);
         for (path, oid) in &target_files {
             let full_path = self.work_dir.join(path);
             let metadata = fs::metadata(&full_path)?;
@@ -1733,7 +1766,10 @@ impl Repository {
                 mtime,
                 0,
                 0,
-                FileMode::Regular, // Simplified for now
+                target_modes
+                    .get(&normalize_index_path(path))
+                    .copied()
+                    .unwrap_or(FileMode::Regular),
                 0,
                 0,
                 raw.content.len() as u32,
@@ -1865,6 +1901,23 @@ impl Repository {
         }
         Ok(result)
     }
+}
+
+/// Converts a path to the `/`-separated form used for index and tree paths.
+fn normalize_index_path(path: &Path) -> PathBuf {
+    PathBuf::from(path.to_string_lossy().replace('\\', "/"))
+}
+
+/// Rejects operations that would rebuild the index and silently end a
+/// sparse checkout by dropping skip-worktree flags.
+fn reject_sparse_checkout(index: &Index, operation: &str) -> Result<()> {
+    if index.entries().iter().any(IndexEntry::skip_worktree) {
+        return Err(Error::UnsupportedIndex {
+            version: index.version(),
+            reason: format!("{} with skip-worktree entries (sparse checkout)", operation),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

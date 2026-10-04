@@ -153,6 +153,13 @@ pub struct IndexEntry {
     path: PathBuf,
     /// Stage number (0 for normal, 1-3 for merge conflicts).
     stage: u8,
+    /// Nanosecond parts of ctime and mtime, kept so rewriting the index does not
+    /// lose precision Git relies on to detect changes.
+    ctime_nsec: u32,
+    mtime_nsec: u32,
+    /// Extended flags (index v3+).
+    skip_worktree: bool,
+    intent_to_add: bool,
 }
 
 impl IndexEntry {
@@ -183,6 +190,10 @@ impl IndexEntry {
             oid,
             path,
             stage,
+            ctime_nsec: 0,
+            mtime_nsec: 0,
+            skip_worktree: false,
+            intent_to_add: false,
         }
     }
 
@@ -249,6 +260,40 @@ impl IndexEntry {
     /// Returns true if this entry is in a merge conflict.
     pub fn is_conflicted(&self) -> bool {
         self.stage != 0
+    }
+
+    /// Returns the nanosecond part of ctime.
+    pub fn ctime_nsec(&self) -> u32 {
+        self.ctime_nsec
+    }
+
+    /// Returns the nanosecond part of mtime.
+    pub fn mtime_nsec(&self) -> u32 {
+        self.mtime_nsec
+    }
+
+    /// Returns whether the entry is marked skip-worktree (sparse checkout):
+    /// its working tree file is intentionally absent or not to be compared.
+    pub fn skip_worktree(&self) -> bool {
+        self.skip_worktree
+    }
+
+    /// Returns whether the entry is marked intent-to-add (`git add -N`): the
+    /// path is tracked but its content is not staged and is not committed.
+    pub fn intent_to_add(&self) -> bool {
+        self.intent_to_add
+    }
+
+    pub(crate) fn with_nanos(mut self, ctime_nsec: u32, mtime_nsec: u32) -> Self {
+        self.ctime_nsec = ctime_nsec;
+        self.mtime_nsec = mtime_nsec;
+        self
+    }
+
+    pub(crate) fn with_extended_flags(mut self, skip_worktree: bool, intent_to_add: bool) -> Self {
+        self.skip_worktree = skip_worktree;
+        self.intent_to_add = intent_to_add;
+        self
     }
 }
 

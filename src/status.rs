@@ -202,6 +202,20 @@ pub(crate) fn compute_status_with_store(
         let in_index = index_files.get(&path);
         let in_working = working_files.contains(&path);
 
+        // Skip-worktree (sparse checkout) entries are not compared with the
+        // working tree, only with HEAD, as Git does.
+        if let Some(entry) = in_index.filter(|e| e.skip_worktree()) {
+            let status = match in_head {
+                None => Some(FileStatus::Added),
+                Some(head_oid) if head_oid != entry.oid() => Some(FileStatus::StagedModified),
+                Some(_) => None,
+            };
+            if let Some(s) = status {
+                entries.push(StatusEntry::new(path, s));
+            }
+            continue;
+        }
+
         let status = match (in_head, in_index, in_working) {
             // Untracked: not in HEAD, not in index, but in working tree
             (None, None, true) => Some(FileStatus::Untracked),

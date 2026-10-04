@@ -1,11 +1,18 @@
 //! Git index file parser.
 //!
 //! This module implements parsing of the Git index file format (versions 2, 3, 4).
+//!
+//! Entries are validated strictly: padding, path terminators, v4 path
+//! compression, extended flags and the trailing checksum. Optional extensions
+//! (cache tree, resolve-undo, untracked cache, ...) are skipped as Git allows;
+//! required extensions such as split index (`link`) and sparse index (`sdir`)
+//! are rejected with [`Error::UnsupportedIndex`], because ignoring them would
+//! misread the entries and rewriting would corrupt the index.
 
-use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
 use crate::error::{Error, Result};
+use crate::infra::hash::sha1;
 use crate::objects::oid::OID_BYTES;
 use crate::objects::tree::FileMode;
 use crate::objects::Oid;
@@ -21,193 +28,273 @@ const MIN_VERSION: u32 = 2;
 /// Maximum supported index version.
 const MAX_VERSION: u32 = 4;
 
+const HEADER_SIZE: usize = 12;
+const CHECKSUM_SIZE: usize = 20;
+/// ctime, mtime, dev, ino, mode, uid, gid, size (10 × 4 bytes), OID, flags.
+const ENTRY_FIXED_SIZE: usize = 40 + OID_BYTES + 2;
+
+const FLAG_EXTENDED: u16 = 0x4000;
+const NAME_MASK: u16 = 0x0FFF;
+const EXTENDED_SKIP_WORKTREE: u16 = 0x4000;
+const EXTENDED_INTENT_TO_ADD: u16 = 0x2000;
+
 /// Parses a Git index file from raw bytes.
-///
-/// # Arguments
-///
-/// * `data` - The raw bytes of the index file.
-///
-/// # Returns
-///
-/// The parsed Index on success, or an error if parsing fails.
 ///
 /// # Errors
 ///
-/// Returns `Error::InvalidIndex` if:
-/// - The signature is not "DIRC"
-/// - The version is not 2, 3, or 4
-/// - The data is truncated or malformed
+/// Returns `Error::InvalidIndex` if the signature, version, checksum or any
+/// entry is malformed, and `Error::UnsupportedIndex` for features that
+/// cannot be handled safely (split index, sparse index).
 pub fn parse(data: &[u8]) -> Result<Index> {
-    let mut cursor = Cursor::new(data);
+    let (version, entry_count) = parse_header(data)?;
+    let invalid = |reason: &str| Error::InvalidIndex {
+        version,
+        reason: reason.to_owned(),
+    };
+    if data.len() < HEADER_SIZE + CHECKSUM_SIZE {
+        return Err(invalid("truncated index"));
+    }
+    let body = &data[..data.len() - CHECKSUM_SIZE];
+    let checksum = &data[data.len() - CHECKSUM_SIZE..];
+    // index.skipHash (Git 2.40+) writes an all-zero checksum.
+    if checksum != [0u8; CHECKSUM_SIZE] && sha1(body) != checksum {
+        return Err(invalid("checksum mismatch"));
+    }
 
-    // Parse header
-    let (version, entry_count) = parse_header(&mut cursor)?;
-
-    // Parse entries
+    let mut reader = Reader {
+        data: body,
+        pos: HEADER_SIZE,
+        version,
+    };
+    // Each entry is at least ENTRY_FIXED_SIZE + 1 bytes; reject absurd counts
+    // before allocating.
+    if entry_count as usize > body.len() / (ENTRY_FIXED_SIZE + 1) {
+        return Err(invalid("entry count exceeds index size"));
+    }
     let mut entries = Vec::with_capacity(entry_count as usize);
+    let mut previous_name: Vec<u8> = Vec::new();
     for _ in 0..entry_count {
-        let entry = parse_entry(&mut cursor, version)?;
+        let entry = reader.entry(&mut previous_name)?;
         entries.push(entry);
+    }
+    // Checked first: a split index legitimately has nameless entries that
+    // refer to its shared index, so it must be reported as unsupported.
+    reader.extensions()?;
+    if entries.iter().any(|e| e.path().as_os_str().is_empty()) {
+        return Err(invalid("entry with an empty name"));
     }
 
     Ok(Index::new(version, entries))
 }
 
-/// Parses the index file header.
-///
-/// The header consists of:
-/// - 4 bytes: signature ("DIRC")
-/// - 4 bytes: version number (big-endian)
-/// - 4 bytes: number of entries (big-endian)
-fn parse_header(cursor: &mut Cursor<&[u8]>) -> Result<(u32, u32)> {
-    // Read signature
-    let mut sig = [0u8; 4];
-    cursor
-        .read_exact(&mut sig)
-        .map_err(|_| Error::InvalidIndex {
-            version: 0,
-            reason: "failed to read signature".to_string(),
-        })?;
-
-    if &sig != INDEX_SIGNATURE {
-        return Err(Error::InvalidIndex {
-            version: 0,
-            reason: format!(
-                "invalid signature: expected DIRC, got {:?}",
-                String::from_utf8_lossy(&sig)
-            ),
-        });
-    }
-
-    // Read version
-    let version = read_u32_be(cursor).map_err(|_| Error::InvalidIndex {
+/// Parses the index header and returns `(version, entry count)`.
+fn parse_header(data: &[u8]) -> Result<(u32, u32)> {
+    let header_error = |reason: &str| Error::InvalidIndex {
         version: 0,
-        reason: "failed to read version".to_string(),
-    })?;
-
+        reason: reason.to_owned(),
+    };
+    let signature = data
+        .get(..4)
+        .ok_or_else(|| header_error("failed to read signature"))?;
+    if signature != INDEX_SIGNATURE {
+        return Err(header_error(&format!(
+            "invalid signature: expected DIRC, got {:?}",
+            String::from_utf8_lossy(signature)
+        )));
+    }
+    let version = data
+        .get(4..8)
+        .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+        .ok_or_else(|| header_error("failed to read version"))?;
     if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
         return Err(Error::InvalidIndex {
             version,
             reason: format!("unsupported version: {} (supported: 2-4)", version),
         });
     }
-
-    // Read entry count
-    let entry_count = read_u32_be(cursor).map_err(|_| Error::InvalidIndex {
-        version,
-        reason: "failed to read entry count".to_string(),
-    })?;
-
+    let entry_count = data
+        .get(8..12)
+        .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+        .ok_or_else(|| Error::InvalidIndex {
+            version,
+            reason: "failed to read entry count".to_owned(),
+        })?;
     Ok((version, entry_count))
 }
 
-/// Parses a single index entry.
-///
-/// Each entry has:
-/// - Fixed fields (62 bytes for v2, 64 bytes for v3+ with extended flags)
-/// - Variable-length name (NUL-terminated)
-/// - Padding to 8-byte boundary
-fn parse_entry(cursor: &mut Cursor<&[u8]>, version: u32) -> Result<IndexEntry> {
-    let entry_start = cursor.position();
+struct Reader<'a> {
+    data: &'a [u8],
+    pos: usize,
+    version: u32,
+}
 
-    // ctime (seconds)
-    let ctime_sec = read_u32_be(cursor).map_err(|_| make_entry_error(version, "ctime_sec"))?;
-    // ctime (nanoseconds) - ignored
-    let _ctime_nsec = read_u32_be(cursor).map_err(|_| make_entry_error(version, "ctime_nsec"))?;
-
-    // mtime (seconds)
-    let mtime_sec = read_u32_be(cursor).map_err(|_| make_entry_error(version, "mtime_sec"))?;
-    // mtime (nanoseconds) - ignored
-    let _mtime_nsec = read_u32_be(cursor).map_err(|_| make_entry_error(version, "mtime_nsec"))?;
-
-    // dev
-    let dev = read_u32_be(cursor).map_err(|_| make_entry_error(version, "dev"))?;
-
-    // ino
-    let ino = read_u32_be(cursor).map_err(|_| make_entry_error(version, "ino"))?;
-
-    // mode
-    let mode_raw = read_u32_be(cursor).map_err(|_| make_entry_error(version, "mode"))?;
-    let mode = parse_mode(mode_raw, version)?;
-
-    // uid
-    let uid = read_u32_be(cursor).map_err(|_| make_entry_error(version, "uid"))?;
-
-    // gid
-    let gid = read_u32_be(cursor).map_err(|_| make_entry_error(version, "gid"))?;
-
-    // file size
-    let size = read_u32_be(cursor).map_err(|_| make_entry_error(version, "size"))?;
-
-    // SHA-1
-    let mut oid_bytes = [0u8; OID_BYTES];
-    cursor
-        .read_exact(&mut oid_bytes)
-        .map_err(|_| make_entry_error(version, "oid"))?;
-    let oid = Oid::from_bytes(oid_bytes);
-
-    // flags (16 bits)
-    let flags = read_u16_be(cursor).map_err(|_| make_entry_error(version, "flags"))?;
-
-    // Extract name length from lower 12 bits
-    let name_len = (flags & 0x0FFF) as usize;
-
-    // Extract stage from bits 12-13
-    let stage = ((flags >> 12) & 0x03) as u8;
-
-    // Check for extended flag (bit 14, v3+ only)
-    let has_extended = version >= 3 && (flags & 0x4000) != 0;
-
-    // Read extended flags if present
-    if has_extended {
-        let _extended_flags =
-            read_u16_be(cursor).map_err(|_| make_entry_error(version, "extended_flags"))?;
-        // Extended flags contain additional information like skip-worktree and intent-to-add
-        // For now, we just skip them
+impl<'a> Reader<'a> {
+    fn error(&self, reason: impl Into<String>) -> Error {
+        Error::InvalidIndex {
+            version: self.version,
+            reason: reason.into(),
+        }
     }
 
-    // Read name
-    // If name_len is 0xFFF (4095), the name is longer and continues until NUL
-    let name = if name_len == 0xFFF {
-        // Read until NUL byte
-        read_until_nul(cursor).map_err(|_| make_entry_error(version, "name (long)"))?
-    } else {
-        // Read exactly name_len bytes
-        let mut name_buf = vec![0u8; name_len];
-        cursor
-            .read_exact(&mut name_buf)
-            .map_err(|_| make_entry_error(version, "name"))?;
-        String::from_utf8(name_buf).map_err(|_| Error::InvalidIndex {
-            version,
-            reason: "invalid UTF-8 in entry name".to_string(),
-        })?
-    };
-
-    // Calculate padding
-    // Entry size is padded to a multiple of 8 bytes
-    // For v4, padding is different (path compression), but we don't support that fully
-    let _entry_size = (cursor.position() - entry_start) as usize;
-
-    // Find and skip NUL padding
-    // There's at least 1 NUL byte after the name, and then padding to 8-byte boundary
-    if name_len != 0xFFF {
-        // Skip the NUL terminator that's included in padding
-        skip_padding(cursor, entry_start, version)?;
+    fn bytes(&mut self, len: usize, what: &str) -> Result<&'a [u8]> {
+        let end = self
+            .pos
+            .checked_add(len)
+            .filter(|&end| end <= self.data.len())
+            .ok_or_else(|| self.error(format!("failed to read entry field: {}", what)))?;
+        let bytes = &self.data[self.pos..end];
+        self.pos = end;
+        Ok(bytes)
     }
 
-    Ok(IndexEntry::new(
-        ctime_sec as u64,
-        mtime_sec as u64,
-        dev,
-        ino,
-        mode,
-        uid,
-        gid,
-        size,
-        oid,
-        PathBuf::from(name),
-        stage,
-    ))
+    fn u32(&mut self, what: &str) -> Result<u32> {
+        let b = self.bytes(4, what)?;
+        Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    fn u16(&mut self, what: &str) -> Result<u16> {
+        let b = self.bytes(2, what)?;
+        Ok(u16::from_be_bytes([b[0], b[1]]))
+    }
+
+    /// Reads bytes up to (and consumes) the next NUL.
+    fn until_nul(&mut self, what: &str) -> Result<&'a [u8]> {
+        let rest = &self.data[self.pos..];
+        let len = rest
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or_else(|| self.error(format!("unterminated {}", what)))?;
+        self.pos += len + 1;
+        Ok(&rest[..len])
+    }
+
+    /// Decodes Git's offset varint used by v4 path compression.
+    fn varint(&mut self) -> Result<usize> {
+        let mut byte = self.bytes(1, "path prefix length")?[0];
+        let mut value = u64::from(byte & 0x7f);
+        while byte & 0x80 != 0 {
+            byte = self.bytes(1, "path prefix length")?[0];
+            value = value
+                .checked_add(1)
+                .and_then(|v| v.checked_mul(128))
+                .map(|v| v | u64::from(byte & 0x7f))
+                .ok_or_else(|| self.error("path prefix length overflow"))?;
+        }
+        usize::try_from(value).map_err(|_| self.error("path prefix length overflow"))
+    }
+
+    fn entry(&mut self, previous_name: &mut Vec<u8>) -> Result<IndexEntry> {
+        let start = self.pos;
+        let ctime_sec = self.u32("ctime_sec")?;
+        let ctime_nsec = self.u32("ctime_nsec")?;
+        let mtime_sec = self.u32("mtime_sec")?;
+        let mtime_nsec = self.u32("mtime_nsec")?;
+        let dev = self.u32("dev")?;
+        let ino = self.u32("ino")?;
+        let mode_raw = self.u32("mode")?;
+        let uid = self.u32("uid")?;
+        let gid = self.u32("gid")?;
+        let size = self.u32("size")?;
+        let mut oid_bytes = [0u8; OID_BYTES];
+        oid_bytes.copy_from_slice(self.bytes(OID_BYTES, "oid")?);
+        let flags = self.u16("flags")?;
+
+        let mut fixed = ENTRY_FIXED_SIZE;
+        let (mut skip_worktree, mut intent_to_add) = (false, false);
+        if flags & FLAG_EXTENDED != 0 {
+            if self.version < 3 {
+                return Err(self.error("extended flags in a version 2 index"));
+            }
+            let extended = self.u16("extended_flags")?;
+            if extended & !(EXTENDED_SKIP_WORKTREE | EXTENDED_INTENT_TO_ADD) != 0 {
+                return Err(self.error(format!("unknown extended flags: {:#06x}", extended)));
+            }
+            skip_worktree = extended & EXTENDED_SKIP_WORKTREE != 0;
+            intent_to_add = extended & EXTENDED_INTENT_TO_ADD != 0;
+            fixed += 2;
+        }
+        let mode = parse_mode(mode_raw, self.version)?;
+        let name_len = usize::from(flags & NAME_MASK);
+        let stage = ((flags >> 12) & 0x03) as u8;
+
+        let name: Vec<u8> = if self.version >= 4 {
+            // v4: drop N bytes from the previous path, append a NUL-terminated suffix.
+            let strip = self.varint()?;
+            let keep = previous_name
+                .len()
+                .checked_sub(strip)
+                .ok_or_else(|| self.error("path prefix longer than previous path"))?;
+            let suffix = self.until_nul("entry name")?;
+            let mut name = previous_name[..keep].to_vec();
+            name.extend_from_slice(suffix);
+            name
+        } else {
+            let name = if name_len < usize::from(NAME_MASK) {
+                let name = self.bytes(name_len, "name")?;
+                if self.bytes(1, "name terminator")? != [0] {
+                    return Err(self.error("entry name is not NUL-terminated"));
+                }
+                name
+            } else {
+                // 0xFFF means the name is at least that long.
+                self.until_nul("entry name")?
+            };
+            // v2/v3 entries are NUL-padded to a multiple of 8 bytes (1..=8 NULs).
+            let padded = (fixed + name.len() + 8) & !7;
+            let padding = self.bytes(start + padded - self.pos, "padding")?;
+            if padding.iter().any(|&b| b != 0) {
+                return Err(self.error("non-zero entry padding"));
+            }
+            name.to_vec()
+        };
+        if name_len < usize::from(NAME_MASK) && name.len() != name_len {
+            return Err(self.error("entry name length does not match its flags"));
+        }
+        let path = String::from_utf8(name.clone())
+            .map_err(|_| self.error("invalid UTF-8 in entry name"))?;
+        *previous_name = name;
+
+        Ok(IndexEntry::new(
+            u64::from(ctime_sec),
+            u64::from(mtime_sec),
+            dev,
+            ino,
+            mode,
+            uid,
+            gid,
+            size,
+            Oid::from_bytes(oid_bytes),
+            PathBuf::from(path),
+            stage,
+        )
+        .with_nanos(ctime_nsec, mtime_nsec)
+        .with_extended_flags(skip_worktree, intent_to_add))
+    }
+
+    /// Validates the extensions after the entries.
+    ///
+    /// Git requires readers to understand extensions whose signature does
+    /// not start with an uppercase letter; the others are optional caches.
+    fn extensions(&mut self) -> Result<()> {
+        while self.pos < self.data.len() {
+            let signature = self.bytes(4, "extension signature")?;
+            let size = self.u32("extension size")? as usize;
+            if !signature[0].is_ascii_uppercase() {
+                let name = String::from_utf8_lossy(signature);
+                let feature = match signature {
+                    b"link" => "split index",
+                    b"sdir" => "sparse index",
+                    _ => "unknown required extension",
+                };
+                return Err(Error::UnsupportedIndex {
+                    version: self.version,
+                    reason: format!("{} (extension '{}')", feature, name),
+                });
+            }
+            self.bytes(size, "extension data")?;
+        }
+        Ok(())
+    }
 }
 
 /// Parses a mode value into a FileMode.
@@ -217,6 +304,11 @@ fn parse_mode(mode: u32, version: u32) -> Result<FileMode> {
         0o100755 => Ok(FileMode::Executable),
         0o120000 => Ok(FileMode::Symlink),
         0o160000 => Ok(FileMode::Submodule),
+        // Sparse directory entries only appear in a sparse index.
+        0o040000 => Err(Error::UnsupportedIndex {
+            version,
+            reason: "sparse directory entry (sparse index)".to_owned(),
+        }),
         // Regular files can have different mode bits in some edge cases
         m if (m & 0o170000) == 0o100000 => Ok(FileMode::Regular),
         _ => Err(Error::InvalidIndex {
@@ -226,87 +318,11 @@ fn parse_mode(mode: u32, version: u32) -> Result<FileMode> {
     }
 }
 
-/// Skips padding bytes after an entry.
-fn skip_padding(cursor: &mut Cursor<&[u8]>, entry_start: u64, _version: u32) -> Result<()> {
-    // Entry must be padded to 8-byte boundary
-    // The minimum entry size is 62 bytes (v2) or 64 bytes (v3 with extended)
-    // Plus the name length + 1 (for NUL terminator)
-    // Padded to multiple of 8
-
-    let current_pos = cursor.position();
-    let entry_size = current_pos - entry_start;
-
-    // Skip NUL bytes until we're at 8-byte boundary
-    // There's at least 1 NUL after the name
-    let mut byte = [0u8; 1];
-    loop {
-        let pos = cursor.position();
-        let offset_from_start = pos - entry_start;
-
-        // Check if we've reached an 8-byte boundary (and read at least 1 byte of padding)
-        if offset_from_start > entry_size && offset_from_start % 8 == 0 {
-            break;
-        }
-
-        // Read one byte
-        if cursor.read_exact(&mut byte).is_err() {
-            break; // End of data
-        }
-
-        // Should be NUL padding
-        if byte[0] != 0 {
-            // Oops, went too far or format error - seek back
-            cursor.seek(SeekFrom::Current(-1)).ok();
-            break;
-        }
-    }
-
-    Ok(())
-}
-
-/// Reads a NUL-terminated string from the cursor.
-fn read_until_nul(cursor: &mut Cursor<&[u8]>) -> std::io::Result<String> {
-    let mut bytes = Vec::new();
-    let mut byte = [0u8; 1];
-
-    loop {
-        cursor.read_exact(&mut byte)?;
-        if byte[0] == 0 {
-            break;
-        }
-        bytes.push(byte[0]);
-    }
-
-    String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-}
-
-/// Reads a big-endian u32 from the cursor.
-fn read_u32_be(cursor: &mut Cursor<&[u8]>) -> std::io::Result<u32> {
-    let mut buf = [0u8; 4];
-    cursor.read_exact(&mut buf)?;
-    Ok(u32::from_be_bytes(buf))
-}
-
-/// Reads a big-endian u16 from the cursor.
-fn read_u16_be(cursor: &mut Cursor<&[u8]>) -> std::io::Result<u16> {
-    let mut buf = [0u8; 2];
-    cursor.read_exact(&mut buf)?;
-    Ok(u16::from_be_bytes(buf))
-}
-
-/// Creates an InvalidIndex error for entry parsing failures.
-fn make_entry_error(version: u32, field: &str) -> Error {
-    Error::InvalidIndex {
-        version,
-        reason: format!("failed to read entry field: {}", field),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Creates a minimal valid index file with the given entries.
+    /// Creates a minimal valid v2/v3 index with the given entries.
     fn make_index(version: u32, entries: &[(&str, &[u8; 20])]) -> Vec<u8> {
         let mut data = Vec::new();
 
@@ -353,11 +369,37 @@ mod tests {
             data.extend(std::iter::repeat(0u8).take(padding));
         }
 
-        // Checksum (20 bytes) - we'll just add zeros for test purposes
-        // Real Git would calculate SHA-1 of all preceding content
+        // An all-zero checksum, as written with index.skipHash.
         data.extend_from_slice(&[0u8; 20]);
 
         data
+    }
+
+    /// Replaces the trailing checksum with the real SHA-1 of the body.
+    fn seal(mut data: Vec<u8>) -> Vec<u8> {
+        let body_len = data.len() - CHECKSUM_SIZE;
+        let checksum = sha1(&data[..body_len]);
+        data[body_len..].copy_from_slice(&checksum);
+        data
+    }
+
+    /// Inserts an extension (declaring `size` bytes) between the entries and the checksum.
+    fn extension_with_size(
+        data: Vec<u8>,
+        signature: &[u8; 4],
+        size: u32,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut out = data[..data.len() - CHECKSUM_SIZE].to_vec();
+        out.extend_from_slice(signature);
+        out.extend_from_slice(&size.to_be_bytes());
+        out.extend_from_slice(payload);
+        out.extend_from_slice(&[0u8; CHECKSUM_SIZE]);
+        seal(out)
+    }
+
+    fn with_extension(data: Vec<u8>, signature: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        extension_with_size(data, signature, payload.len() as u32, payload)
     }
 
     const SHA1_A: [u8; 20] = [
@@ -446,9 +488,7 @@ mod tests {
     #[test]
     fn test_parse_header() {
         let data = make_index(3, &[("test.txt", &SHA1_A)]);
-        let mut cursor = Cursor::new(data.as_slice());
-
-        let (version, entry_count) = parse_header(&mut cursor).unwrap();
+        let (version, entry_count) = parse_header(&data).unwrap();
         assert_eq!(version, 3);
         assert_eq!(entry_count, 1);
     }
@@ -515,13 +555,67 @@ mod tests {
         assert_eq!(index.len(), 1);
     }
 
-    // Test version 4 support
+    // A v2-layout entry under a v4 header must not parse as a valid path.
     #[test]
-    fn test_v4_index() {
-        let data = make_index(4, &[("v4file.txt", &SHA1_A)]);
-        let index = parse(&data).unwrap();
+    fn test_v2_layout_with_v4_header_is_rejected() {
+        let mut data = make_index(2, &[("v4file.txt", &SHA1_A), ("v4other.txt", &SHA1_B)]);
+        data[4..8].copy_from_slice(&4u32.to_be_bytes());
+        assert!(matches!(parse(&data), Err(Error::InvalidIndex { .. })));
+        let mut single = make_index(2, &[("README.md", &SHA1_A)]);
+        single[4..8].copy_from_slice(&4u32.to_be_bytes());
+        assert!(matches!(parse(&single), Err(Error::InvalidIndex { .. })));
+    }
 
-        assert_eq!(index.version(), 4);
-        assert_eq!(index.len(), 1);
+    #[test]
+    fn test_checksum_is_verified() {
+        let sealed = seal(make_index(2, &[("file.txt", &SHA1_A)]));
+        assert!(parse(&sealed).is_ok());
+        let mut corrupt = sealed.clone();
+        corrupt[HEADER_SIZE + 3] ^= 1;
+        assert!(matches!(parse(&corrupt), Err(Error::InvalidIndex { .. })));
+    }
+
+    #[test]
+    fn test_extensions() {
+        let base = make_index(2, &[("file.txt", &SHA1_A)]);
+        // Optional extensions (uppercase signature) are skipped.
+        let tree = with_extension(base.clone(), b"TREE", b"\0-1 0\n");
+        assert_eq!(parse(&tree).unwrap().len(), 1);
+        // Required extensions are rejected explicitly.
+        for (signature, feature) in [(b"link", "split index"), (b"sdir", "sparse index")] {
+            match parse(&with_extension(base.clone(), signature, &[0; 20])) {
+                Err(Error::UnsupportedIndex { reason, .. }) => assert!(reason.contains(feature)),
+                other => panic!("expected UnsupportedIndex, got {:?}", other),
+            }
+        }
+        // An extension declaring more data than present is invalid.
+        let truncated = extension_with_size(base, b"TREE", 9, b"abc");
+        assert!(matches!(parse(&truncated), Err(Error::InvalidIndex { .. })));
+    }
+
+    #[test]
+    fn test_padding_and_terminators_are_validated() {
+        let data = make_index(2, &[("file.txt", &SHA1_A)]);
+        let name_end = HEADER_SIZE + ENTRY_FIXED_SIZE + "file.txt".len();
+        let mut bad_padding = data.clone();
+        bad_padding[name_end + 1] = b'x';
+        assert!(matches!(
+            parse(&bad_padding),
+            Err(Error::InvalidIndex { .. })
+        ));
+        let mut bad_terminator = data;
+        bad_terminator[name_end] = b'x';
+        assert!(matches!(
+            parse(&bad_terminator),
+            Err(Error::InvalidIndex { .. })
+        ));
+    }
+
+    #[test]
+    fn test_truncation_never_panics() {
+        let data = seal(make_index(3, &[("a.txt", &SHA1_A), ("dir/b.txt", &SHA1_B)]));
+        for len in 0..data.len() {
+            assert!(parse(&data[..len]).is_err(), "length {}", len);
+        }
     }
 }

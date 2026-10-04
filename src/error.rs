@@ -56,6 +56,15 @@ pub enum Error {
     /// The pack file version is not supported.
     UnsupportedPackVersion(u32),
 
+    /// The index uses a feature this library cannot read or rewrite safely
+    /// (for example split index or sparse index).
+    UnsupportedIndex {
+        /// The index version.
+        version: u32,
+        /// The unsupported feature.
+        reason: String,
+    },
+
     /// The repository uses a format this library does not support (for example SHA-256 objects).
     UnsupportedRepositoryFormat(String),
 
@@ -140,6 +149,9 @@ impl fmt::Display for Error {
             Error::InvalidPack { reason } => write!(f, "invalid pack: {}", reason),
             Error::UnsupportedPackVersion(version) => {
                 write!(f, "unsupported pack version: {}", version)
+            }
+            Error::UnsupportedIndex { version, reason } => {
+                write!(f, "unsupported index (version {}): {}", version, reason)
             }
             Error::UnsupportedRepositoryFormat(what) => {
                 write!(f, "unsupported repository format: {}", what)

@@ -237,7 +237,8 @@ repo.create_commit_with(msg, &CommitOptions::new())?; // 作者・コミッタ�
 repo.amend_commit(None, &CommitOptions::new())?;     // git commit --amend --no-edit
 repo.create_branch(name, target)?;        // ブランチ作成
 repo.delete_branch(name)?;                // ブランチ削除
-repo.checkout(target)?;                   // ブランチ切り替え
+repo.checkout(target)?;                   // ブランチ切り替え（無関係な変更・未追跡ファイルは持ち越す）
+repo.checkout_with(target, &CheckoutOptions::new().force(true))?; // git checkout -f
 repo.create_tag(name, target)?;           // 軽量タグ作成
 repo.create_annotated_tag(name, target, msg, tagger, email)?; // 注釈付きタグ作成
 repo.delete_tag(name)?;                   // タグ削除
@@ -484,7 +485,7 @@ fn main() -> Result<()> {
 | オブジェクト形式 | SHA-1のみ。SHA-256（`extensions.objectFormat`）は`Error::UnsupportedRepositoryFormat` |
 | オブジェクト格納 | loose、pack v2/v3（idx v2）。idx v1・multi-pack-index・commit-graph・bitmapは使用しない（packの`.idx`を直接読む） |
 | 参照 | loose refs、`packed-refs`。reftableは`Error::UnsupportedRepositoryFormat` |
-| index | v2/v3/v4（読んだバージョンで書き戻す）。split index・sparse indexは`Error::UnsupportedIndex`。sparse checkout（skip-worktree）中の全体reset・checkoutは未対応 |
+| index | v2/v3/v4（読んだバージョンで書き戻す）。split index・sparse indexは`Error::UnsupportedIndex`。sparse checkout（skip-worktree）中の全体reset・mixed reset・checkoutは未対応 |
 | 未対応 | merge時のリネーム検出、対話的rebase、worktree、shallow/partial clone、alternates |
 | 差分の結果 | `Text`（完全な行差分）、`NonText`（NULを含む・不正UTF-8。暗黙の置換はしない）、`Skipped`（サイズ・計算量の上限超過。部分結果は返さない） |
 | リネーム検出 | 既定は完全一致のみ。類似度検出（任意）は通常・実行ファイルのテキストが対象で、類似度は「共通する行のバイト数 ÷ 大きい方のサイズ」。既定しきい値50%、候補ペア10万組、1ファイル1 MiBまで。上限に達した分は追加・削除のまま残り、`TreeDiff::rename_limits()`で識別できる |
@@ -532,6 +533,20 @@ push(&repo, "origin", &["main"], &PushOptions::new())?;
 ```
 
 コア側には、受け取ったpackの検証・保存（`store_pack()`、thin packの補完）、送るpackの作成（`pack_objects()`）、リモート設定とrefspec（`remotes()`、`add_remote()`、`Refspec`）、upstream（`set_branch_upstream()`）、参照の更新（`update_reference()`）を追加しました。shallow・partial cloneは対象外です。
+
+### ローカル運用の成熟化（v0.6〜v0.8）✅
+
+Gitと並行して日常的に使えるように、並行性・性能・基本操作を固めました。
+
+- [x] Gitと安全に共存する（v0.6）- index・参照・config・状態ファイルの書き込みにGitと同じロックファイル（`<path>.lock`）を使い、参照の更新はcompare-and-swapにする。コミットにローカルのタイムゾーンを記録し、メッセージを`git commit -m`と同じく整形する（同じ入力でGitと同じOID）。作者・コミッター・日時の指定（`create_commit_with()`）
+- [x] 大きなリポジトリでも速い（v0.7）- statusはindexのstat情報が一致するファイルを読まない（racy-git対応）。4,000ファイル・220 MBで`git status`の1.3倍。indexのcache tree・resolve-undoを保持する
+- [x] 日常の操作がそろう（v0.8）- リビジョン指定（`rev_parse()`: `HEAD~1`、`v1^{}`、`@{u}`、`@{-1}`、`HEAD:path`など）、`reset --soft/--mixed/--hard`（`reset_to()`）、`commit --amend`（`amend_commit()`）、`restore`・`rm`・`mv`、変更を持ち越すcheckout
+
+### 次の予定（v0.9）
+
+- [ ] merge・rebase・stashでのリネーム検出（#35）
+- [ ] 対話的rebase（範囲を絞る、#34）
+- [ ] SSHトランスポートの実サーバーでの結合テスト（#36）
 
 ### 将来の検討事項
 

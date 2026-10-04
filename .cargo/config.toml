@@ -1,0 +1,5 @@
+# Keep tests independent of the machine's system Git configuration (for
+# example core.autocrlf=true set by Git for Windows). Both the git commands
+# run by tests and zerogit's own config loading honor this variable.
+[env]
+GIT_CONFIG_NOSYSTEM = "1"

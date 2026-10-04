@@ -20,6 +20,7 @@
 //! let auto_crlf = config.get_bool("core", "autocrlf").unwrap_or(false);
 //! ```
 
+pub(crate) mod edit;
 mod parser;
 
 use std::collections::{BTreeMap, HashSet};
@@ -37,6 +38,10 @@ pub struct Config {
     /// Configuration entries stored as section -> subsection -> key -> value.
     /// Subsection is empty string for sections without subsection.
     entries: BTreeMap<String, BTreeMap<String, BTreeMap<String, String>>>,
+    /// Every value in the order read, for multi-valued keys such as
+    /// `remote.<name>.fetch`: (section, subsection, key, value), with section
+    /// and key lowercased.
+    all: Vec<(String, String, String, String)>,
 }
 
 impl Config {
@@ -44,6 +49,7 @@ impl Config {
     pub fn new() -> Self {
         Config {
             entries: BTreeMap::new(),
+            all: Vec::new(),
         }
     }
 
@@ -196,6 +202,31 @@ impl Config {
             .map(|s| s.as_str())
     }
 
+    /// Gets every value of a multi-valued key, in the order they appear
+    /// (across files, system first and local last, as Git reads them).
+    ///
+    /// `subsection` is `""` for keys without one.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use zerogit::config::Config;
+    ///
+    /// let config = Config::from_file(".git/config").unwrap();
+    /// for refspec in config.get_all("remote", "origin", "fetch") {
+    ///     println!("{}", refspec);
+    /// }
+    /// ```
+    pub fn get_all(&self, section: &str, subsection: &str, key: &str) -> Vec<&str> {
+        let section_lower = section.to_lowercase();
+        let key_lower = key.to_lowercase();
+        self.all
+            .iter()
+            .filter(|(s, sub, k, _)| *s == section_lower && sub == subsection && *k == key_lower)
+            .map(|(_, _, _, v)| v.as_str())
+            .collect()
+    }
+
     /// Gets a configuration value as a boolean.
     ///
     /// Git config supports various boolean representations:
@@ -214,6 +245,15 @@ impl Config {
     /// `Err` if the value is not a valid boolean.
     pub fn get_bool(&self, section: &str, key: &str) -> Result<bool> {
         self.get_bool_subsection(section, "", key)
+    }
+
+    /// Gets a boolean, or `default` when the key is not set or is not a
+    /// valid boolean.
+    pub(crate) fn get_bool_or(&self, section: &str, key: &str, default: bool) -> bool {
+        match self.get(section, key) {
+            Some(value) => parse_bool(value).unwrap_or(default),
+            None => default,
+        }
     }
 
     /// Gets a configuration value as a boolean from a section with a subsection.
@@ -312,6 +352,12 @@ impl Config {
         let section_lower = section.to_lowercase();
         let key_lower = key.to_lowercase();
 
+        self.all.push((
+            section_lower.clone(),
+            subsection.to_string(),
+            key_lower.clone(),
+            value.to_string(),
+        ));
         self.entries
             .entry(section_lower)
             .or_default()
@@ -324,12 +370,8 @@ impl Config {
     ///
     /// Values from `other` will override values in `self`.
     pub fn merge(&mut self, other: &Config) {
-        for (section, subsections) in &other.entries {
-            for (subsection, keys) in subsections {
-                for (key, value) in keys {
-                    self.set(section, subsection, key, value);
-                }
-            }
+        for (section, subsection, key, value) in &other.all {
+            self.set(section, subsection, key, value);
         }
     }
 }
@@ -435,8 +477,10 @@ impl ConfigLevel {
 /// Loads configuration with the standard Git precedence.
 ///
 /// Configuration is loaded in the following order (later overrides earlier):
-/// 1. System configuration (`/etc/gitconfig`)
-/// 2. Global configuration (`~/.gitconfig`)
+/// 1. System configuration (`/etc/gitconfig`, or `$GIT_CONFIG_SYSTEM`;
+///    skipped when `GIT_CONFIG_NOSYSTEM` is true)
+/// 2. Global configuration (`$XDG_CONFIG_HOME/git/config`, then
+///    `~/.gitconfig`; or only `$GIT_CONFIG_GLOBAL` when set)
 /// 3. Local repository configuration (`.git/config`)
 ///
 /// # Arguments
@@ -449,24 +493,38 @@ impl ConfigLevel {
 pub fn load_config<P: AsRef<Path>>(git_dir: P) -> Result<Config> {
     let mut config = Config::new();
 
-    // Load system config
-    if let Some(system_path) = ConfigLevel::System.default_path() {
-        if let Ok(system_config) = Config::from_file_with_includes(&system_path) {
-            config.merge(&system_config);
+    // Load system config, unless disabled as Git allows.
+    if !env_flag("GIT_CONFIG_NOSYSTEM") {
+        let system_path = match std::env::var_os("GIT_CONFIG_SYSTEM") {
+            Some(path) => Some(PathBuf::from(path)),
+            None => ConfigLevel::System.default_path(),
+        };
+        if let Some(system_path) = system_path {
+            if let Ok(system_config) = Config::from_file_with_includes(&system_path) {
+                config.merge(&system_config);
+            }
         }
     }
 
-    // Load global config
-    if let Some(global_path) = ConfigLevel::Global.default_path() {
-        if let Ok(global_config) = Config::from_file_with_includes(&global_path) {
-            config.merge(&global_config);
+    // Load global config: GIT_CONFIG_GLOBAL replaces both default locations.
+    match std::env::var_os("GIT_CONFIG_GLOBAL") {
+        Some(path) => {
+            if let Ok(global_config) = Config::from_file_with_includes(PathBuf::from(path)) {
+                config.merge(&global_config);
+            }
         }
-    }
-
-    // Also check XDG config location
-    if let Some(xdg_config) = xdg_config_path() {
-        if let Ok(xdg_config) = Config::from_file_with_includes(&xdg_config) {
-            config.merge(&xdg_config);
+        None => {
+            // The XDG file is read first, so ~/.gitconfig overrides it.
+            if let Some(xdg_config) = xdg_config_path() {
+                if let Ok(xdg_config) = Config::from_file_with_includes(&xdg_config) {
+                    config.merge(&xdg_config);
+                }
+            }
+            if let Some(global_path) = ConfigLevel::Global.default_path() {
+                if let Ok(global_config) = Config::from_file_with_includes(&global_path) {
+                    config.merge(&global_config);
+                }
+            }
         }
     }
 
@@ -477,6 +535,14 @@ pub fn load_config<P: AsRef<Path>>(git_dir: P) -> Result<Config> {
     }
 
     Ok(config)
+}
+
+/// Whether a boolean environment variable such as `GIT_CONFIG_NOSYSTEM` is set
+/// to a true value.
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .is_some_and(|v| parse_bool(&v).unwrap_or(false))
 }
 
 /// Returns the XDG config path for Git (~/.config/git/config).
@@ -491,6 +557,25 @@ fn xdg_config_path() -> Option<PathBuf> {
 
     // Fall back to ~/.config/git/config
     dirs::home_dir().map(|home| home.join(".config").join("git").join("config"))
+}
+
+/// The path of a file in Git's XDG configuration directory
+/// (`$XDG_CONFIG_HOME/git/<name>`, or `~/.config/git/<name>`).
+pub(crate) fn xdg_git_path(name: &str) -> Option<PathBuf> {
+    match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(xdg_home) if !xdg_home.is_empty() => {
+            Some(PathBuf::from(xdg_home).join("git").join(name))
+        }
+        _ => dirs::home_dir().map(|home| home.join(".config").join("git").join(name)),
+    }
+}
+
+/// Expands a leading `~/` in a path-valued setting to the home directory.
+pub(crate) fn expand_home(value: &str) -> Option<PathBuf> {
+    match value.strip_prefix("~/") {
+        Some(rest) => dirs::home_dir().map(|home| home.join(rest)),
+        None => Some(PathBuf::from(value)),
+    }
 }
 
 /// Loads the home directory path.

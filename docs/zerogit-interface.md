@@ -254,6 +254,39 @@ pub fn status(&self) -> Result<Vec<StatusEntry>>
 | エラー | `Error::Io` - ファイルシステムエラー               |
 | エラー | `Error::InvalidIndex` - インデックス読み取りエラー |
 
+作業ツリーの走査は`.git`だけを除外し、名前が`.`で始まるファイルも対象にする。未追跡ファイルには`.gitignore`（各ディレクトリ）・`.git/info/exclude`・`core.excludesFile`（既定は`$XDG_CONFIG_HOME/git/ignore`）をGitと同じ規則・優先順位で適用し、無視されたファイルは`Untracked`に含めない（`git ls-files --others --exclude-standard`と一致）。追跡中のファイルは無視指定に一致しても通常どおり比較する。
+
+作業ツリーのファイルは内容とmodeの両方で比較する。symlinkは辿らず、リンク先パス（区切りは`/`）を内容とするmode `120000`として扱う。実行ビットは`core.fileMode`がtrue（既定）のUnixでのみ参照し、それ以外ではindexのmodeを使う。改行コードは`core.autocrlf`・`core.eol`・`.gitattributes`（`text`、`text=auto`、`-text`、`binary`、`eol`、旧形式の`crlf`。`core.attributesFile`と`.git/info/attributes`を含む）に従ってGitと同じく変換する（読み取り時はCRLF→LF、`checkout`ではLF→CRLF）。`filter`（driver設定あり）・`ident`・`working-tree-encoding`は未対応で、`add`/`checkout`は`Error::UnsupportedAttribute`、statusはサイズと更新時刻での比較になる。
+
+`checkout`は`core.symlinks`がtrue（既定）ならsymlinkを作成し、falseの場合や作成できない場合はリンク先パスを内容とする通常ファイルを書き出す（indexのmodeは`120000`のまま）。`core.ignoreCase`がtrueなら大文字・小文字を区別しない。
+
+`status()`はパスごとに1つの`FileStatus`に丸める。ステージ済みと未ステージの変更の両方（`MM`）は`Modified`、ステージ済みの追加後の編集（`AM`）とintent-to-add（`.A`）は`Added`、ステージ済みの追加後の削除（`AD`）は`Deleted`、indexから削除して作業ツリーに残る場合（`D.`と`??`）は`StagedDeleted`、コンフリクトは`Modified`になる。両側を区別するには`detailed_status()`を使う。
+
+##### `Repository::detailed_status`
+
+```rust
+pub fn detailed_status(&self) -> Result<Vec<DetailedStatusEntry>>
+```
+
+| 項目   | 説明 |
+| ------ | ---- |
+| 概要   | `git status --porcelain=v2 --untracked-files=all --no-renames`相当。パスごとにindex側（X）と作業ツリー側（Y）の状態を返す |
+| 戻り値 | `DetailedStatusEntry`（`path()`、`status()`、`head_mode()`、`index_mode()`、`worktree_mode()`）のパス順の一覧 |
+
+`DetailedStatus`は`Changed { index, worktree }`（`ChangeState`: `Unmodified`/`Modified`/`TypeChanged`/`Added`/`Deleted`）、`Unmerged(ConflictKind)`（`BothDeleted`/`AddedByUs`/`DeletedByThem`/`AddedByThem`/`DeletedByUs`/`BothAdded`/`BothModified`）、`Untracked`のいずれか。`code()`でporcelain v2のXY（`M.`、`UU`など）、未追跡は`?`を返す。リネームは検出しない。
+
+##### `Repository::is_ignored` / `Repository::ignored_files`
+
+```rust
+pub fn is_ignored<P: AsRef<Path>>(&self, path: P) -> Result<bool>
+pub fn ignored_files(&self) -> Result<Vec<PathBuf>>
+```
+
+| 項目   | 説明 |
+| ------ | ---- |
+| 概要   | `is_ignored`: パスまたはその親ディレクトリが無視指定に一致するか（`git check-ignore --no-index`相当）。追跡中かどうかは考慮しない |
+| 概要   | `ignored_files`: 無視された未追跡ファイルの一覧（`git ls-files --others --ignored --exclude-standard`相当） |
+
 ##### `Repository::object`
 
 ```rust
@@ -347,8 +380,11 @@ pub fn add<P: AsRef<Path>>(&self, path: P) -> Result<()>
 | 概要   | ファイルをステージングエリアに追加                                  |
 | 引数   | `path` - ステージするファイルパス（リポジトリルートからの相対パス） |
 | 戻り値 | `Ok(())` - 成功時                                                   |
-| エラー | `Error::PathNotFound` - ファイルが存在しない                        |
+| エラー | `Error::PathNotFound` - ファイルが存在しない（追跡中のファイルが削除されている場合は、削除をステージする） |
+| エラー | `Error::IgnoredPath` - 未追跡で無視指定に一致する（`git add`と同様）。`add_force`で追加できる |
 | エラー | `Error::Io` - ファイル読み取りエラー                                |
+
+`Repository::add_force`は無視指定を確認しない（`git add -f`相当）。
 
 ##### `Repository::add_all`
 
@@ -362,6 +398,8 @@ pub fn add_all(&self) -> Result<()>
 | 引数   | なし                                 |
 | 戻り値 | `Ok(())` - 成功時                    |
 | エラー | `Error::Io` - ファイルシステムエラー |
+
+`git add -A`相当。無視された未追跡ファイルは追加せず、作業ツリーにないindexのエントリは削除する。
 
 ##### `Repository::reset`
 
@@ -396,6 +434,91 @@ pub fn create_commit(
 | 戻り値 | `Ok(Oid)` - 作成されたコミットのID                       |
 | エラー | `Error::EmptyCommit` - ステージされた変更がない          |
 | エラー | `Error::ConfigNotFound` - author未指定でgit config未設定 |
+| エラー | `Error::UnmergedPaths` - indexにコンフリクト（stage 1〜3）が残っている。何も書き込まない |
+
+`create_commit`・`create_branch`・`checkout`はHEADとブランチのreflog（`.git/logs/`）にGitと同じ形式・メッセージで追記し、`delete_branch`はブランチのreflogを削除する（`core.logAllRefUpdates`に従う）。
+
+##### `Repository::create_tag` / `create_annotated_tag` / `delete_tag`
+
+```rust
+pub fn create_tag(&self, name: &str, target: Option<Oid>) -> Result<Tag>
+pub fn create_annotated_tag(&self, name: &str, target: Option<Oid>, message: &str,
+                            tagger_name: &str, tagger_email: &str) -> Result<Tag>
+pub fn delete_tag(&self, name: &str) -> Result<()>
+```
+
+| 項目   | 説明 |
+| ------ | ---- |
+| 概要   | 軽量タグ（`refs/tags/<name>`が対象を直接指す）、注釈付きタグ（tagオブジェクト`object`/`type`/`tag`/`tagger`/本文を書き込む）の作成と削除 |
+| 引数   | `target` - 任意のオブジェクト（Noneの場合はHEADのコミット）。注釈付きタグの`type`は対象の実際の型 |
+| 引数   | `tagger_name`/`tagger_email` - `create_commit`の作者と同じく指定し、時刻は現在時刻。メッセージは`git tag -m`と同じく整形する |
+| エラー | `Error::InvalidRefName` - `git check-ref-format`で不正、または`-`で始まる |
+| エラー | `Error::RefAlreadyExists` - 同名のタグ、または`a`と`a/b`のように衝突するタグがある（上書きはしない） |
+| エラー | `Error::ObjectNotFound` - 対象が存在しない。エラー時は何も書き込まない |
+| エラー | `Error::RefNotFound` / `Error::PackedRefDeletionUnsupported` - 削除時、タグがない／packed-refsにある |
+
+##### `Repository::merge` / `abort_merge` / `merge_head` / `merge_base` / `merge_bases`
+
+```rust
+pub fn merge(&self, target: &str, author_name: &str, author_email: &str,
+             options: &MergeOptions) -> Result<MergeOutcome>
+pub fn abort_merge(&self) -> Result<()>
+pub fn merge_head(&self) -> Result<Option<Oid>>
+pub fn merge_base(&self, a: &Oid, b: &Oid) -> Result<Option<Oid>>
+pub fn merge_bases(&self, a: &Oid, b: &Oid) -> Result<Vec<Oid>>
+```
+
+| 項目   | 説明 |
+| ------ | ---- |
+| 概要   | `git merge <target>`相当。`target`はブランチ・タグ（peelする）・リモート追跡ブランチ・完全な参照名・コミット |
+| 戻り値 | `MergeOutcome::UpToDate` / `FastForward(Oid)` / `Merged(Oid)`（親はHEADとtarget）/ `Conflicts(Vec<PathBuf>)` |
+| オプション | `MergeOptions::new().fast_forward(FastForward::Allow / Only / Never).message(...)`。既定のメッセージはGitと同じ（`Merge branch 'x'`、`main`/`master`以外では` into <branch>`） |
+| エラー | `MergeInProgress`・`UnmergedPaths`・`NotFastForward`・`LocalChangesWouldBeOverwritten`（変更されるパスに作業ツリーの変更や未追跡ファイルがある、またはfast-forward以外でステージ済みの変更がある）・`UnsupportedMerge`（無関係な履歴、ファイルとディレクトリの衝突）・`RefNotFound`。いずれも何も変更しない |
+
+内容のマージは`git merge`と同じhistogram diffとzealousレベルの調整で行い、`merge.conflictStyle`（`merge`/`diff3`。`zdiff3`は`diff3`として扱う）に従う。片側だけの変更・同じ変更は採用し、両側の変更が重なるか接すればコンフリクトになる。変更/削除、型の変更（ファイル・symlink・submodule）、バイナリはマーカーを書かずにコンフリクトとする。実行ビットは内容と別にマージする。リネームは検出しない。コンフリクトはindexのstage 1〜3と`MERGE_HEAD`・`MERGE_MSG`・`MERGE_MODE`・`ORIG_HEAD`に記録し、`create_commit`（またはGitの`git commit`）で完了、`abort_merge`（または`git merge --abort`）で中止できる。`abort_merge`はマージで変わったパスだけをHEADに戻し、それ以外の作業ツリーの変更は残す。
+
+##### `Repository::stash_save` / `stash_list` / `stash_apply` / `stash_pop` / `stash_drop`
+
+```rust
+pub fn stash_save(&self, name: &str, email: &str, options: &StashOptions) -> Result<Option<Oid>>
+pub fn stash_list(&self) -> Result<Vec<StashEntry>>
+pub fn stash_apply(&self, index: usize, restore_index: bool) -> Result<StashApplyOutcome>
+pub fn stash_pop(&self, index: usize, restore_index: bool) -> Result<StashApplyOutcome>
+pub fn stash_drop(&self, index: usize) -> Result<()>
+```
+
+| 項目   | 説明 |
+| ------ | ---- |
+| 保存 | indexの状態のコミット（親はHEAD）、追跡ファイルの作業ツリーの状態のコミット（親はHEAD・index・未追跡）をGitと同じ形式とメッセージ（`WIP on <branch>: <短縮OID> <件名>`、`On <branch>: <メッセージ>`）で書き、`refs/stash`とreflogを更新して、indexと作業ツリーをHEADに戻す。`StashOptions::include_untracked(true)`で無視されていない未追跡ファイルも退避・削除する。変更がなければ`None`で何もしない |
+| 適用 | stashのベースを共通祖先とする3-way merge。`restore_index`がfalseなら変更は未ステージ（stashで追加したファイルはステージ済み）、trueならindexの状態も戻す。コンフリクトは`Updated upstream`/`Stashed changes`のマーカーとindexのstageで記録し、`stash_pop`はstashを残す |
+| エラー | `RefNotFound`（stashがない）、`UnmergedPaths`、`MergeInProgress`、`LocalChangesWouldBeOverwritten`、`UnsupportedMerge`（`restore_index`でindexの変更がコンフリクト）。いずれも何も変更しない |
+
+##### `Repository::rebase` / `rebase_continue` / `rebase_skip` / `rebase_abort` / `is_rebasing`
+
+```rust
+pub fn rebase(&self, upstream: &str, onto: Option<&str>,
+              committer_name: &str, committer_email: &str) -> Result<RebaseOutcome>
+pub fn rebase_continue(&self, committer_name: &str, committer_email: &str) -> Result<RebaseOutcome>
+pub fn rebase_skip(&self, committer_name: &str, committer_email: &str) -> Result<RebaseOutcome>
+pub fn rebase_abort(&self) -> Result<()>
+pub fn is_rebasing(&self) -> bool
+```
+
+| 項目   | 説明 |
+| ------ | ---- |
+| 概要   | `git rebase [--onto <onto>] <upstream>`相当（mergeバックエンド、非対話）。HEADから到達でき`upstream`から到達できないコミットを古い順に`onto`（既定は`upstream`）へ3-way mergeで付け替える。作者・メッセージは元のまま、コミッターは引数と現在時刻 |
+| 対象 | マージコミットは除外、upstream側に同じ変更（patch-id）があるコミットは飛ばし、空になったコミットは捨てる |
+| 戻り値 | `RebaseOutcome::UpToDate` / `Completed(Oid)` / `Conflicts { commit, paths }` |
+| 状態 | `.git/rebase-merge/`（`head-name`・`onto`・`orig-head`・`git-rebase-todo`・`done`・`msgnum`・`end`・`stopped-sha`・`author-script`・`message`など）と`REBASE_HEAD`をGitと同じ形式で書き、`git rebase --continue`/`--skip`/`--abort`でも扱える。Gitが始めたrebase（`pick`のみ）もzerogitで再開できる |
+| エラー | `RebaseInProgress`・`MergeInProgress`・`DirtyWorkingTree`（indexか追跡ファイルに変更）・`RefNotFound`・`NoRebaseInProgress`・`UnmergedPaths`（continue時）・`UnsupportedRebase`（`pick`以外のコマンド） |
+
+##### `Repository::reflog`
+
+```rust
+pub fn reflog(&self, name: &str) -> Result<Vec<ReflogEntry>>
+```
+
+`HEAD`、`refs/...`の完全名、またはブランチ名のreflogを新しい順に返す（`ReflogEntry`: `old_oid()`、`new_oid()`、`committer()`、`message()`）。reflogがなければ空。
 
 ##### `Repository::create_branch`
 
@@ -1303,6 +1426,20 @@ pub fn entries(&self) -> &[IndexEntry]
 pub fn get(&self, path: &Path) -> Option<&IndexEntry>
 ```
 
+コンフリクト中のパスでは、最も小さいstageのエントリを返す。
+
+##### `Index::get_stage` / `Index::has_conflicts` / `Index::conflicted_paths`
+
+```rust
+pub fn get_stage(&self, path: &Path, stage: u8) -> Option<&IndexEntry>
+pub fn has_conflicts(&self) -> bool
+pub fn conflicted_paths(&self) -> Vec<PathBuf>
+```
+
+##### `Index::add` / `Index::remove`
+
+エントリはGitと同じ順（パスのバイト列、次にstage）に保つ。stage 0の`add`は同じパスの全stageを置き換え（コンフリクトの解消）、`remove`は全stageを削除する。
+
 ##### `Index::len`
 
 ```rust
@@ -1816,6 +1953,18 @@ pub enum Error {
 
     /// pack読み取りのサイズ・delta深度の上限超過（Phase 3）
     PackLimitExceeded { reason: String },
+
+    /// indexに未解消のコンフリクトがある（commit・checkoutを拒否）
+    UnmergedPaths(Vec<PathBuf>),
+
+    /// 未追跡で無視指定に一致するパス（addを拒否）
+    IgnoredPath(PathBuf),
+
+    /// 未対応の属性（filter・ident・working-tree-encoding）を持つパス
+    UnsupportedAttribute { path: PathBuf, attribute: String },
+
+    /// core.safecrlf=trueで、往復できない改行コードの変換
+    IrreversibleLineEndings(PathBuf),
 }
 ```
 

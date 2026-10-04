@@ -113,89 +113,64 @@ fn parse_key_value(line: &str) -> Option<(String, String)> {
     Some((key, value))
 }
 
-/// Parses a value, handling quotes and escapes.
+/// Parses a value as Git does: double quotes may enclose any part of it
+/// (keeping spaces and `#`/`;` inside), `\\`, `\"`, `\n`, `\t` and `\b` are
+/// escapes (any other backslash is kept), a `#` or `;` outside quotes
+/// starts a comment, and whitespace outside quotes at the ends is dropped.
 fn parse_value(s: &str) -> String {
-    let s = s.trim();
-
-    // Handle inline comments (not within quotes)
-    let s = remove_inline_comment(s);
-
-    // Handle quoted values
-    if let Some(quoted) = s.strip_prefix('"') {
-        if let Some(end) = quoted.find('"') {
-            return unescape_value(&quoted[..end]);
-        }
-    }
-
-    // Plain value
-    unescape_value(s)
-}
-
-/// Removes inline comments from a value.
-fn remove_inline_comment(s: &str) -> &str {
-    let mut in_quotes = false;
-    let mut escape_next = false;
-
-    for (i, c) in s.char_indices() {
-        if escape_next {
-            escape_next = false;
-            continue;
-        }
-
-        match c {
-            '\\' => escape_next = true,
-            '"' => in_quotes = !in_quotes,
-            '#' | ';' if !in_quotes => return s[..i].trim_end(),
-            _ => {}
-        }
-    }
-
-    s
-}
-
-/// Unescapes a value string.
-fn unescape_value(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-
+    // Length of `result` up to the last character inside quotes or not
+    // whitespace, so trailing unquoted whitespace can be dropped.
+    let mut keep = 0;
+    let mut in_quotes = false;
+    let mut chars = s.trim_start().chars();
     while let Some(c) = chars.next() {
-        if c == '\\' {
-            if let Some(&next) = chars.peek() {
-                match next {
-                    'n' => {
-                        result.push('\n');
-                        chars.next();
-                    }
-                    't' => {
-                        result.push('\t');
-                        chars.next();
-                    }
-                    '\\' => {
-                        result.push('\\');
-                        chars.next();
-                    }
-                    '"' => {
-                        result.push('"');
-                        chars.next();
-                    }
-                    _ => {
-                        result.push(c);
-                    }
-                }
-            } else {
-                result.push(c);
+        match c {
+            '"' => {
+                in_quotes = !in_quotes;
+                keep = result.len();
             }
-        } else {
-            result.push(c);
+            '\\' => {
+                match chars.next() {
+                    Some('n') => result.push('\n'),
+                    Some('t') => result.push('\t'),
+                    Some('b') => result.push('\u{8}'),
+                    Some(c @ ('\\' | '"')) => result.push(c),
+                    // Git rejects other escapes; keep them as written so
+                    // unescaped Windows paths still work.
+                    Some(other) => {
+                        result.push('\\');
+                        result.push(other);
+                    }
+                    None => break,
+                }
+                keep = result.len();
+            }
+            '#' | ';' if !in_quotes => break,
+            c => {
+                result.push(c);
+                if in_quotes || !c.is_whitespace() {
+                    keep = result.len();
+                }
+            }
         }
     }
-
+    result.truncate(keep);
     result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_unknown_escapes_are_kept() {
+        assert_eq!(
+            parse_value(r"C:\Users\me\x.cfg  # comment"),
+            r"C:\Users\me\x.cfg"
+        );
+        assert_eq!(parse_value(r#""a\"b\\c\td""#), "a\"b\\c\td");
+    }
 
     #[test]
     fn test_parse_simple_section() {

@@ -122,6 +122,67 @@ pub enum Error {
 
     /// A repository already exists at the specified path.
     AlreadyARepository(PathBuf),
+
+    /// The index has unresolved merge conflicts (entries at stages 1-3), so
+    /// the operation cannot proceed until the listed paths are resolved.
+    UnmergedPaths(Vec<PathBuf>),
+
+    /// The path is ignored by `.gitignore`, `.git/info/exclude` or
+    /// `core.excludesFile`, and is not tracked.
+    IgnoredPath(PathBuf),
+
+    /// The path has an attribute whose conversion is not supported
+    /// (`filter` with a configured driver, `ident`, `working-tree-encoding`),
+    /// so its content cannot be converted the way Git would.
+    UnsupportedAttribute {
+        /// The path.
+        path: PathBuf,
+        /// The attribute name.
+        attribute: String,
+    },
+
+    /// Converting the line endings of the file is irreversible and
+    /// `core.safecrlf` is `true`.
+    IrreversibleLineEndings(PathBuf),
+
+    /// A merge is already in progress (`MERGE_HEAD` exists); conclude it
+    /// with a commit or abort it first.
+    MergeInProgress,
+
+    /// No merge is in progress (there is no `MERGE_HEAD`).
+    NoMergeInProgress,
+
+    /// A fast-forward was required but the histories have diverged.
+    NotFastForward,
+
+    /// The operation would overwrite local changes (staged or unstaged) or
+    /// untracked files at these paths; nothing was changed.
+    LocalChangesWouldBeOverwritten(Vec<PathBuf>),
+
+    /// The merge needs handling that is not supported (for example a path
+    /// that is a file on one side and a directory on the other); nothing
+    /// was changed.
+    UnsupportedMerge(String),
+
+    /// A rebase is already in progress (`.git/rebase-merge/` exists);
+    /// continue, skip or abort it first.
+    RebaseInProgress,
+
+    /// No rebase is in progress.
+    NoRebaseInProgress,
+
+    /// The rebase state uses something not supported (for example a todo
+    /// list with commands other than `pick`, from an interactive rebase).
+    UnsupportedRebase(String),
+
+    /// No remote with this name is configured.
+    RemoteNotFound(String),
+
+    /// A remote with this name is already configured.
+    RemoteAlreadyExists(String),
+
+    /// A reference did not have the value an update expected.
+    StaleReference(String),
 }
 
 impl fmt::Display for Error {
@@ -176,6 +237,44 @@ impl fmt::Display for Error {
             Error::AlreadyARepository(path) => {
                 write!(f, "repository already exists: {}", path.display())
             }
+            Error::UnmergedPaths(paths) => {
+                write!(f, "index has unmerged paths:")?;
+                for path in paths {
+                    write!(f, " {}", path.display())?;
+                }
+                Ok(())
+            }
+            Error::IgnoredPath(path) => {
+                write!(f, "path is ignored: {}", path.display())
+            }
+            Error::UnsupportedAttribute { path, attribute } => write!(
+                f,
+                "unsupported attribute '{}' for {}",
+                attribute,
+                path.display()
+            ),
+            Error::MergeInProgress => write!(f, "a merge is in progress"),
+            Error::NoMergeInProgress => write!(f, "no merge is in progress"),
+            Error::NotFastForward => write!(f, "not possible to fast-forward"),
+            Error::LocalChangesWouldBeOverwritten(paths) => {
+                write!(f, "local changes would be overwritten:")?;
+                for path in paths {
+                    write!(f, " {}", path.display())?;
+                }
+                Ok(())
+            }
+            Error::UnsupportedMerge(reason) => write!(f, "unsupported merge: {}", reason),
+            Error::RebaseInProgress => write!(f, "a rebase is in progress"),
+            Error::NoRebaseInProgress => write!(f, "no rebase is in progress"),
+            Error::UnsupportedRebase(reason) => write!(f, "unsupported rebase: {}", reason),
+            Error::RemoteNotFound(name) => write!(f, "remote not found: {}", name),
+            Error::RemoteAlreadyExists(name) => write!(f, "remote already exists: {}", name),
+            Error::StaleReference(name) => write!(f, "reference changed concurrently: {}", name),
+            Error::IrreversibleLineEndings(path) => write!(
+                f,
+                "line ending conversion would not round-trip: {}",
+                path.display()
+            ),
         }
     }
 }
@@ -271,6 +370,24 @@ mod tests {
             Error::DirtyWorkingTree,
             Error::ConfigNotFound("user.name".to_string()),
             Error::AlreadyARepository(PathBuf::from("/test/repo")),
+            Error::UnmergedPaths(vec![PathBuf::from("file.txt")]),
+            Error::IgnoredPath(PathBuf::from("debug.log")),
+            Error::UnsupportedAttribute {
+                path: PathBuf::from("big.bin"),
+                attribute: "filter".to_string(),
+            },
+            Error::IrreversibleLineEndings(PathBuf::from("mixed.txt")),
+            Error::MergeInProgress,
+            Error::NoMergeInProgress,
+            Error::NotFastForward,
+            Error::LocalChangesWouldBeOverwritten(vec![PathBuf::from("a.txt")]),
+            Error::UnsupportedMerge("reason".to_string()),
+            Error::RebaseInProgress,
+            Error::NoRebaseInProgress,
+            Error::UnsupportedRebase("reason".to_string()),
+            Error::RemoteNotFound("origin".to_string()),
+            Error::RemoteAlreadyExists("origin".to_string()),
+            Error::StaleReference("refs/heads/main".to_string()),
         ];
 
         // All variants should implement Display without panicking

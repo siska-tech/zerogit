@@ -7,12 +7,15 @@ use crate::index::{self, Index, IndexEntry};
 use crate::infra::{read_file, write_file_atomic};
 use crate::log::{LogIterator, LogOptions};
 use crate::objects::tree::FileMode;
+use crate::objects::Signature;
 use crate::objects::{Blob, Commit, Object, ObjectStore, ObjectType, Oid, TagObject, Tree};
-use crate::refs::{Branch, Head, RefStore, RemoteBranch, Tag};
+use crate::refs::reflog::{zero_oid, Reflog};
+use crate::refs::{Branch, Head, RefStore, ReflogEntry, RemoteBranch, Tag};
 use crate::status::{
     compute_status_with_store as compute_status, flatten_tree_with_store as flatten_tree,
-    StatusEntry,
+    DetailedStatusEntry, StatusEntry,
 };
+use crate::worktree::Worktree;
 
 use std::fs;
 
@@ -142,6 +145,16 @@ impl Repository {
         let abs_path = path
             .canonicalize()
             .map_err(|_| Error::NotARepository(path.to_path_buf()))?;
+
+        // A bare repository: the directory itself is the Git directory.
+        if !abs_path.join(".git").exists() && Self::validate_git_dir(&abs_path).is_ok() {
+            let bare = crate::config::Config::from_file(abs_path.join("config"))
+                .map(|c| c.get_bool_or("core", "bare", false))
+                .unwrap_or(false);
+            if bare || !abs_path.ends_with(".git") {
+                return Self::from_dirs(abs_path.clone(), abs_path);
+            }
+        }
 
         // Determine if we're given the .git directory or the work tree
         let (work_dir, git_dir) = if abs_path.ends_with(".git") {
@@ -323,6 +336,11 @@ impl Repository {
         Self::from_dirs(work_dir, git_dir)
     }
 
+    /// Returns whether the repository is bare (has no work tree).
+    pub fn is_bare(&self) -> bool {
+        self.work_dir == self.git_dir
+    }
+
     /// Returns the path to the repository root (working directory).
     ///
     /// # Examples
@@ -389,12 +407,12 @@ impl Repository {
     }
 
     /// Returns the object store shared by this repository and its iterators.
-    fn object_store(&self) -> ObjectStore {
+    pub(crate) fn object_store(&self) -> ObjectStore {
         self.objects.clone()
     }
 
     /// Resolves HEAD while allowing a valid symbolic reference to an unborn branch.
-    fn optional_head_oid(&self) -> Result<Option<Oid>> {
+    pub(crate) fn optional_head_oid(&self) -> Result<Option<Oid>> {
         match self.head() {
             Ok(head) => Ok(Some(*head.oid())),
             Err(Error::RefNotFound(_)) => {
@@ -406,7 +424,7 @@ impl Repository {
         }
     }
 
-    fn head_tree_oid(&self) -> Result<Option<Oid>> {
+    pub(crate) fn head_tree_oid(&self) -> Result<Option<Oid>> {
         self.optional_head_oid()?
             .map(|oid| self.commit(&oid.to_hex()).map(|commit| *commit.tree()))
             .transpose()
@@ -607,7 +625,7 @@ impl Repository {
     }
 
     /// Returns a reference to the ref store.
-    fn ref_store(&self) -> RefStore {
+    pub(crate) fn ref_store(&self) -> RefStore {
         RefStore::new(&self.git_dir)
     }
 
@@ -762,6 +780,22 @@ impl Repository {
     /// - Deleted files (removed from working tree)
     /// - Staged changes (added/modified/deleted in index)
     ///
+    /// Each path gets a single [`FileStatus`](crate::FileStatus), so staged and unstaged
+    /// changes are merged by these rules:
+    ///
+    /// | Situation | Reported as |
+    /// | --- | --- |
+    /// | Staged and unstaged changes (`MM`) | `Modified` |
+    /// | Staged new file, then edited (`AM`) | `Added` |
+    /// | Staged new file, then deleted from the work tree (`AD`) | `Deleted` |
+    /// | Intent-to-add file (`git add -N`, `.A`) | `Added` |
+    /// | Removed from the index while the file still exists (`D.` + `??`) | `StagedDeleted` |
+    /// | Unresolved merge conflict (`UU`, `AA`, ...) | `Modified` |
+    /// | Type change between file and symlink (`T`) | `Modified` / `StagedModified` |
+    ///
+    /// Use [`Repository::detailed_status`] to get both sides separately, as
+    /// `git status --porcelain=v2` does.
+    ///
     /// # Returns
     ///
     /// A vector of `StatusEntry` representing all files with changes.
@@ -800,15 +834,107 @@ impl Repository {
         };
 
         compute_status(
-            &self.work_dir,
             &store,
             head_tree_oid.as_ref(),
             parsed_index.as_ref(),
+            &mut self.worktree()?,
         )
     }
 
+    /// Returns the status of every changed path with the index side and the
+    /// work tree side reported separately, like `git status --porcelain=v2`.
+    ///
+    /// Unlike [`Repository::status`], nothing is merged into one value: a
+    /// file with staged and unstaged changes is `MM`, a staged new file
+    /// deleted from the work tree is `AD`, an intent-to-add file (`git add
+    /// -N`) is `.A`, a change between file and symlink is `T`, and conflicts
+    /// are reported by kind (`UU`, `AA`, `DU`, ...). Untracked files that are
+    /// not ignored are listed individually (as with `-uall`). Renames are not
+    /// detected (as with `--no-renames`).
+    ///
+    /// Entries are sorted by path; a path deleted from the index that still
+    /// exists in the work tree appears twice (`D.` and untracked).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::{DetailedStatus, Repository};
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// for entry in repo.detailed_status().unwrap() {
+    ///     println!("{} {}", entry.status().code(), entry.path().display());
+    /// }
+    /// ```
+    pub fn detailed_status(&self) -> Result<Vec<DetailedStatusEntry>> {
+        let head_tree_oid = self.head_tree_oid()?;
+        let index_path = self.git_dir.join("index");
+        let index = if index_path.exists() {
+            Some(index::parse(&read_file(&index_path)?)?)
+        } else {
+            None
+        };
+        crate::status::compute_detailed_status(
+            &self.object_store(),
+            head_tree_oid.as_ref(),
+            index.as_ref(),
+            &mut self.worktree()?,
+        )
+    }
+
+    /// Loads the working tree: its ignore rules (`.gitignore` files,
+    /// `.git/info/exclude`, `core.excludesFile`) and checkout settings.
+    pub(crate) fn worktree(&self) -> Result<Worktree> {
+        Worktree::load(
+            &self.work_dir,
+            &self.git_dir,
+            &self.config()?,
+            self.object_store(),
+        )
+    }
+
+    /// Returns whether a path is ignored by `.gitignore` files,
+    /// `.git/info/exclude` or `core.excludesFile`.
+    ///
+    /// The path is relative to the repository root. A path is ignored when it
+    /// or one of its parent directories matches an exclude pattern, as in
+    /// `git check-ignore --no-index`. Whether the path is tracked is not
+    /// considered: a tracked file stays tracked even if it is ignored. An
+    /// existing directory is checked as a directory, so patterns ending in
+    /// `/` apply to it.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// if repo.is_ignored("target/debug/app").unwrap() {
+    ///     println!("ignored");
+    /// }
+    /// ```
+    pub fn is_ignored<P: AsRef<Path>>(&self, path: P) -> Result<bool> {
+        let path = path.as_ref();
+        let is_dir = self.work_dir.join(path).is_dir();
+        self.worktree()?.rules().is_ignored(path, is_dir)
+    }
+
+    /// Lists the untracked files that are ignored, like
+    /// `git ls-files --others --ignored --exclude-standard`.
+    ///
+    /// Every file inside an ignored directory is listed individually.
+    /// Tracked files are never listed, even if they match an ignore pattern.
+    ///
+    /// # Returns
+    ///
+    /// The paths relative to the repository root, sorted.
+    pub fn ignored_files(&self) -> Result<Vec<PathBuf>> {
+        let index = self.read_index()?;
+        let scan = self.worktree()?.scan(Some(&index), true)?;
+        Ok(scan.ignored.into_iter().collect())
+    }
+
     /// Reads the current index, or creates an empty one if it doesn't exist.
-    fn read_index(&self) -> Result<Index> {
+    pub(crate) fn read_index(&self) -> Result<Index> {
         let index_path = self.git_dir.join("index");
         if index_path.exists() {
             let index_data = read_file(&index_path)?;
@@ -819,7 +945,7 @@ impl Repository {
     }
 
     /// Writes the index to disk.
-    fn write_index(&self, idx: &Index) -> Result<()> {
+    pub(crate) fn write_index(&self, idx: &Index) -> Result<()> {
         let index_path = self.git_dir.join("index");
         let data = index::write(idx);
         write_file_atomic(&index_path, &data)
@@ -841,6 +967,9 @@ impl Repository {
     /// # Errors
     ///
     /// - `Error::PathNotFound` if the file does not exist.
+    /// - `Error::IgnoredPath` if the file is not tracked and is ignored by
+    ///   `.gitignore` (as `git add` refuses it); use [`Repository::add_force`]
+    ///   to add it anyway. A tracked file is added even if it is ignored.
     ///
     /// # Examples
     ///
@@ -851,72 +980,40 @@ impl Repository {
     /// repo.add("src/main.rs").unwrap();
     /// ```
     pub fn add<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let path = path.as_ref();
-        let full_path = self.work_dir.join(path);
+        self.add_impl(path.as_ref(), false)
+    }
 
-        // Check if file exists
-        if !full_path.exists() {
+    /// Adds a file to the staging area even if it is ignored, like
+    /// `git add -f`.
+    ///
+    /// Otherwise the same as [`Repository::add`].
+    pub fn add_force<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        self.add_impl(path.as_ref(), true)
+    }
+
+    fn add_impl(&self, path: &Path, force: bool) -> Result<()> {
+        let mut idx = self.read_index()?;
+        let mut worktree = self.worktree()?;
+        let tracked = idx.get(path).cloned();
+        let tracked_mode = tracked.as_ref().map(IndexEntry::mode);
+
+        // A tracked file that was deleted has its removal staged, as
+        // `git add` does; this also resolves a conflict by deletion.
+        let Some(file) = worktree.read(path, tracked.as_ref())? else {
+            if idx.remove(path) {
+                return self.write_index(&idx);
+            }
             return Err(Error::PathNotFound(path.to_path_buf()));
+        };
+
+        if !force && tracked_mode.is_none() && worktree.rules().is_ignored(path, false)? {
+            return Err(Error::IgnoredPath(path.to_path_buf()));
         }
 
-        // Read file content
-        let content = read_file(&full_path)?;
-
-        // Get file metadata
-        let metadata = std::fs::metadata(&full_path)?;
-
-        // Write blob to object store
-        let store = self.object_store();
-        let oid = store.write(ObjectType::Blob, &content)?;
-
-        // Determine file mode
-        #[cfg(unix)]
-        let mode = {
-            use std::os::unix::fs::PermissionsExt;
-            if metadata.permissions().mode() & 0o111 != 0 {
-                FileMode::Executable
-            } else {
-                FileMode::Regular
-            }
-        };
-        #[cfg(not(unix))]
-        let mode = FileMode::Regular;
-
-        // Get timestamps
-        let mtime = metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let ctime = metadata
-            .created()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(mtime);
-
-        // Create index entry
-        let entry = IndexEntry::new(
-            ctime,
-            mtime,
-            0, // dev (not portable, use 0)
-            0, // ino (not portable, use 0)
-            mode,
-            0, // uid (not portable, use 0)
-            0, // gid (not portable, use 0)
-            content.len() as u32,
-            oid,
-            path.to_path_buf(),
-            0, // stage (normal entry)
-        );
-
-        // Read current index, add entry, and write back
-        let mut idx = self.read_index()?;
-        idx.add(entry);
-        self.write_index(&idx)?;
-
-        Ok(())
+        // Write the blob and stage it.
+        let oid = self.object_store().write(ObjectType::Blob, &file.content)?;
+        idx.add(file.index_entry(path.to_path_buf(), oid));
+        self.write_index(&idx)
     }
 
     /// Adds all modified and untracked files to the staging area.
@@ -939,76 +1036,36 @@ impl Repository {
         let store = self.object_store();
         let mut idx = self.read_index()?;
 
-        // Get HEAD tree files (if exists)
-        let head_tree_oid = self.head_tree_oid()?;
+        // Report a missing or corrupt HEAD commit before touching the index.
+        self.head_tree_oid()?;
 
-        let mut head_files: BTreeMap<PathBuf, Oid> = BTreeMap::new();
-        if let Some(tree_oid) = head_tree_oid {
-            flatten_tree(&store, &tree_oid, Path::new(""), &mut head_files)?;
-        }
-
-        // Get working tree files
-        let working_files = crate::infra::list_working_tree(&self.work_dir)?;
+        // Get working tree files: tracked ones, and untracked ones that are
+        // not ignored.
+        let mut worktree = self.worktree()?;
+        let working_files = worktree.scan(Some(&idx), false)?.files;
 
         // Add all working tree files
         for path in &working_files {
-            let full_path = self.work_dir.join(path);
-            let content = read_file(&full_path)?;
-            let metadata = std::fs::metadata(&full_path)?;
-
-            // Write blob
-            let oid = store.write(ObjectType::Blob, &content)?;
-
-            // Determine file mode
-            #[cfg(unix)]
-            let mode = {
-                use std::os::unix::fs::PermissionsExt;
-                if metadata.permissions().mode() & 0o111 != 0 {
-                    FileMode::Executable
-                } else {
-                    FileMode::Regular
-                }
+            let tracked = idx.get(path).cloned();
+            let Some(file) = worktree.read(path, tracked.as_ref())? else {
+                continue;
             };
-            #[cfg(not(unix))]
-            let mode = FileMode::Regular;
-
-            // Get timestamps
-            let mtime = metadata
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let ctime = metadata
-                .created()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(mtime);
-
-            let entry = IndexEntry::new(
-                ctime,
-                mtime,
-                0,
-                0,
-                mode,
-                0,
-                0,
-                content.len() as u32,
-                oid,
-                path.clone(),
-                0,
-            );
-
-            idx.add(entry);
+            let oid = store.write(ObjectType::Blob, &file.content)?;
+            idx.add(file.index_entry(path.clone(), oid));
         }
 
-        // Handle deleted files: remove from index files that are in HEAD but not in working tree
+        // Handle deleted files: remove index entries (including conflict
+        // stages) whose file is gone from the working tree. Skip-worktree
+        // entries are absent on purpose and stay.
         let working_set: std::collections::HashSet<_> = working_files.into_iter().collect();
-        for head_path in head_files.keys() {
-            if !working_set.contains(head_path) {
-                idx.remove(head_path);
-            }
+        let deleted: Vec<PathBuf> = idx
+            .entries()
+            .iter()
+            .filter(|e| !e.skip_worktree() && !working_set.contains(e.path()))
+            .map(|e| e.path().to_path_buf())
+            .collect();
+        for path in &deleted {
+            idx.remove(path);
         }
 
         self.write_index(&idx)?;
@@ -1142,7 +1199,7 @@ impl Repository {
     /// # Returns
     ///
     /// The OID of the root tree object.
-    fn build_tree_from_index(&self, idx: &Index) -> Result<Oid> {
+    pub(crate) fn build_tree_from_index(&self, idx: &Index) -> Result<Oid> {
         let store = self.object_store();
 
         // Group entries by directory
@@ -1218,8 +1275,9 @@ impl Repository {
                 }
             }
 
-            // Sort entries by name (Git requires this)
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            // Git orders entries by name, comparing a directory as if its
+            // name ended with '/'.
+            entries.sort_by_key(|e| tree_sort_key(&e.0, e.1));
 
             // Build tree object content
             let tree_content = Self::build_tree_content(&entries);
@@ -1262,7 +1320,7 @@ impl Repository {
     /// # Arguments
     ///
     /// * `tree_oid` - The OID of the tree object.
-    /// * `parent_oid` - The OID of the parent commit (None for root commits).
+    /// * `parents` - The parent commits (empty for a root commit).
     /// * `author` - The author signature string.
     /// * `committer` - The committer signature string.
     /// * `message` - The commit message.
@@ -1270,9 +1328,9 @@ impl Repository {
     /// # Returns
     ///
     /// The formatted commit content as bytes.
-    fn format_commit(
+    pub(crate) fn format_commit(
         tree_oid: &Oid,
-        parent_oid: Option<&Oid>,
+        parents: &[Oid],
         author: &str,
         committer: &str,
         message: &str,
@@ -1282,8 +1340,8 @@ impl Repository {
         // Tree line
         content.push_str(&format!("tree {}\n", tree_oid.to_hex()));
 
-        // Parent line (if not root commit)
-        if let Some(parent) = parent_oid {
+        // Parent lines (none for a root commit, two or more for a merge)
+        for parent in parents {
             content.push_str(&format!("parent {}\n", parent.to_hex()));
         }
 
@@ -1298,18 +1356,27 @@ impl Repository {
         content.into_bytes()
     }
 
-    /// Updates HEAD to point to a new commit.
+    /// Updates HEAD to point to a new commit, recording the update in the
+    /// reflogs of HEAD and of the branch it points to.
     ///
     /// If HEAD points to a branch, updates the branch reference.
     /// If HEAD is detached, updates HEAD directly.
-    fn update_head(&self, new_oid: &Oid) -> Result<()> {
+    pub(crate) fn update_head(
+        &self,
+        new_oid: &Oid,
+        committer: &Signature,
+        message: &str,
+    ) -> Result<()> {
         let store = self.ref_store();
+        let reflog = self.reflog_writer()?;
+        let old_oid = self.optional_head_oid()?.unwrap_or_else(zero_oid);
 
         match store.read_ref_file("HEAD")? {
             crate::refs::RefValue::Symbolic(target) => {
                 // HEAD points to a branch, update the branch
                 let branch_path = self.git_dir.join(&target);
                 write_file_atomic(&branch_path, format!("{}\n", new_oid.to_hex()).as_bytes())?;
+                reflog.append(&target, &old_oid, new_oid, committer, message)?;
             }
             crate::refs::RefValue::Direct(_) => {
                 // HEAD is detached, update HEAD directly
@@ -1317,8 +1384,57 @@ impl Repository {
                 write_file_atomic(&head_path, format!("{}\n", new_oid.to_hex()).as_bytes())?;
             }
         }
+        reflog.append("HEAD", &old_oid, new_oid, committer, message)
+    }
 
-        Ok(())
+    /// The reflog writer, configured by `core.logAllRefUpdates`.
+    pub(crate) fn reflog_writer(&self) -> Result<Reflog> {
+        Ok(Reflog::new(
+            &self.git_dir,
+            &self.config()?,
+            self.work_dir == self.git_dir,
+        ))
+    }
+
+    /// The identity recorded in reflogs for operations that do not create a
+    /// commit: `GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL`, then `user.name`/
+    /// `user.email`, with the current time.
+    pub(crate) fn reflog_identity(&self) -> Result<Signature> {
+        let config = self.config()?;
+        let name = std::env::var("GIT_COMMITTER_NAME")
+            .ok()
+            .or_else(|| config.get("user", "name").map(str::to_owned))
+            .unwrap_or_else(|| "unknown".to_owned());
+        let email = std::env::var("GIT_COMMITTER_EMAIL")
+            .ok()
+            .or_else(|| config.get("user", "email").map(str::to_owned))
+            .unwrap_or_default();
+        Ok(Signature::new(name, email, now(), 0))
+    }
+
+    /// Returns the reflog of a reference, newest entry first, as
+    /// `git reflog show <name>` lists it.
+    ///
+    /// `name` is `HEAD`, a full reference name such as `refs/heads/main`, or
+    /// a branch name. A reference without a reflog has no entries.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// for (i, entry) in repo.reflog("HEAD").unwrap().iter().enumerate() {
+    ///     println!("HEAD@{{{}}}: {}", i, entry.message());
+    /// }
+    /// ```
+    pub fn reflog(&self, name: &str) -> Result<Vec<ReflogEntry>> {
+        let refname = if name == "HEAD" || name.starts_with("refs/") {
+            name.to_owned()
+        } else {
+            format!("refs/heads/{}", name)
+        };
+        self.reflog_writer()?.read(&refname)
     }
 
     /// Creates a new commit from the staged changes.
@@ -1341,6 +1457,14 @@ impl Repository {
     /// # Errors
     ///
     /// - `Error::EmptyCommit` if there are no staged changes.
+    /// - `Error::UnmergedPaths` if the index has unresolved merge conflicts.
+    ///   Nothing is written; resolve each path with [`Repository::add`] (or
+    ///   [`Repository::reset`]) first.
+    ///
+    /// While a merge is in progress (`MERGE_HEAD` exists, for example after
+    /// [`Repository::merge`] stopped on conflicts), the commit concludes it:
+    /// `MERGE_HEAD` becomes the second parent and the merge state files are
+    /// removed, as `git commit` does.
     ///
     /// # Examples
     ///
@@ -1364,6 +1488,11 @@ impl Repository {
         // Read the current index
         let idx = self.read_index()?;
 
+        // A tree built from conflict stages would contain duplicate names.
+        if idx.has_conflicts() {
+            return Err(Error::UnmergedPaths(idx.conflicted_paths()));
+        }
+
         // Check if there are any staged changes
         if idx.is_empty() {
             return Err(Error::EmptyCommit);
@@ -1372,24 +1501,20 @@ impl Repository {
         // Build tree from index
         let tree_oid = self.build_tree_from_index(&idx)?;
 
-        // Get parent commit (current HEAD, if exists)
+        // Parents: the current HEAD (if any), then MERGE_HEAD when
+        // concluding a merge.
         let parent_oid = self.optional_head_oid()?;
-
-        // Create timestamp
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let merge_heads = self.merge_heads()?;
+        let mut parents: Vec<Oid> = parent_oid.into_iter().collect();
+        parents.extend(merge_heads.iter().copied());
 
         // Format signature (using +0000 timezone for simplicity)
-        let signature = format!("{} <{}> {} +0000", author_name, author_email, timestamp);
+        let committer = Signature::new(author_name, author_email, now(), 0);
+        let signature = committer.to_git_string();
 
         // Format commit content
         let commit_content = Self::format_commit(
-            &tree_oid,
-            parent_oid.as_ref(),
-            &signature,
-            &signature, // Use same for committer
+            &tree_oid, &parents, &signature, &signature, // Use same for committer
             message,
         );
 
@@ -1397,74 +1522,26 @@ impl Repository {
         let store = self.object_store();
         let commit_oid = store.write(ObjectType::Commit, &commit_content)?;
 
-        // Update HEAD
-        self.update_head(&commit_oid)?;
+        // Update HEAD, logging "commit: <subject>" as Git does.
+        let subject = message.lines().next().unwrap_or("");
+        let reflog_message = if !merge_heads.is_empty() {
+            format!("commit (merge): {}", subject)
+        } else if parent_oid.is_some() {
+            format!("commit: {}", subject)
+        } else {
+            format!("commit (initial): {}", subject)
+        };
+        self.update_head(&commit_oid, &committer, &reflog_message)?;
+        if !merge_heads.is_empty() {
+            self.clear_merge_state()?;
+        }
 
         Ok(commit_oid)
     }
 
     /// Validates a branch name according to Git rules.
-    ///
-    /// A valid branch name:
-    /// - Cannot be empty
-    /// - Cannot start or end with `/`
-    /// - Cannot contain `..`, `~`, `^`, `:`, `?`, `*`, `[`, `\`, or control characters
-    /// - Cannot start with `-`
-    /// - Cannot end with `.lock`
     fn validate_branch_name(name: &str) -> Result<()> {
-        if name.is_empty() {
-            return Err(Error::InvalidRefName(
-                "branch name cannot be empty".to_string(),
-            ));
-        }
-
-        if name.starts_with('-') {
-            return Err(Error::InvalidRefName(format!(
-                "branch name cannot start with '-': {}",
-                name
-            )));
-        }
-
-        if name.starts_with('/') || name.ends_with('/') {
-            return Err(Error::InvalidRefName(format!(
-                "branch name cannot start or end with '/': {}",
-                name
-            )));
-        }
-
-        if name.ends_with(".lock") {
-            return Err(Error::InvalidRefName(format!(
-                "branch name cannot end with '.lock': {}",
-                name
-            )));
-        }
-
-        let invalid_chars = ['~', '^', ':', '?', '*', '[', '\\'];
-        for c in invalid_chars {
-            if name.contains(c) {
-                return Err(Error::InvalidRefName(format!(
-                    "branch name contains invalid character '{}': {}",
-                    c, name
-                )));
-            }
-        }
-
-        if name.contains("..") {
-            return Err(Error::InvalidRefName(format!(
-                "branch name cannot contain '..': {}",
-                name
-            )));
-        }
-
-        // Check for control characters
-        if name.chars().any(|c| c.is_control()) {
-            return Err(Error::InvalidRefName(format!(
-                "branch name cannot contain control characters: {}",
-                name
-            )));
-        }
-
-        Ok(())
+        validate_ref_name("branch", name)
     }
 
     /// Creates a new branch pointing to the specified commit.
@@ -1509,14 +1586,9 @@ impl Repository {
             None => *self.head()?.oid(),
         };
 
-        // Check if branch already exists
+        // Check if branch already exists (or conflicts as a directory)
         let branch_path = self.git_dir.join("refs/heads").join(name);
-        let ref_name = format!("refs/heads/{}", name);
-        match self.ref_store().read_ref_file(&ref_name) {
-            Ok(_) => return Err(Error::RefAlreadyExists(ref_name)),
-            Err(Error::RefNotFound(_)) => {}
-            Err(e) => return Err(e),
-        }
+        let ref_name = self.check_new_ref("heads", name)?;
 
         // Ensure parent directories exist (for nested branch names like feature/foo)
         if let Some(parent) = branch_path.parent() {
@@ -1527,6 +1599,21 @@ impl Repository {
         write_file_atomic(
             &branch_path,
             format!("{}\n", target_oid.to_hex()).as_bytes(),
+        )?;
+        // Git names the start point as given, or the current branch.
+        let start = match target {
+            Some(oid) => oid.to_hex(),
+            None => self
+                .ref_store()
+                .current_branch()?
+                .unwrap_or_else(|| "HEAD".to_owned()),
+        };
+        self.reflog_writer()?.append(
+            &ref_name,
+            &zero_oid(),
+            &target_oid,
+            &self.reflog_identity()?,
+            &format!("branch: Created from {}", start),
         )?;
 
         Ok(Branch::new(name, target_oid))
@@ -1564,33 +1651,7 @@ impl Repository {
             return Err(Error::CannotDeleteCurrentBranch);
         }
 
-        // Check if branch exists
-        let branch_path = self.git_dir.join("refs/heads").join(name);
-        let ref_name = format!("refs/heads/{}", name);
-        if store.is_packed(&ref_name)? {
-            return Err(Error::PackedRefDeletionUnsupported(ref_name));
-        }
-        store.read_ref_file(&ref_name)?;
-
-        // Delete the branch ref file
-        fs::remove_file(&branch_path)?;
-
-        // Clean up empty parent directories (for nested branch names)
-        let mut parent = branch_path.parent();
-        let refs_heads = self.git_dir.join("refs/heads");
-        while let Some(dir) = parent {
-            if dir == refs_heads {
-                break;
-            }
-            if dir.read_dir()?.next().is_none() {
-                fs::remove_dir(dir)?;
-            } else {
-                break;
-            }
-            parent = dir.parent();
-        }
-
-        Ok(())
+        self.delete_loose_ref(&format!("refs/heads/{}", name), "refs/heads")
     }
 
     /// Checks if the working tree has uncommitted changes.
@@ -1617,6 +1678,7 @@ impl Repository {
     ///
     /// - `Error::RefNotFound` if the target cannot be resolved.
     /// - `Error::DirtyWorkingTree` if there are uncommitted changes.
+    /// - `Error::UnmergedPaths` if the index has unresolved merge conflicts.
     ///
     /// # Examples
     ///
@@ -1634,7 +1696,11 @@ impl Repository {
     pub fn checkout(&self, target: &str) -> Result<()> {
         // Rebuilding the index would drop skip-worktree flags; refuse before
         // touching the working tree.
-        reject_sparse_checkout(&self.read_index()?, "checkout")?;
+        let idx = self.read_index()?;
+        reject_sparse_checkout(&idx, "checkout")?;
+        if idx.has_conflicts() {
+            return Err(Error::UnmergedPaths(idx.conflicted_paths()));
+        }
 
         // Check for uncommitted changes
         if self.has_uncommitted_changes()? {
@@ -1668,12 +1734,26 @@ impl Repository {
         let commit = self.commit(&target_oid.to_hex())?;
         let tree_oid = *commit.tree();
 
+        // Where HEAD was, for the reflog: the branch name, or the commit.
+        let old_oid = self.optional_head_oid()?;
+        let from = match store.current_branch()? {
+            Some(branch) => branch,
+            None => old_oid.map(|oid| oid.to_hex()).unwrap_or_default(),
+        };
+
         // Update working tree and index
         self.checkout_tree(&tree_oid)?;
 
         // Update HEAD
         let head_path = self.git_dir.join("HEAD");
         write_file_atomic(&head_path, new_head_content.as_bytes())?;
+        self.reflog_writer()?.append(
+            "HEAD",
+            &old_oid.unwrap_or_else(zero_oid),
+            &target_oid,
+            &self.reflog_identity()?,
+            &format!("checkout: moving from {} to {}", from, target),
+        )?;
 
         Ok(())
     }
@@ -1681,103 +1761,80 @@ impl Repository {
     /// Updates the working tree and index to match a tree object.
     fn checkout_tree(&self, tree_oid: &Oid) -> Result<()> {
         let store = self.object_store();
+        let mut worktree = self.worktree()?;
 
-        // Get current HEAD tree (if any) to compare
-        let current_tree = self.head_tree_oid()?;
+        // Flatten the current HEAD tree (if any) and the target tree.
+        let current_files = match self.head_tree_oid()? {
+            Some(oid) => self.flatten_tree(&self.tree(&oid.to_hex())?, PathBuf::new())?,
+            None => HashMap::new(),
+        };
+        let target_files: BTreeMap<PathBuf, crate::diff::FlatEntry> = self
+            .flatten_tree(&self.tree(&tree_oid.to_hex())?, PathBuf::new())?
+            .into_iter()
+            .collect();
 
-        // Flatten both trees for comparison
-        let mut current_files: BTreeMap<PathBuf, Oid> = BTreeMap::new();
-        if let Some(current_oid) = &current_tree {
-            flatten_tree(&store, current_oid, Path::new(""), &mut current_files)?;
+        // Convert line endings with the target tree's .gitattributes, as Git
+        // does, and refuse unsupported conversions before changing anything.
+        for path in current_files.keys().chain(target_files.keys()) {
+            if path.file_name() == Some(std::ffi::OsStr::new(".gitattributes")) {
+                let dir = path
+                    .parent()
+                    .map(|d| normalize_index_path(d).to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let content = match target_files.get(path) {
+                    Some(entry) => Some(store.read(&entry.oid)?.content),
+                    None => None,
+                };
+                worktree
+                    .attributes()
+                    .set_dir_file(dir.as_bytes(), content.as_deref());
+            }
         }
-
-        let mut target_files: BTreeMap<PathBuf, Oid> = BTreeMap::new();
-        flatten_tree(&store, tree_oid, Path::new(""), &mut target_files)?;
+        for (path, entry) in &target_files {
+            if matches!(entry.mode, FileMode::Regular | FileMode::Executable) {
+                worktree.check_supported(path)?;
+            }
+        }
 
         // Remove files that exist in current but not in target
         for path in current_files.keys() {
             if !target_files.contains_key(path) {
-                let full_path = self.work_dir.join(path);
-                if full_path.exists() {
-                    fs::remove_file(&full_path)?;
-                }
-                // Clean up empty parent directories
-                let mut parent = full_path.parent();
-                while let Some(dir) = parent {
-                    if dir == self.work_dir {
-                        break;
-                    }
-                    if dir.exists() && dir.read_dir()?.next().is_none() {
-                        fs::remove_dir(dir)?;
-                    } else {
-                        break;
-                    }
-                    parent = dir.parent();
-                }
+                worktree.remove(path)?;
             }
         }
 
         // Create/update files in target tree
-        for (path, oid) in &target_files {
-            let full_path = self.work_dir.join(path);
-
-            // Skip if file already has the correct content
-            if let Some(current_oid) = current_files.get(path) {
-                if current_oid == oid {
+        for (path, entry) in &target_files {
+            // Skip if the file already has the correct content and mode
+            if let Some(current) = current_files.get(path) {
+                if current.oid == entry.oid
+                    && current.mode == entry.mode
+                    && worktree.metadata(path)?.is_some()
+                {
                     continue;
                 }
             }
-
-            // Ensure parent directories exist
-            if let Some(parent) = full_path.parent() {
-                fs::create_dir_all(parent)?;
+            if entry.mode == FileMode::Submodule {
+                // A submodule is checked out as an empty directory, as Git does.
+                fs::create_dir_all(self.work_dir.join(path))?;
+                continue;
             }
-
-            // Read blob content and write to working tree
-            let raw = store.read(oid)?;
-            write_file_atomic(&full_path, &raw.content)?;
+            let raw = store.read(&entry.oid)?;
+            worktree.write(path, &raw.content, entry.mode)?;
         }
 
         // Rebuild index from target tree
         // Keep the index version the user configured (e.g. v4).
         let version = self.read_index()?.version();
-        let target_modes = self.tree_modes(Some(tree_oid))?;
         let mut idx = Index::empty(version);
-        for (path, oid) in &target_files {
-            let full_path = self.work_dir.join(path);
-            let metadata = fs::metadata(&full_path)?;
-
-            let mtime = metadata
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let ctime = metadata
-                .created()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(mtime);
-
-            let raw = store.read(oid)?;
-            let entry = IndexEntry::new(
-                ctime,
-                mtime,
-                0,
-                0,
-                target_modes
-                    .get(&normalize_index_path(path))
-                    .copied()
-                    .unwrap_or(FileMode::Regular),
-                0,
-                0,
-                raw.content.len() as u32,
-                *oid,
-                path.clone(),
-                0,
-            );
-            idx.add(entry);
+        for (path, entry) in &target_files {
+            // The stat data of the file just written, with the tree's mode.
+            idx.add(worktree.stat_entry(
+                path,
+                normalize_index_path(path),
+                entry.oid,
+                entry.mode,
+            )?);
         }
 
         self.write_index(&idx)?;
@@ -1858,6 +1915,219 @@ impl Repository {
         Ok(result)
     }
 
+    /// Checks that `refs/<namespace>/<name>` can be created: neither it nor a
+    /// reference that would conflict with it as a directory or file exists
+    /// (`a` and `a/b` cannot both exist).
+    fn check_new_ref(&self, namespace: &str, name: &str) -> Result<String> {
+        let ref_name = format!("refs/{}/{}", namespace, name);
+        let prefix = format!("refs/{}/", namespace);
+        for existing in self.ref_store().resolved_refs(&prefix)? {
+            let other = &existing.name;
+            if *other == ref_name
+                || other.starts_with(&format!("{}/", ref_name))
+                || ref_name.starts_with(&format!("{}/", other))
+            {
+                return Err(Error::RefAlreadyExists(other.clone()));
+            }
+        }
+        match self.ref_store().read_ref_file(&ref_name) {
+            Ok(_) => Err(Error::RefAlreadyExists(ref_name)),
+            Err(Error::RefNotFound(_)) => Ok(ref_name),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Creates a lightweight tag: `refs/tags/<name>` pointing directly at an
+    /// object.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The tag name (without `refs/tags/` prefix).
+    /// * `target` - The object to tag (any type). If `None`, the HEAD commit.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::InvalidRefName` if the name is not a valid tag name.
+    /// - `Error::RefAlreadyExists` if the tag (or a conflicting `a`/`a/b`
+    ///   tag) exists. Existing tags are never overwritten; delete first.
+    /// - `Error::ObjectNotFound` if the target does not exist.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// repo.create_tag("v1.0.0", None).unwrap();
+    /// ```
+    pub fn create_tag(&self, name: &str, target: Option<Oid>) -> Result<Tag> {
+        let (ref_name, target_oid, _) = self.prepare_tag(name, target)?;
+        self.write_ref(&ref_name, &target_oid)?;
+        Ok(Tag::lightweight(name, target_oid))
+    }
+
+    /// Creates an annotated tag: a tag object recording the target, the
+    /// tagger and a message, and `refs/tags/<name>` pointing to it.
+    ///
+    /// The tagger is given like the author of [`Repository::create_commit`],
+    /// with the current time. The message is cleaned up as `git tag -m`
+    /// does (trailing whitespace and surrounding blank lines removed, ending
+    /// with a newline).
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The tag name (without `refs/tags/` prefix).
+    /// * `target` - The object to tag (any type; the tag object records its
+    ///   actual type). If `None`, the HEAD commit.
+    /// * `message` - The tag message.
+    /// * `tagger_name` - The tagger's name.
+    /// * `tagger_email` - The tagger's email.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Repository::create_tag`]. Nothing is written on error.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// let tag = repo
+    ///     .create_annotated_tag("v1.0.0", None, "Release 1.0.0", "John Doe", "john@example.com")
+    ///     .unwrap();
+    /// assert!(tag.is_annotated());
+    /// ```
+    pub fn create_annotated_tag(
+        &self,
+        name: &str,
+        target: Option<Oid>,
+        message: &str,
+        tagger_name: &str,
+        tagger_email: &str,
+    ) -> Result<Tag> {
+        let (ref_name, target_oid, target_type) = self.prepare_tag(name, target)?;
+        let tagger = Signature::new(tagger_name, tagger_email, now(), 0);
+        let message = cleanup_message(message);
+        let content = format!(
+            "object {}\ntype {}\ntag {}\ntagger {}\n\n{}",
+            target_oid.to_hex(),
+            target_type.as_str(),
+            name,
+            tagger.to_git_string(),
+            message
+        );
+        let tag_oid = self
+            .object_store()
+            .write(ObjectType::Tag, content.as_bytes())?;
+        self.write_ref(&ref_name, &tag_oid)?;
+        let tag_obj = TagObject::parse(self.object_store().read(&tag_oid)?)?;
+        Ok(Tag::annotated(
+            name,
+            *tag_obj.object(),
+            tag_obj.message().to_string(),
+            tag_obj.tagger().clone(),
+        ))
+    }
+
+    /// Validates a new tag and resolves its target and the target's type.
+    fn prepare_tag(&self, name: &str, target: Option<Oid>) -> Result<(String, Oid, ObjectType)> {
+        validate_ref_name("tag", name)?;
+        let target_oid = match target {
+            Some(oid) => oid,
+            None => *self.head()?.oid(),
+        };
+        let target_type = self.object_store().read(&target_oid)?.object_type;
+        let ref_name = self.check_new_ref("tags", name)?;
+        Ok((ref_name, target_oid, target_type))
+    }
+
+    /// Writes a loose reference file.
+    fn write_ref(&self, ref_name: &str, oid: &Oid) -> Result<()> {
+        let path = self.git_dir.join(ref_name);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        write_file_atomic(&path, format!("{}\n", oid.to_hex()).as_bytes())
+    }
+
+    /// Deletes a tag (lightweight or annotated). A tag object is left in the
+    /// object database, as Git leaves it.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::RefNotFound` if the tag does not exist.
+    /// - `Error::PackedRefDeletionUnsupported` if the tag is in `packed-refs`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// repo.delete_tag("v1.0.0").unwrap();
+    /// ```
+    pub fn delete_tag(&self, name: &str) -> Result<()> {
+        validate_ref_name("tag", name)?;
+        let ref_name = format!("refs/tags/{}", name);
+        self.delete_loose_ref(&ref_name, "refs/tags")
+    }
+
+    /// Removes a reference (and its peeled line) from `packed-refs`.
+    pub(crate) fn remove_packed_ref(&self, ref_name: &str) -> Result<()> {
+        let path = self.git_dir.join("packed-refs");
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = String::with_capacity(content.len());
+        let mut skipping = false;
+        for line in content.lines() {
+            if line.starts_with('^') {
+                if !skipping {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+                continue;
+            }
+            skipping = line.split_once(' ').map(|(_, name)| name) == Some(ref_name);
+            if !skipping {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        write_file_atomic(&path, out.as_bytes())
+    }
+
+    /// Deletes a loose reference, its reflog and the directories under
+    /// `root` it leaves empty.
+    fn delete_loose_ref(&self, ref_name: &str, root: &str) -> Result<()> {
+        let store = self.ref_store();
+        if store.is_packed(ref_name)? {
+            return Err(Error::PackedRefDeletionUnsupported(ref_name.to_owned()));
+        }
+        store.read_ref_file(ref_name)?;
+        let path = self.git_dir.join(ref_name);
+        fs::remove_file(&path)?;
+        self.reflog_writer()?.delete(ref_name)?;
+
+        let root = self.git_dir.join(root);
+        let mut parent = path.parent();
+        while let Some(dir) = parent {
+            if dir == root {
+                break;
+            }
+            if dir.read_dir()?.next().is_none() {
+                fs::remove_dir(dir)?;
+            } else {
+                break;
+            }
+            parent = dir.parent();
+        }
+        Ok(())
+    }
+
     /// Lists all tags in the repository.
     ///
     /// Returns a vector of `Tag` objects representing all tags in `refs/tags/`.
@@ -1901,6 +2171,102 @@ impl Repository {
         }
         Ok(result)
     }
+}
+
+/// Validates a branch or tag name (the part after `refs/heads/` or
+/// `refs/tags/`) with the rules of `git check-ref-format`, plus Git's
+/// refusal of names starting with `-`.
+///
+/// A name is rejected when it is empty, starts with `-` or `/`, ends with
+/// `/` or `.`, contains `//`, `..`, `@{`, a space, a control character or
+/// one of `~ ^ : ? * [ \`, is `@`, or has a component that starts with `.`
+/// or ends with `.lock`.
+pub(crate) fn validate_ref_name(kind: &str, name: &str) -> Result<()> {
+    let invalid = |reason: &str| {
+        Err(Error::InvalidRefName(format!(
+            "{} name {}: {}",
+            kind, reason, name
+        )))
+    };
+    if name.is_empty() {
+        return invalid("cannot be empty");
+    }
+    if name.starts_with('-') {
+        return invalid("cannot start with '-'");
+    }
+    if name.starts_with('/') || name.ends_with('/') {
+        return invalid("cannot start or end with '/'");
+    }
+    if name.ends_with('.') {
+        return invalid("cannot end with '.'");
+    }
+    // `git branch` reads "@" as HEAD and refuses a branch named HEAD.
+    if kind == "branch" && (name == "@" || name == "HEAD") {
+        return invalid("is reserved");
+    }
+    for sequence in ["//", "..", "@{"] {
+        if name.contains(sequence) {
+            return invalid(&format!("cannot contain '{}'", sequence));
+        }
+    }
+    for c in ['~', '^', ':', '?', '*', '[', '\\', ' '] {
+        if name.contains(c) {
+            return invalid(&format!("contains invalid character '{}'", c));
+        }
+    }
+    if name.chars().any(|c| c.is_ascii_control()) {
+        return invalid("cannot contain control characters");
+    }
+    for component in name.split('/') {
+        if component.starts_with('.') {
+            return invalid("has a component starting with '.'");
+        }
+        if component.ends_with(".lock") {
+            return invalid("has a component ending with '.lock'");
+        }
+    }
+    Ok(())
+}
+
+/// Cleans up a tag message the way `git tag -m` does: trailing whitespace
+/// is removed from each line, runs of blank lines are collapsed, leading and
+/// trailing blank lines are dropped, and a non-empty message ends with a
+/// newline.
+fn cleanup_message(message: &str) -> String {
+    let mut out = String::new();
+    let mut pending_blank = false;
+    for line in message.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            pending_blank = !out.is_empty();
+            continue;
+        }
+        if pending_blank {
+            out.push('\n');
+            pending_blank = false;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// The current time in seconds since the Unix epoch.
+pub(crate) fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// The key Git sorts tree entries by: the name, with `/` appended for a
+/// subtree, so `foo.txt` sorts before the directory `foo`.
+fn tree_sort_key(name: &str, mode: FileMode) -> Vec<u8> {
+    let mut key = name.as_bytes().to_vec();
+    if mode == FileMode::Directory {
+        key.push(b'/');
+    }
+    key
 }
 
 /// Converts a path to the `/`-separated form used for index and tree paths.
@@ -2817,7 +3183,7 @@ mod tests {
 
         let content = Repository::format_commit(
             &tree_oid,
-            Some(&parent_oid),
+            &[parent_oid],
             "Test User <test@example.com> 1234567890 +0000",
             "Test User <test@example.com> 1234567890 +0000",
             "Test message",
@@ -2838,7 +3204,7 @@ mod tests {
 
         let content = Repository::format_commit(
             &tree_oid,
-            None,
+            &[],
             "Test User <test@example.com> 1234567890 +0000",
             "Test User <test@example.com> 1234567890 +0000",
             "Initial commit",

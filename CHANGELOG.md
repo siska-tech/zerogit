@@ -5,8 +5,58 @@
 
 ## [Unreleased]
 
+### Added
+- `Error::UnmergedPaths`: indexにコンフリクト（stage 1〜3）が残っている場合のエラー
+- `Index::get_stage()`、`Index::has_conflicts()`、`Index::conflicted_paths()`
+- `.gitignore`・`.git/info/exclude`・`core.excludesFile`の解釈（否定、ディレクトリ指定、固定、`*`・`?`・`[...]`・`**`、エスケープ、`core.ignoreCase`）。status・`add_all`・作業ツリーとの差分に適用する (#20)
+- `Repository::is_ignored()`、`Repository::ignored_files()`、`Repository::add_force()`
+- `Error::IgnoredPath`: 無視された未追跡ファイルを`add`した場合のエラー
+- 改行コードの変換: `core.autocrlf`（true/input/false）・`core.eol`・`.gitattributes`（`text`、`text=auto`、`-text`、`binary`、`eol=lf|crlf`、旧形式の`crlf`）・`core.attributesFile`・`.git/info/attributes`に従い、`add`/`add_all`・status・作業ツリーとの差分ではCRLF→LF、`checkout`ではLF→CRLFに変換する。`text=auto`の判定とindexにCRLFがあるファイルの扱いはGitと同じ (#21)
+- `core.safecrlf=true`で往復できない変換（改行の混在など）を`add`すると`Error::IrreversibleLineEndings`を返す。既定（warn）では変換して続行する
+- `filter`（driverが設定されている場合）・`ident`・`working-tree-encoding`属性は未対応として扱い、`add`/`checkout`は`Error::UnsupportedAttribute`を返す。statusと作業ツリーとの差分は、サイズと更新時刻がindexと一致すれば変更なしとし、一致しなければ変更ありとする。driverが設定されていない`filter`はGitと同じく無視する
+- `Repository::detailed_status()`: `git status --porcelain=v2`と同じく、index側（HEAD→index）と作業ツリー側（index→作業ツリー）の状態をパスごとに別々に返す。コンフリクトの種類（`UU`・`AA`・`DU`など）、intent-to-add（`.A`）、型の変更（`T`）、ステージ済みの追加後の削除（`AD`）を区別する (#24)
+- `DetailedStatus`、`DetailedStatusEntry`、`ChangeState`、`ConflictKind`
+- reflogの書き込み: `create_commit`（`commit:`・`commit (initial):`）、`create_branch`（`branch: Created from ...`）、`checkout`（`checkout: moving from ... to ...`）でHEADとブランチのreflogをGitと同じ形式で追記し、`delete_branch`でブランチのreflogを削除する。`core.logAllRefUpdates`に従う。記録する名前とメールは、コミットではコミッター、それ以外では`GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL`、`user.name`/`user.email`の順 (#25)
+- `Repository::reflog()`、`ReflogEntry`: reflogの読み取り（新しい順）
+- タグの作成・削除: `Repository::create_tag()`（軽量タグ）、`Repository::create_annotated_tag()`（tagオブジェクトを書き込む注釈付きタグ。対象は任意の型で、`type`は対象の実際の型。taggerは`create_commit`の作者と同じく引数で指定し、メッセージは`git tag -m`と同じく整形する）、`Repository::delete_tag()`。既存のタグは上書きしない (#27)
+- merge: `Repository::merge()`（fast-forward・3-way merge・コンフリクトの記録）、`Repository::merge_base()`/`merge_bases()`（`git merge-base [--all]`相当）、`Repository::merge_head()`、`Repository::abort_merge()`（`git merge --abort`相当）、`MergeOptions`、`FastForward`（`--ff`/`--ff-only`/`--no-ff`）、`MergeOutcome`。内容のマージは`git merge`と同じくhistogram diffで行い、競合マーカー（`merge.conflictStyle`の`merge`/`diff3`）の位置までGitと一致する。複数のmerge baseは仮想的な共通祖先にまとめる。コンフリクトはindexのstage 1〜3、`MERGE_HEAD`・`MERGE_MSG`・`MERGE_MODE`・`ORIG_HEAD`としてGitと同じ形で記録し、Gitで続行・中止できる。リネームは検出しない (#29)
+- `create_commit`は、マージ中（`MERGE_HEAD`あり）なら`MERGE_HEAD`を第二親にしてマージ状態を片付ける（reflogは`commit (merge):`）
+- stash: `Repository::stash_save()`（`git stash push`。`StashOptions`でメッセージと未追跡ファイルの対象化を指定）、`stash_list()`、`stash_apply()`（`--index`相当の指定あり）、`stash_pop()`、`stash_drop()`、`StashEntry`、`StashApplyOutcome`。Gitと同じ形式（`refs/stash`とそのreflog、index・未追跡ファイルのコミット）で保存し、Gitとzerogitのどちらで作ったstashも相互に扱える。適用は3-way mergeで行い、コンフリクトはmergeと同じ形で記録する（popはstashを残す）(#30)
+- rebase: `Repository::rebase()`（`git rebase <upstream>`、`--onto`相当）、`rebase_continue()`、`rebase_skip()`、`rebase_abort()`、`is_rebasing()`、`RebaseOutcome`。Gitの既定（mergeバックエンド・非対話）と同じく、upstreamにないコミットを古い順に3-way mergeで付け替え、作者・メッセージを保つ。マージコミットは除外し、upstreamに同じ変更があるコミット（patch-id）は飛ばし、空になったコミットは捨てる。途中の状態を`.git/rebase-merge/`にGitと同じ形式で保存し、zerogit・Gitのどちらからでも再開・スキップ・中止できる。reflog（`rebase (start)`・`(pick)`・`(continue)`・`(finish)`・`(abort)`）と`ORIG_HEAD`もGitと同じ。対話的rebaseは範囲外 (#31)
+- リモート設定: `Repository::remotes()`、`remote()`、`add_remote()`（既定のfetch refspec付き）、`set_remote_url()`、`remove_remote()`（設定・リモート追跡ブランチ・upstream設定を削除）、`branch_upstream()`、`set_branch_upstream()`、`Remote`、`Refspec`（`+`・`^`・`*`のパターン、対応付けと逆引き）(#32)
+- packの受信と送信: `Repository::store_pack()`（受け取ったpackを検証し、deltaを解決してversion 2の`.idx`を作り`objects/pack/`に保存する。thin packは手元のオブジェクトで補う。`.idx`は`git index-pack`の出力と一致する）、`objects_to_send()`・`pack_objects()`（wantsから到達しhavesから到達しないオブジェクトのpackを作る。deltaなし）、`StoredPack` (#32)
+- 新しいcrate `zerogit-remote`: `clone()`・`fetch()`・`push()`（と、トランスポートを指定する`*_with`）。Git protocol v2（v0へのフォールバックあり）でのfetch、receive-packでのpush。トランスポートはローカル（Gitを起動せず直接読み書き）、SSH（システムの`ssh`クライアント）、Smart HTTP(S)（`ureq`+`rustls`、Basic/Bearer認証）。clone・fetch・pushの結果（参照、設定、`FETCH_HEAD`、reflog、作業ツリー）がGitと一致することを、ローカル・`git upload-pack`/`receive-pack`・`git http-backend`の各経路で確認している (#32)
+- 参照の操作: `Repository::references()`、`find_reference()`、`update_reference()`（期待値付きの更新・削除。packed参照も削除できる）、`set_symbolic_reference()`、`is_ancestor()`、`has_object()`、`object_type()`、`peel()`、`reset_hard()`、`is_bare()`
+- `Error::StaleReference`
+- `Config::get_all()`: 複数値のキー（`remote.<name>.fetch`など）の取得
+- `Error::RemoteNotFound`、`RemoteAlreadyExists`
+- `Error::RebaseInProgress`、`NoRebaseInProgress`、`UnsupportedRebase`
+- `Error::MergeInProgress`、`NoMergeInProgress`、`NotFastForward`、`LocalChangesWouldBeOverwritten`、`UnsupportedMerge`
+- 設定の読み込みで`GIT_CONFIG_NOSYSTEM`・`GIT_CONFIG_SYSTEM`・`GIT_CONFIG_GLOBAL`に従う
+- symlinkをGitと同じくmode `120000`・リンク先パスを内容とするBlobとして扱う。`add`/`add_all`・status・作業ツリーとの差分・`checkout`に対応。リンク切れも`add`できる。`core.symlinks=false`や作成できない環境では、リンク先パスを内容とする通常ファイルとして書き出す (#22)
+
 ### Changed
 - crates.ioのパッケージから`issues/`・`docs/`・`tests/`を除外した
+- **破壊的変更**: `Error`に`UnmergedPaths`・`IgnoredPath`・`UnsupportedAttribute`・`IrreversibleLineEndings`・`MergeInProgress`・`NoMergeInProgress`・`NotFastForward`・`LocalChangesWouldBeOverwritten`・`UnsupportedMerge`・`RebaseInProgress`・`NoRebaseInProgress`・`UnsupportedRebase`・`RemoteNotFound`・`RemoteAlreadyExists`・`StaleReference`を追加した
+- ブランチ名・タグ名を`git check-ref-format`の規則で検証する（空白、`@{`、`//`、末尾の`.`、`.`で始まる・`.lock`で終わる要素を追加で拒否。ブランチ名の`@`・`HEAD`も拒否）。`a`と`a/b`のように衝突する参照は`RefAlreadyExists`になる
+- `Repository::open`が、`.git`を持たないbareリポジトリ（`core.bare=true`、または名前が`.git`で終わらないGitディレクトリ）をbareとして開く
+- グローバル設定は`$XDG_CONFIG_HOME/git/config`の後に`~/.gitconfig`を読む（Gitと同じく`~/.gitconfig`が優先）
+- 作業ツリーの走査で、名前が`.`で始まるファイル・ディレクトリ（`.github/`、`.env.example`など）を除外しない。除外するのは`.git`だけ (#20)
+- `Repository::add`は、無視された未追跡ファイルを`IgnoredPath`で拒否する（`git add`と同じ）
+- status・作業ツリーとの差分は、内容に加えてmode（実行ビット、symlink）の違いも変更として報告する。`core.fileMode=false`（およびUnix以外）ではindexのmodeを使う
+- `checkout`は実行ビットを設定し、ファイルとsymlinkの置き換えに対応する
+- indexに書くサイズを作業ツリー上のファイルサイズにし、時刻のナノ秒も記録する
+- `Index::add`はstage 0の追加で同じパスの全stageを置き換え、`Index::remove`は全stageを削除する。エントリはGitと同じ順（パスのバイト列、次にstage）に保つ
+- `Repository::add`は、作業ツリーから削除された追跡中のファイルの削除をステージする（`git add`と同じ）
+- `Repository::add_all`は、HEADにないファイルを含め、作業ツリーにないindexのエントリを削除する（`git add -A`と同じ）
+
+### Fixed
+- 設定値の解析が、引用符の中のエスケープされた`"`や、値の途中の引用符・末尾の空白を正しく扱っていなかった
+- 作業ツリーの走査がディレクトリへのsymlinkを辿らない（リポジトリ外の走査や無限ループを防ぐ）(#22)
+- コンフリクト中のindexから`create_commit`すると、同名エントリが重複した不正なtreeを作っていた。`UnmergedPaths`を返し、何も書き込まない (#23)
+- コンフリクト中の`checkout`を`UnmergedPaths`で拒否する (#23)
+- `status()`がコンフリクト中のパスをstage 3の内容で比較していた。`Modified`として1件報告する (#23)
+- treeのエントリを名前順に並べていたため、`foo`ディレクトリと`foo.txt`などが並ぶとGitの順序（ディレクトリは`foo/`として比較）と異なり、`git fsck`が不正と判定するtreeを作っていた
 
 ---
 

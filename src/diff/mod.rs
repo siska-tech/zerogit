@@ -9,10 +9,11 @@ use std::path::{Path, PathBuf};
 
 use crate::error::Result;
 use crate::index::Index;
-use crate::infra::{hash_object, list_working_tree, read_file};
+use crate::infra::read_file;
 use crate::objects::{Blob, Commit, FileMode, Oid, Tree};
 
 pub mod blob;
+pub(crate) mod histogram;
 pub mod rename;
 
 use crate::Repository;
@@ -666,27 +667,15 @@ impl Repository {
     /// mtime and size, we skip re-hashing and use the index's OID.
     fn workdir_to_flat_map(&self, index: &Index) -> Result<HashMap<PathBuf, FlatEntry>> {
         let mut map = HashMap::new();
-        let work_dir = self.path();
-
-        for file_path in list_working_tree(work_dir)? {
-            let full_path = work_dir.join(&file_path);
+        let mut worktree = self.worktree()?;
+        let files = worktree.scan(Some(index), false)?.files;
+        for file_path in files {
             // Normalize path for cross-platform consistency
             let normalized_path = normalize_path(&file_path);
-
-            // Read file content and compute hash
-            let content = read_file(&full_path)?;
-            let hash = hash_object("blob", &content);
-            let oid = Oid::from_bytes(hash);
-
-            // Get mode from index if available, otherwise detect
-            // Try both normalized path and original path for index lookup
-            let mode = index
-                .get(&file_path)
-                .or_else(|| index.get(&normalized_path))
-                .map(|e| e.mode())
-                .unwrap_or_else(|| detect_file_mode(&full_path));
-
-            map.insert(normalized_path, FlatEntry { oid, mode });
+            let tracked = index.get(&normalized_path);
+            if let Some((oid, mode)) = worktree.hash(&file_path, tracked)? {
+                map.insert(normalized_path, FlatEntry { oid, mode });
+            }
         }
 
         // Skip-worktree (sparse checkout) entries are taken as up to date,
@@ -734,21 +723,6 @@ fn normalize_path(path: &Path) -> PathBuf {
     // Convert to string and replace backslashes with forward slashes
     let path_str = path.to_string_lossy();
     PathBuf::from(path_str.replace('\\', "/"))
-}
-
-/// Detects the file mode of a file in the working tree.
-#[allow(unused_variables)]
-fn detect_file_mode(path: &Path) -> FileMode {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = std::fs::metadata(path) {
-            if meta.permissions().mode() & 0o111 != 0 {
-                return FileMode::Executable;
-            }
-        }
-    }
-    FileMode::Regular
 }
 
 /// Groups modes whose contents may be renamed into each other.

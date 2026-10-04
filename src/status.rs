@@ -8,10 +8,16 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::index::{Index, IndexEntry};
-use crate::infra::{hash_object, list_working_tree, read_file};
-use crate::objects::{LooseObjectStore, ObjectStore, ObjectType, Oid, Tree};
+use crate::infra::{hash_object, read_file};
+use crate::objects::{tree::FileMode, LooseObjectStore, ObjectStore, ObjectType, Oid, Tree};
+use crate::worktree::Worktree;
 
-/// The status of a file in the working tree.
+/// The status of a file in the working tree, as reported by
+/// [`Repository::status`](crate::Repository::status).
+///
+/// This is one value per path, so a path with changes on both the index
+/// side and the work tree side is reduced to one of them (see
+/// `Repository::status` for the rules). [`DetailedStatus`] keeps both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileStatus {
     /// File is new and not tracked by Git.
@@ -160,19 +166,18 @@ pub fn compute_status(
     head_tree_oid: Option<&Oid>,
     index: Option<&Index>,
 ) -> Result<Vec<StatusEntry>> {
-    compute_status_with_store(
-        work_dir,
-        &ObjectStore::from_loose(store),
-        head_tree_oid,
-        index,
-    )
+    let git_dir = work_dir.join(".git");
+    let config = crate::config::load_config(&git_dir)?;
+    let store = ObjectStore::from_loose(store);
+    let mut worktree = Worktree::load(work_dir, &git_dir, &config, store.clone())?;
+    compute_status_with_store(&store, head_tree_oid, index, &mut worktree)
 }
 
 pub(crate) fn compute_status_with_store(
-    work_dir: &Path,
     store: &ObjectStore,
     head_tree_oid: Option<&Oid>,
     index: Option<&Index>,
+    worktree: &mut Worktree,
 ) -> Result<Vec<StatusEntry>> {
     let mut entries = Vec::new();
 
@@ -182,25 +187,42 @@ pub(crate) fn compute_status_with_store(
         flatten_tree_with_store(store, tree_oid, Path::new(""), &mut head_files)?;
     }
 
-    // Build index map: path -> IndexEntry
+    // Build index map: path -> IndexEntry. Conflicted paths (stages 1-3)
+    // are reported separately.
+    let conflicted: HashSet<PathBuf> = index
+        .map(|idx| idx.conflicted_paths().into_iter().collect())
+        .unwrap_or_default();
     let index_files: BTreeMap<PathBuf, &IndexEntry> = index
-        .map(|idx| idx.iter().map(|e| (e.path().to_path_buf(), e)).collect())
+        .map(|idx| {
+            idx.iter()
+                .filter(|e| !e.is_conflicted())
+                .map(|e| (e.path().to_path_buf(), e))
+                .collect()
+        })
         .unwrap_or_default();
 
     // Get working tree files
-    let working_files: HashSet<PathBuf> = list_working_tree(work_dir)?.into_iter().collect();
+    // Get working tree files: tracked ones, and untracked ones not ignored.
+    let working_files = worktree.scan(index, false)?.files;
 
     // Collect all paths
     let mut all_paths: HashSet<PathBuf> = HashSet::new();
     all_paths.extend(head_files.keys().cloned());
     all_paths.extend(index_files.keys().cloned());
     all_paths.extend(working_files.iter().cloned());
+    all_paths.extend(conflicted.iter().cloned());
 
     // Analyze each path
     for path in all_paths {
         let in_head = head_files.get(&path);
         let in_index = index_files.get(&path);
         let in_working = working_files.contains(&path);
+
+        // A conflict still needs resolving in the working tree.
+        if conflicted.contains(&path) {
+            entries.push(StatusEntry::new(path, FileStatus::Modified));
+            continue;
+        }
 
         // Skip-worktree (sparse checkout) entries are not compared with the
         // working tree, only with HEAD, as Git does.
@@ -243,7 +265,9 @@ pub(crate) fn compute_status_with_store(
             (Some(head_oid), Some(index_entry), true) => {
                 let index_oid = index_entry.oid();
                 let head_modified = head_oid != index_oid;
-                let working_modified = file_modified(work_dir, &path, index_oid)?;
+                // Content or mode (executable bit, symlink) differs from the index.
+                let working_modified = worktree.hash(&path, Some(index_entry))?
+                    != Some((*index_oid, index_entry.mode()));
 
                 match (head_modified, working_modified) {
                     (false, false) => None, // No changes
@@ -269,6 +293,352 @@ pub(crate) fn compute_status_with_store(
     // Sort by path for consistent output
     entries.sort_by(|a, b| a.path.cmp(&b.path));
 
+    Ok(entries)
+}
+
+/// The state of one side of a tracked path, as a column of
+/// `git status --porcelain=v2`.
+///
+/// For the index side (X) the comparison is HEAD against the index; for the
+/// work tree side (Y) it is the index against the work tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ChangeState {
+    /// No change (`.`).
+    Unmodified,
+    /// The content or the executable bit changed (`M`).
+    Modified,
+    /// The type changed between file, symlink and submodule (`T`).
+    TypeChanged,
+    /// The path is new on this side (`A`).
+    Added,
+    /// The path was removed on this side (`D`).
+    Deleted,
+}
+
+impl ChangeState {
+    /// The porcelain v2 letter: `.`, `M`, `T`, `A` or `D`.
+    pub fn as_char(&self) -> char {
+        match self {
+            ChangeState::Unmodified => '.',
+            ChangeState::Modified => 'M',
+            ChangeState::TypeChanged => 'T',
+            ChangeState::Added => 'A',
+            ChangeState::Deleted => 'D',
+        }
+    }
+}
+
+/// The kind of a merge conflict, from the stages present in the index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConflictKind {
+    /// Deleted on both sides (`DD`: stage 1 only).
+    BothDeleted,
+    /// Added by us (`AU`: stage 2 only).
+    AddedByUs,
+    /// Deleted by them (`UD`: stages 1 and 2).
+    DeletedByThem,
+    /// Added by them (`UA`: stage 3 only).
+    AddedByThem,
+    /// Deleted by us (`DU`: stages 1 and 3).
+    DeletedByUs,
+    /// Added on both sides (`AA`: stages 2 and 3).
+    BothAdded,
+    /// Modified on both sides (`UU`: stages 1, 2 and 3).
+    BothModified,
+}
+
+impl ConflictKind {
+    /// Classifies a conflict from the stages present (1 = base, 2 = ours,
+    /// 3 = theirs). Returns `None` if no conflict stage is present.
+    pub fn from_stages(base: bool, ours: bool, theirs: bool) -> Option<Self> {
+        Some(match (base, ours, theirs) {
+            (true, false, false) => ConflictKind::BothDeleted,
+            (false, true, false) => ConflictKind::AddedByUs,
+            (true, true, false) => ConflictKind::DeletedByThem,
+            (false, false, true) => ConflictKind::AddedByThem,
+            (true, false, true) => ConflictKind::DeletedByUs,
+            (false, true, true) => ConflictKind::BothAdded,
+            (true, true, true) => ConflictKind::BothModified,
+            (false, false, false) => return None,
+        })
+    }
+
+    /// The porcelain v2 XY code, such as `UU`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ConflictKind::BothDeleted => "DD",
+            ConflictKind::AddedByUs => "AU",
+            ConflictKind::DeletedByThem => "UD",
+            ConflictKind::AddedByThem => "UA",
+            ConflictKind::DeletedByUs => "DU",
+            ConflictKind::BothAdded => "AA",
+            ConflictKind::BothModified => "UU",
+        }
+    }
+}
+
+/// What [`DetailedStatusEntry`] reports for a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DetailedStatus {
+    /// A tracked path with a change on at least one side
+    /// (porcelain v2 line `1 XY ...`).
+    Changed {
+        /// HEAD compared with the index (X).
+        index: ChangeState,
+        /// The index compared with the work tree (Y).
+        worktree: ChangeState,
+    },
+    /// A path with unresolved merge conflict stages (line `u XY ...`).
+    Unmerged(ConflictKind),
+    /// An untracked file that is not ignored (line `? path`).
+    Untracked,
+}
+
+impl DetailedStatus {
+    /// The porcelain v2 status code: `XY` for changed and unmerged paths
+    /// (for example `M.`, `.D`, `UU`), `?` for untracked files.
+    pub fn code(&self) -> String {
+        match self {
+            DetailedStatus::Changed { index, worktree } => {
+                format!("{}{}", index.as_char(), worktree.as_char())
+            }
+            DetailedStatus::Unmerged(kind) => kind.as_str().to_owned(),
+            DetailedStatus::Untracked => "?".to_owned(),
+        }
+    }
+
+    /// Returns true if the index differs from HEAD (staged changes).
+    pub fn is_staged(&self) -> bool {
+        matches!(self, DetailedStatus::Changed { index, .. } if *index != ChangeState::Unmodified)
+    }
+
+    /// Returns true if the work tree differs from the index, or the file is
+    /// untracked.
+    pub fn is_unstaged(&self) -> bool {
+        match self {
+            DetailedStatus::Changed { worktree, .. } => *worktree != ChangeState::Unmodified,
+            DetailedStatus::Untracked => true,
+            DetailedStatus::Unmerged(_) => false,
+        }
+    }
+}
+
+/// One line of a detailed status: a path and its state on each side.
+///
+/// A path can appear twice: a file deleted from the index (`D.`) that still
+/// exists in the work tree is also reported as untracked, as Git does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetailedStatusEntry {
+    path: PathBuf,
+    status: DetailedStatus,
+    head_mode: Option<FileMode>,
+    index_mode: Option<FileMode>,
+    worktree_mode: Option<FileMode>,
+}
+
+impl DetailedStatusEntry {
+    /// The path relative to the repository root.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The state of the path.
+    pub fn status(&self) -> DetailedStatus {
+        self.status
+    }
+
+    /// The mode in HEAD, if the path is in HEAD.
+    pub fn head_mode(&self) -> Option<FileMode> {
+        self.head_mode
+    }
+
+    /// The mode in the index (stage 0), if the path is in the index.
+    pub fn index_mode(&self) -> Option<FileMode> {
+        self.index_mode
+    }
+
+    /// The mode in the work tree, if the file exists.
+    pub fn worktree_mode(&self) -> Option<FileMode> {
+        self.worktree_mode
+    }
+}
+
+/// Distinguishes files, symlinks and submodules for `T` (type changed).
+fn type_class(mode: FileMode) -> u8 {
+    match mode {
+        FileMode::Regular | FileMode::Executable => 0,
+        FileMode::Symlink => 1,
+        FileMode::Submodule => 2,
+        FileMode::Directory => 3,
+    }
+}
+
+fn compare(old: Option<(Oid, FileMode)>, new: Option<(Oid, FileMode)>) -> ChangeState {
+    match (old, new) {
+        (None, None) => ChangeState::Unmodified,
+        (None, Some(_)) => ChangeState::Added,
+        (Some(_), None) => ChangeState::Deleted,
+        (Some((_, old_mode)), Some((_, new_mode)))
+            if type_class(old_mode) != type_class(new_mode) =>
+        {
+            ChangeState::TypeChanged
+        }
+        (Some(old), Some(new)) if old != new => ChangeState::Modified,
+        _ => ChangeState::Unmodified,
+    }
+}
+
+/// Flattens a tree into path -> (oid, mode), keyed like the index paths.
+pub(crate) fn flatten_with_modes(
+    store: &ObjectStore,
+    tree_oid: &Oid,
+    prefix: &str,
+    result: &mut BTreeMap<PathBuf, (Oid, FileMode)>,
+) -> Result<()> {
+    let raw = store.read(tree_oid)?;
+    if raw.object_type != ObjectType::Tree {
+        return Err(Error::TypeMismatch {
+            expected: "tree",
+            actual: raw.object_type.as_str(),
+        });
+    }
+    for entry in Tree::parse(raw)?.iter() {
+        let path = if prefix.is_empty() {
+            entry.name().to_owned()
+        } else {
+            format!("{}/{}", prefix, entry.name())
+        };
+        if entry.is_directory() {
+            flatten_with_modes(store, entry.oid(), &path, result)?;
+        } else {
+            result.insert(PathBuf::from(path), (*entry.oid(), entry.mode()));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn compute_detailed_status(
+    store: &ObjectStore,
+    head_tree_oid: Option<&Oid>,
+    index: Option<&Index>,
+    worktree: &mut Worktree,
+) -> Result<Vec<DetailedStatusEntry>> {
+    let mut head: BTreeMap<PathBuf, (Oid, FileMode)> = BTreeMap::new();
+    if let Some(tree_oid) = head_tree_oid {
+        flatten_with_modes(store, tree_oid, "", &mut head)?;
+    }
+
+    // Index entries by `/`-separated path: stage 0 entries, and the
+    // conflict stages present for each unmerged path.
+    let mut staged: BTreeMap<PathBuf, &IndexEntry> = BTreeMap::new();
+    let mut conflicts: BTreeMap<PathBuf, [bool; 3]> = BTreeMap::new();
+    for entry in index.map(Index::entries).unwrap_or_default() {
+        let key = PathBuf::from(
+            String::from_utf8_lossy(&crate::index::path_key(entry.path())).into_owned(),
+        );
+        match entry.stage() {
+            0 => {
+                staged.insert(key, entry);
+            }
+            stage => conflicts.entry(key).or_default()[usize::from(stage.min(3)) - 1] = true,
+        }
+    }
+
+    let scan = worktree.scan(index, false)?;
+    let present: HashSet<PathBuf> = scan
+        .files
+        .iter()
+        .map(|p| PathBuf::from(p.to_string_lossy().replace('\\', "/")))
+        .collect();
+
+    let mut entries = Vec::new();
+    let mut paths: BTreeMap<&PathBuf, ()> = BTreeMap::new();
+    for path in head.keys().chain(staged.keys()).chain(conflicts.keys()) {
+        paths.insert(path, ());
+    }
+
+    for path in paths.keys() {
+        let path = *path;
+        if let Some(stages) = conflicts.get(path) {
+            if let Some(kind) = ConflictKind::from_stages(stages[0], stages[1], stages[2]) {
+                entries.push(DetailedStatusEntry {
+                    path: path.clone(),
+                    status: DetailedStatus::Unmerged(kind),
+                    head_mode: head.get(path).map(|h| h.1),
+                    index_mode: None,
+                    worktree_mode: None,
+                });
+                continue;
+            }
+        }
+        let head_side = head.get(path).copied();
+        let entry = staged.get(path).copied();
+        // An intent-to-add entry has nothing staged: the file is new in the
+        // work tree only (".A").
+        let index_side = entry
+            .filter(|e| !e.intent_to_add())
+            .map(|e| (*e.oid(), e.mode()));
+        let index_state = compare(head_side, index_side);
+
+        let mut worktree_mode = None;
+        let worktree_state = match entry {
+            None => ChangeState::Unmodified,
+            // Skip-worktree entries are not compared with the work tree.
+            Some(e) if e.skip_worktree() => ChangeState::Unmodified,
+            Some(e) => {
+                let current = if present.contains(path) {
+                    worktree.hash(&crate::worktree::native_path(path), Some(e))?
+                } else {
+                    None
+                };
+                worktree_mode = current.map(|c| c.1);
+                if e.intent_to_add() {
+                    if current.is_some() {
+                        ChangeState::Added
+                    } else {
+                        ChangeState::Deleted
+                    }
+                } else {
+                    compare(Some((*e.oid(), e.mode())), current)
+                }
+            }
+        };
+
+        if index_state != ChangeState::Unmodified || worktree_state != ChangeState::Unmodified {
+            entries.push(DetailedStatusEntry {
+                path: path.clone(),
+                status: DetailedStatus::Changed {
+                    index: index_state,
+                    worktree: worktree_state,
+                },
+                head_mode: head_side.map(|h| h.1),
+                index_mode: entry.map(IndexEntry::mode),
+                worktree_mode,
+            });
+        }
+    }
+
+    // Untracked: present in the work tree with no index entry at any stage.
+    for path in &present {
+        if !staged.contains_key(path) && !conflicts.contains_key(path) {
+            entries.push(DetailedStatusEntry {
+                path: path.clone(),
+                status: DetailedStatus::Untracked,
+                head_mode: None,
+                index_mode: None,
+                worktree_mode: worktree.mode(&crate::worktree::native_path(path), None)?,
+            });
+        }
+    }
+
+    entries.sort_by(|a, b| {
+        crate::index::path_key(&a.path)
+            .cmp(&crate::index::path_key(&b.path))
+            .then_with(|| {
+                matches!(a.status, DetailedStatus::Untracked)
+                    .cmp(&matches!(b.status, DetailedStatus::Untracked))
+            })
+    });
     Ok(entries)
 }
 

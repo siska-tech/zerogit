@@ -106,6 +106,48 @@ pub fn decompress_exact(data: &[u8], size: usize) -> Result<Vec<u8>> {
     Ok(output)
 }
 
+/// Decompresses the zlib stream at the start of `data`, which must inflate to
+/// exactly `size` bytes, and returns the output with the number of input
+/// bytes the stream used. Bytes after the stream are left alone (as in a
+/// pack, where the next entry follows).
+///
+/// # Errors
+///
+/// Returns `Error::DecompressionFailed` if the stream is corrupt, truncated
+/// or inflates to a different size.
+pub fn decompress_prefix(data: &[u8], size: usize) -> Result<(Vec<u8>, usize)> {
+    use miniz_oxide::inflate::stream::{inflate, InflateState};
+    use miniz_oxide::{DataFormat, MZFlush, MZStatus};
+
+    let mut state = InflateState::new_boxed(DataFormat::Zlib);
+    let mut output = vec![0u8; size];
+    let mut overflow = [0u8; 1];
+    let mut consumed = 0;
+    let mut written = 0;
+    loop {
+        let target: &mut [u8] = if written < size {
+            &mut output[written..]
+        } else {
+            &mut overflow
+        };
+        let result = inflate(&mut state, &data[consumed..], target, MZFlush::None);
+        if written == size && result.bytes_written > 0 {
+            return Err(Error::DecompressionFailed);
+        }
+        consumed += result.bytes_consumed;
+        written += result.bytes_written;
+        match result.status {
+            Ok(MZStatus::StreamEnd) => break,
+            Ok(_) if result.bytes_consumed > 0 || result.bytes_written > 0 => {}
+            _ => return Err(Error::DecompressionFailed),
+        }
+    }
+    if written != size {
+        return Err(Error::DecompressionFailed);
+    }
+    Ok((output, consumed))
+}
+
 /// Validates a zlib header.
 ///
 /// A valid zlib header consists of two bytes where:
@@ -133,6 +175,18 @@ fn is_valid_zlib_header(cmf: u8, flg: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_decompress_prefix_reports_consumed_bytes() {
+        let first = compress(b"hello world");
+        let mut data = first.clone();
+        data.extend_from_slice(b"trailing");
+        let (out, used) = decompress_prefix(&data, 11).unwrap();
+        assert_eq!(out, b"hello world");
+        assert_eq!(used, first.len());
+        assert!(decompress_prefix(&data, 5).is_err());
+        assert!(decompress_prefix(&first[..first.len() - 2], 11).is_err());
+    }
 
     // Helper to create valid zlib-compressed data
     fn compress_data(data: &[u8]) -> Vec<u8> {

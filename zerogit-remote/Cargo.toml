@@ -1,0 +1,27 @@
+[package]
+name = "zerogit-remote"
+version = "0.1.0"
+edition = "2021"
+description = "Remote operations (fetch, push, clone) for zerogit: Git protocol v2, smart HTTP(S), SSH and local transports"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/siska-tech/zerogit"
+readme = "README.md"
+keywords = ["git", "vcs", "pure-rust"]
+categories = ["development-tools"]
+exclude = ["tests/"]
+
+[dependencies]
+zerogit = { path = "..", version = "0.4" }
+ureq = { version = "2", default-features = false, features = ["tls"], optional = true }
+
+[features]
+default = ["https"]
+# Smart HTTP(S) transport (rustls for TLS).
+https = ["dep:ureq"]
+
+[dev-dependencies]
+tempfile = "3"
+
+# A separate workspace: this crate has its own dependencies and does not
+# change how the core `zerogit` crate is built.
+[workspace]

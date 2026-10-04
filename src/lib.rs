@@ -48,15 +48,24 @@
 //! - [`index`] - Index (staging area) operations
 //! - [`status`] - Working tree status
 
+pub(crate) mod attributes;
 pub mod config;
 pub mod diff;
+pub(crate) mod eol;
 pub mod error;
+pub(crate) mod ignore;
 pub mod index;
 pub mod log;
+pub mod merge;
 pub mod objects;
+pub mod rebase;
 pub mod refs;
+pub mod remote;
 pub mod repository;
+pub mod stash;
 pub mod status;
+pub mod transfer;
+pub(crate) mod worktree;
 
 // Internal modules (not part of public API)
 pub(crate) mod infra;
@@ -70,16 +79,33 @@ pub use repository::Repository;
 pub use objects::{Blob, Commit, FileMode, Object, Oid, Signature, Tree, TreeEntry};
 
 // Re-export reference types
-pub use refs::{Branch, Head, RemoteBranch, Tag};
+pub use refs::{Branch, Head, ReflogEntry, RemoteBranch, Tag};
 
 // Re-export status types
-pub use status::{FileStatus, StatusEntry};
+pub use status::{
+    ChangeState, ConflictKind, DetailedStatus, DetailedStatusEntry, FileStatus, StatusEntry,
+};
 
 // Re-export index types
 pub use index::{Index, IndexEntry};
 
 // Re-export log types
 pub use log::LogOptions;
+
+// Re-export merge types
+pub use merge::{FastForward, MergeOptions, MergeOutcome};
+
+// Re-export remote types
+pub use remote::{Refspec, Remote};
+
+// Re-export transfer types
+pub use transfer::StoredPack;
+
+// Re-export rebase types
+pub use rebase::RebaseOutcome;
+
+// Re-export stash types
+pub use stash::{StashApplyOutcome, StashEntry, StashOptions};
 
 // Re-export diff types
 pub use diff::{

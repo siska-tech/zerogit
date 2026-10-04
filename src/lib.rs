@@ -110,7 +110,7 @@ pub use remote::{Refspec, Remote};
 pub use transfer::StoredPack;
 
 // Re-export rebase types
-pub use rebase::RebaseOutcome;
+pub use rebase::{RebaseOutcome, RebaseStep};
 
 // Re-export stash types
 pub use stash::{StashApplyOutcome, StashEntry, StashOptions};

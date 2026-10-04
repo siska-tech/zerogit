@@ -9,7 +9,7 @@
 - `zerogit-remote`: SSHクライアントをGitと同じ順で選ぶ: `GIT_SSH_COMMAND`（シェルで実行）、`GIT_SSH`（プログラム）、`core.sshCommand`（シェルで実行。`fetch`・`push`はリポジトリの設定を読む）、`ssh`。PuTTYの`plink`・`tortoiseplink`にはそのポート指定（`-P`）を使う。`ProcessConnector::ssh_command()`、`transport::open_for()` (#36)
 - `zerogit-remote`: `Error::Connection`: 接続が応答の前に切れたとき、SSHクライアントの終了状態とメッセージ（認証失敗、ホスト鍵の不一致など）を含めて返す (#36)
 - CI: localhostの`sshd`に対してSSH経由のclone・fetch・pushをGitと比べるジョブ（`zerogit-remote/tests/ssh_test.rs`。ほかの環境では`#[ignore]`）(#36)
-
+- 対話的rebase: `Repository::rebase_interactive(upstream, onto, &steps, ...)`、`Repository::rebase_plan(upstream)`（`git rebase -i`が最初に示すpickの一覧）、`RebaseStep`（`Pick`・`Reword`・`Edit`・`Squash`・`Fixup`・`Drop`）。並べ替え・省略（省いたコミットは捨てる）もできる。squashのメッセージはGitのエディタが残す結合メッセージと同じ。`edit`では`RebaseOutcome::Stopped`で止まり、ステージした変更は`rebase_continue`でそのコミットに加わる。状態はGitの形式（`rebase-merge/`のtodo・done・amendなど）で保存し、Gitとzerogitのどちらからでも続行できる。`exec`・`break`・`label`・`reset`・`merge`は対象外 (#34)
 - merge（rebase・stashの適用を含む）が、片側でリネームされたファイルを追う（Gitの`ort`と同じ）。完全一致または類似度50%以上のリネームを検出し、もう片側の変更をリネーム先に適用する。コンフリクトマーカーは`HEAD:新しいパス`・`topic:古いパス`のように両側のパスを示す。`merge.renames`（既定は`diff.renames`）が`false`なら追わない。リネームのコンフリクト（片側でリネーム・もう片側で削除、両側で別のパスへのリネーム、同じパスへのリネーム）はGitと同じindexのステージと作業ツリーで記録する。ディレクトリのリネームは検出しない (#35)
 
 ### Fixed

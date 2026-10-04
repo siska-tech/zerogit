@@ -82,4 +82,8 @@ pub use index::{Index, IndexEntry};
 pub use log::LogOptions;
 
 // Re-export diff types
-pub use diff::{DiffDelta, DiffStats, DiffStatus, TreeDiff};
+pub use diff::{
+    BlobDiff, BlobDiffContent, DiffDelta, DiffHunk, DiffLine, DiffOptions, DiffStats, DiffStatus,
+    LineEnding, LineKind, NonTextReason, RenameDetection, RenameLimit, RenameOptions, SkipReason,
+    TreeDiff,
+};

@@ -56,6 +56,7 @@ pub mod error;
 pub(crate) mod ignore;
 pub mod index;
 pub mod log;
+pub mod merge;
 pub mod objects;
 pub mod refs;
 pub mod repository;

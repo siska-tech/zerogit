@@ -374,11 +374,31 @@ enum Op {
 
 /// Computes edit operations, or `None` if the cost budget runs out.
 fn line_ops(old: &[&str], new: &[&str], max_cost: u64) -> Option<Vec<Op>> {
+    let old: Vec<&[u8]> = old.iter().map(|line| line.as_bytes()).collect();
+    let new: Vec<&[u8]> = new.iter().map(|line| line.as_bytes()).collect();
+    byte_line_ops(&old, &new, max_cost)
+}
+
+/// Returns the pairs of matching lines `(old index, new index)` of a
+/// minimal line diff, in order.
+#[allow(dead_code)] // Used by the merge being implemented for #29.
+pub(crate) fn matching_lines(old: &[&[u8]], new: &[&[u8]]) -> Vec<(usize, usize)> {
+    byte_line_ops(old, new, u64::MAX)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|op| match op {
+            Op::Equal(i, j) => Some((i, j)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn byte_line_ops<'a>(old: &[&'a [u8]], new: &[&'a [u8]], max_cost: u64) -> Option<Vec<Op>> {
     // Intern lines so comparisons are integer comparisons.
-    let mut ids = HashMap::new();
-    let mut intern = |line: &str| {
+    let mut ids: HashMap<&'a [u8], u32> = HashMap::new();
+    let mut intern = |line: &'a [u8]| {
         let next = ids.len() as u32;
-        *ids.entry(line.to_owned()).or_insert(next)
+        *ids.entry(line).or_insert(next)
     };
     let a: Vec<u32> = old.iter().map(|line| intern(line)).collect();
     let b: Vec<u32> = new.iter().map(|line| intern(line)).collect();

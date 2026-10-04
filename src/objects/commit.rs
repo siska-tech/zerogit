@@ -42,6 +42,27 @@ impl Signature {
         }
     }
 
+    /// Creates a signature with the current time and the offset of the
+    /// local time zone, as `git commit` records them.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use zerogit::Signature;
+    ///
+    /// let sig = Signature::now("John Doe", "john@example.com");
+    /// assert_eq!(sig.name(), "John Doe");
+    /// ```
+    pub fn now(name: impl Into<String>, email: impl Into<String>) -> Self {
+        let timestamp = crate::infra::time::now();
+        Signature::new(
+            name,
+            email,
+            timestamp,
+            crate::infra::time::local_offset_minutes(timestamp),
+        )
+    }
+
     /// Returns the name.
     pub fn name(&self) -> &str {
         &self.name

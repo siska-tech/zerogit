@@ -216,6 +216,7 @@ repo.add_force(path)?;        // 無視対象でもステージ（git add -f）
 repo.add_all()?;              // 全変更をステージ
 repo.reset(path)?;            // ステージを解除
 repo.create_commit(msg, author, email)?;  // コミット作成
+repo.create_commit_with(msg, &CommitOptions::new())?; // 作者・コミッター・日時を指定（既定はGitと同じ解決）
 repo.create_branch(name, target)?;        // ブランチ作成
 repo.delete_branch(name)?;                // ブランチ削除
 repo.checkout(target)?;                   // ブランチ切り替え
@@ -362,7 +363,7 @@ fn main() -> Result<()> {
 ### ファイルをステージしてコミット
 
 ```rust
-use zerogit::{Repository, Result};
+use zerogit::{CommitOptions, Repository, Result, Signature};
 
 fn main() -> Result<()> {
     let repo = Repository::discover(".")?;
@@ -378,6 +379,13 @@ fn main() -> Result<()> {
         "Add new feature",
         "Your Name",
         "your@email.com"
+    )?;
+
+    // 作者とコミッターを別々に指定する（省略時はGIT_AUTHOR_*・user.nameなどから解決）
+    repo.add("README.md")?;
+    let oid = repo.create_commit_with(
+        "Fix typo",
+        &CommitOptions::new().author(Signature::now("Alice", "alice@example.com")),
     )?;
 
     println!("Created commit: {}", oid.short());

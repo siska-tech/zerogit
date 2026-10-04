@@ -7,11 +7,17 @@
 
 ### Added
 - `Error::Locked`: 書き込み先のロックファイル（`<path>.lock`）が既にある場合のエラー。メッセージにロックファイルのパスを含む (#39)
+- `Repository::create_commit_with()`と`CommitOptions`: 作者・コミッター（日時とタイムゾーンを含む）を別々に指定してコミットする。`allow_empty`（`--allow-empty`）と`allow_empty_message`（`--allow-empty-message`）も指定できる。既定ではGitと同じく、親と同じtreeのコミットと空のメッセージを拒否する (#40)
+- `Repository::default_author()`・`default_committer()`: `git commit`と同じく、`GIT_AUTHOR_*`・`GIT_COMMITTER_*`（`*_DATE`はGitの内部形式・ISO 8601・RFC 2822）、`author.*`・`committer.*`、`user.name`・`user.email`、`EMAIL`の順で署名を解決する (#40)
+- `Signature::now()`: 現在時刻とローカルのタイムゾーンで署名を作る (#40)
+- `Error::EmptyCommitMessage`、`Error::InvalidDate` (#40)
 
 ### Changed
 - index・参照（HEAD・ブランチ・タグ・`refs/stash`など）・`packed-refs`・config・`MERGE_*`・`ORIG_HEAD`・`rebase-merge/`の書き込みを、Gitと同じロックファイル（`<path>.lock`を排他的に作成して書き込み、renameで置き換える）経由にした。Gitが操作中（ロックあり）なら、zerogitは何も変えずに`Error::Locked`を返す (#39)
 - indexを読んで書き戻す操作（`add`・`add_all`・`reset`・`checkout`・`merge`・`stash`・`rebase`など）は、ロックを取ってからindexを読む。`create_commit`はHEADの更新が終わるまでindexのロックを持つ (#39)
 - `checkout`は、作業ツリーを変える前にindexとHEADのロックを取る (#39)
+- 作成するコミット・注釈付きタグ・stash・merge・rebaseのコミットとreflogに、ローカルのタイムゾーン（夏時間を含む）を記録する。これまでは常に`+0000`だった。オフセットは依存を増やさず、Unixでは`localtime_r`、Windowsでは`SystemTimeToTzSpecificLocalTime`で求める (#40)
+- `create_commit`とmergeのコミットメッセージを`git commit -m`と同じく整形する（行末の空白、前後の空行、連続する空行を除き、末尾に改行を付ける）。同じtree・親・署名・日時・メッセージなら、Gitで作ったコミットと同じOIDになる (#40)
 
 ### Fixed
 - `update_reference()`の期待値付き更新が、ロックを取ってから現在値を比べるようになり、compare-and-swapとして正しく働く。同時に更新すると1つだけが成功し、残りは`StaleReference`か`Locked`になる。`create_commit`・merge・rebaseによるHEADの更新も、読んだときから動いていれば`StaleReference`で拒否する。reflogは参照のロックを持っている間に追記する (#39)

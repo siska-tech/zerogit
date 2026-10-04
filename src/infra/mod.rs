@@ -4,6 +4,7 @@ pub mod compression;
 pub mod fs;
 pub mod hash;
 pub(crate) mod lock;
+pub(crate) mod time;
 
 pub use compression::{compress, decompress, decompress_exact, decompress_prefix};
 pub use fs::{read_file, write_file_atomic};

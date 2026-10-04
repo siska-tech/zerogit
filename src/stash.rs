@@ -215,7 +215,7 @@ impl Repository {
             &head.to_hex()[..7],
             head_commit.subject()
         );
-        let who = Signature::new(name, email, crate::repository::now(), 0);
+        let who = Signature::now(name, email);
 
         let index_tree = write_tree(self, &index_state)?;
         let index_commit = write_commit(

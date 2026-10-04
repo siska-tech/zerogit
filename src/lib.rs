@@ -49,6 +49,7 @@
 //! - [`status`] - Working tree status
 
 pub(crate) mod attributes;
+pub mod commit;
 pub mod config;
 pub mod diff;
 pub(crate) mod eol;
@@ -71,6 +72,7 @@ pub(crate) mod worktree;
 pub(crate) mod infra;
 
 // Re-export primary types for convenient access
+pub use commit::CommitOptions;
 pub use config::{Config, ConfigLevel};
 pub use error::{Error, Result};
 pub use repository::Repository;

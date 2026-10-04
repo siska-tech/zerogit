@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::commit::{cleanup_message, EmptyCheck};
 use crate::error::{Error, Result};
 use crate::index::{self, Index, IndexEntry};
 use crate::infra::{read_file, LockFile};
@@ -1439,7 +1440,7 @@ impl Repository {
             .ok()
             .or_else(|| config.get("user", "email").map(str::to_owned))
             .unwrap_or_default();
-        Ok(Signature::new(name, email, now(), 0))
+        Ok(Signature::now(name, email))
     }
 
     /// Returns the reflog of a reference, newest entry first, as
@@ -1515,58 +1516,15 @@ impl Repository {
         author_name: &str,
         author_email: &str,
     ) -> Result<Oid> {
-        // Hold the index lock until HEAD is updated, as `git commit` does.
-        let (_index_lock, idx) = self.lock_index()?;
-
-        // A tree built from conflict stages would contain duplicate names.
-        if idx.has_conflicts() {
-            return Err(Error::UnmergedPaths(idx.conflicted_paths()));
-        }
-
-        // Check if there are any staged changes
-        if idx.is_empty() {
-            return Err(Error::EmptyCommit);
-        }
-
-        // Build tree from index
-        let tree_oid = self.build_tree_from_index(&idx)?;
-
-        // Parents: the current HEAD (if any), then MERGE_HEAD when
-        // concluding a merge.
-        let parent_oid = self.optional_head_oid()?;
-        let merge_heads = self.merge_heads()?;
-        let mut parents: Vec<Oid> = parent_oid.into_iter().collect();
-        parents.extend(merge_heads.iter().copied());
-
-        // Format signature (using +0000 timezone for simplicity)
-        let committer = Signature::new(author_name, author_email, now(), 0);
-        let signature = committer.to_git_string();
-
-        // Format commit content
-        let commit_content = Self::format_commit(
-            &tree_oid, &parents, &signature, &signature, // Use same for committer
-            message,
-        );
-
-        // Write commit object
-        let store = self.object_store();
-        let commit_oid = store.write(ObjectType::Commit, &commit_content)?;
-
-        // Update HEAD, logging "commit: <subject>" as Git does.
-        let subject = message.lines().next().unwrap_or("");
-        let reflog_message = if !merge_heads.is_empty() {
-            format!("commit (merge): {}", subject)
-        } else if parent_oid.is_some() {
-            format!("commit: {}", subject)
-        } else {
-            format!("commit (initial): {}", subject)
-        };
-        self.update_head(&commit_oid, parent_oid, &committer, &reflog_message)?;
-        if !merge_heads.is_empty() {
-            self.clear_merge_state()?;
-        }
-
-        Ok(commit_oid)
+        // The same person is author and committer, at the current time in
+        // the local time zone, as `git commit` records it.
+        let signature = Signature::now(author_name, author_email);
+        self.commit_index(
+            &cleanup_message(message),
+            &signature,
+            &signature,
+            EmptyCheck::EmptyIndex,
+        )
     }
 
     /// Validates a branch name according to Git rules.
@@ -2030,7 +1988,7 @@ impl Repository {
         tagger_email: &str,
     ) -> Result<Tag> {
         let (ref_name, target_oid, target_type) = self.prepare_tag(name, target)?;
-        let tagger = Signature::new(tagger_name, tagger_email, now(), 0);
+        let tagger = Signature::now(tagger_name, tagger_email);
         let message = cleanup_message(message);
         let content = format!(
             "object {}\ntype {}\ntag {}\ntagger {}\n\n{}",
@@ -2265,37 +2223,6 @@ pub(crate) fn validate_ref_name(kind: &str, name: &str) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// Cleans up a tag message the way `git tag -m` does: trailing whitespace
-/// is removed from each line, runs of blank lines are collapsed, leading and
-/// trailing blank lines are dropped, and a non-empty message ends with a
-/// newline.
-fn cleanup_message(message: &str) -> String {
-    let mut out = String::new();
-    let mut pending_blank = false;
-    for line in message.lines() {
-        let line = line.trim_end();
-        if line.is_empty() {
-            pending_blank = !out.is_empty();
-            continue;
-        }
-        if pending_blank {
-            out.push('\n');
-            pending_blank = false;
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
-}
-
-/// The current time in seconds since the Unix epoch.
-pub(crate) fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 /// The lock on the index taken by [`Repository::lock_index`].

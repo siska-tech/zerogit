@@ -157,14 +157,27 @@ fn files_with_matching_stat_data_are_not_read() {
     let dir = temp.path();
     // chmod changes the ctime; tell Git and zerogit not to compare it.
     git(dir, &["config", "core.trustctime", "false"]);
+    // The files were committed in the second they were written, so Git
+    // marked their entries racily clean (size 0: compare by content). Let a
+    // second pass and refresh while the files are readable, so the index
+    // has their real stat data and is newer than them. Touching a.txt makes
+    // sure the refresh rewrites the index.
+    let_a_second_pass();
+    write(dir, "a.txt", "content of a.txt\n");
+    git(dir, &["update-index", "-q", "--refresh"]);
+    let debug = git(dir, &["ls-files", "--debug", "secret.txt"]);
+    assert!(
+        debug.lines().any(|l| l.trim() == "size: 22\tflags: 0"),
+        "{}",
+        debug
+    );
+
     let secret = dir.join("secret.txt");
     std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).unwrap();
     if std::fs::read(&secret).is_ok() {
         // Running as root: permissions do not stop reading.
         return;
     }
-    let_a_second_pass();
-    git(dir, &["update-index", "-q", "--refresh"]);
 
     // Reading the unreadable file would fail; matching stat data skips it.
     let repo = Repository::open(dir).unwrap();

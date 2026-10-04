@@ -1,6 +1,13 @@
 //! Git index file writer.
 //!
-//! This module implements writing of the Git index file format (version 2).
+//! This module writes the Git index file format, versions 2, 3 and 4.
+//!
+//! The index is written in the version it was read with, so the header and
+//! the entry layout always agree: v4 uses path compression without padding,
+//! v2/v3 use NUL padding. A version 2 index containing entries with extended
+//! flags (skip-worktree, intent-to-add) is written as version 3, the lowest
+//! version able to store them. Optional extensions are not written; Git
+//! rebuilds its caches as needed.
 
 use std::path::Path;
 
@@ -9,27 +16,27 @@ use crate::objects::tree::FileMode;
 
 use super::{Index, IndexEntry};
 
-/// The magic signature at the start of an index file: "DIRC"
 const INDEX_SIGNATURE: &[u8; 4] = b"DIRC";
 
-/// Writes the index to bytes in Git index format.
-///
-/// # Arguments
-///
-/// * `index` - The index to write.
-///
-/// # Returns
-///
-/// The serialized index as a byte vector.
+const FLAG_EXTENDED: u16 = 0x4000;
+const NAME_MASK: u16 = 0x0FFF;
+const EXTENDED_SKIP_WORKTREE: u16 = 0x4000;
+const EXTENDED_INTENT_TO_ADD: u16 = 0x2000;
+
+/// Serializes an index, including the trailing SHA-1 checksum.
 pub fn write(index: &Index) -> Vec<u8> {
+    let version = output_version(index);
     let mut buffer = Vec::new();
 
     // Write header
-    write_header(&mut buffer, index.version(), index.len() as u32);
+    write_header(&mut buffer, version, index.len() as u32);
 
     // Write entries
+    let mut previous: Vec<u8> = Vec::new();
     for entry in index.entries() {
-        write_entry(&mut buffer, entry);
+        let path = path_to_unix_bytes(entry.path());
+        write_entry(&mut buffer, entry, &path, version, &previous);
+        previous = path;
     }
 
     // Calculate and append checksum
@@ -39,34 +46,44 @@ pub fn write(index: &Index) -> Vec<u8> {
     buffer
 }
 
-/// Writes the index header.
-///
-/// The header consists of:
-/// - 4 bytes: signature ("DIRC")
-/// - 4 bytes: version number (big-endian)
-/// - 4 bytes: number of entries (big-endian)
+/// The version actually written: the index's own version, raised to 3 when
+/// version 2 cannot store an entry's extended flags.
+fn output_version(index: &Index) -> u32 {
+    let version = match index.version() {
+        v @ 2..=4 => v,
+        _ => 2,
+    };
+    let needs_extended = index
+        .entries()
+        .iter()
+        .any(|e| e.skip_worktree() || e.intent_to_add());
+    if version == 2 && needs_extended {
+        3
+    } else {
+        version
+    }
+}
+
 fn write_header(buffer: &mut Vec<u8>, version: u32, entry_count: u32) {
     buffer.extend_from_slice(INDEX_SIGNATURE);
     buffer.extend_from_slice(&version.to_be_bytes());
     buffer.extend_from_slice(&entry_count.to_be_bytes());
 }
 
-/// Writes a single index entry.
-///
-/// Each entry has:
-/// - Fixed fields (62 bytes for v2)
-/// - Variable-length name (NUL-terminated)
-/// - Padding to 8-byte boundary
-fn write_entry(buffer: &mut Vec<u8>, entry: &IndexEntry) {
+fn write_entry(
+    buffer: &mut Vec<u8>,
+    entry: &IndexEntry,
+    path: &[u8],
+    version: u32,
+    previous: &[u8],
+) {
     let entry_start = buffer.len();
 
-    // ctime (seconds and nanoseconds)
+    // ctime and mtime (seconds and nanoseconds)
     buffer.extend_from_slice(&(entry.ctime() as u32).to_be_bytes());
-    buffer.extend_from_slice(&0u32.to_be_bytes()); // ctime_nsec
-
-    // mtime (seconds and nanoseconds)
+    buffer.extend_from_slice(&entry.ctime_nsec().to_be_bytes());
     buffer.extend_from_slice(&(entry.mtime() as u32).to_be_bytes());
-    buffer.extend_from_slice(&0u32.to_be_bytes()); // mtime_nsec
+    buffer.extend_from_slice(&entry.mtime_nsec().to_be_bytes());
 
     // dev
     buffer.extend_from_slice(&entry.dev().to_be_bytes());
@@ -90,26 +107,60 @@ fn write_entry(buffer: &mut Vec<u8>, entry: &IndexEntry) {
     // SHA-1
     buffer.extend_from_slice(entry.oid().as_bytes());
 
-    // flags (name length in lower 12 bits, stage in bits 12-13)
-    let path_bytes = path_to_unix_bytes(entry.path());
-    let name_len = path_bytes.len().min(0xFFF) as u16;
-    let stage = (entry.stage() as u16) << 12;
-    let flags = name_len | stage;
+    // flags (name length in lower 12 bits, stage in bits 12-13, extended bit 14)
+    let mut extended = 0u16;
+    if entry.skip_worktree() {
+        extended |= EXTENDED_SKIP_WORKTREE;
+    }
+    if entry.intent_to_add() {
+        extended |= EXTENDED_INTENT_TO_ADD;
+    }
+    let name_len = path.len().min(usize::from(NAME_MASK)) as u16;
+    let stage = (entry.stage() as u16 & 0x03) << 12;
+    let mut flags = name_len | stage;
+    if extended != 0 {
+        flags |= FLAG_EXTENDED;
+    }
     buffer.extend_from_slice(&flags.to_be_bytes());
+    if extended != 0 {
+        buffer.extend_from_slice(&extended.to_be_bytes());
+    }
 
-    // name
-    buffer.extend_from_slice(&path_bytes);
-
-    // Padding to 8-byte boundary
-    // Entry size is padded to a multiple of 8 bytes
-    // There's at least 1 NUL byte after the name
-    let entry_size = buffer.len() - entry_start;
-    let padding = (8 - (entry_size % 8)) % 8;
-    let padding = if padding == 0 { 8 } else { padding };
-    buffer.extend(std::iter::repeat(0u8).take(padding));
+    if version >= 4 {
+        // Path compression: bytes to drop from the previous path, then the
+        // remaining suffix, NUL-terminated, with no padding.
+        let common = previous
+            .iter()
+            .zip(path)
+            .take_while(|(a, b)| a == b)
+            .count();
+        encode_varint(buffer, (previous.len() - common) as u64);
+        buffer.extend_from_slice(&path[common..]);
+        buffer.push(0);
+    } else {
+        // name, then 1..=8 NULs padding the entry to a multiple of 8 bytes
+        buffer.extend_from_slice(path);
+        let entry_size = buffer.len() - entry_start;
+        let padding = 8 - entry_size % 8;
+        buffer.extend(std::iter::repeat(0u8).take(padding));
+    }
 }
 
-/// Converts a FileMode to its u32 representation.
+/// Encodes Git's offset varint (the inverse of the reader's decoding).
+fn encode_varint(buffer: &mut Vec<u8>, mut value: u64) {
+    let mut bytes = [0u8; 10];
+    let mut pos = bytes.len() - 1;
+    bytes[pos] = (value & 0x7f) as u8;
+    value >>= 7;
+    while value != 0 {
+        value -= 1;
+        pos -= 1;
+        bytes[pos] = 0x80 | (value & 0x7f) as u8;
+        value >>= 7;
+    }
+    buffer.extend_from_slice(&bytes[pos..]);
+}
+
 fn file_mode_to_u32(mode: FileMode) -> u32 {
     match mode {
         FileMode::Regular => 0o100644,
@@ -120,7 +171,6 @@ fn file_mode_to_u32(mode: FileMode) -> u32 {
     }
 }
 
-/// Converts a path to Unix-style bytes (forward slashes).
 fn path_to_unix_bytes(path: &Path) -> Vec<u8> {
     // Convert to Unix-style path with forward slashes
     let path_str = path.to_string_lossy();
@@ -366,5 +416,75 @@ mod tests {
         // Both should be parseable
         assert!(parse(&short_data).is_ok());
         assert!(parse(&long_data).is_ok());
+    }
+
+    fn rich_entries() -> Vec<IndexEntry> {
+        let long_path = format!("deep/{}/file.txt", "長い名前".repeat(400));
+        vec![
+            make_entry("dir/a.txt").with_nanos(123, 456_789),
+            make_entry("dir/ab.txt").with_extended_flags(true, false),
+            make_entry("dir/sub/日本語.md").with_extended_flags(false, true),
+            make_entry(&long_path),
+            make_entry("z.txt"),
+        ]
+    }
+
+    #[test]
+    fn test_roundtrip_all_versions_preserves_everything() {
+        for version in [2, 3, 4] {
+            let original = Index::new(version, rich_entries());
+            let data = write(&original);
+            let parsed = parse(&data).unwrap();
+            // Extended flags need at least version 3.
+            assert_eq!(parsed.version(), version.max(3));
+            assert_eq!(parsed.entries(), original.entries());
+            // Writing the parsed index again is byte-for-byte stable.
+            assert_eq!(
+                write(&parsed),
+                write(&Index::new(version.max(3), rich_entries()))
+            );
+        }
+        let plain = Index::new(2, vec![make_entry("a"), make_entry("b")]);
+        assert_eq!(parse(&write(&plain)).unwrap().version(), 2);
+    }
+
+    #[test]
+    fn test_v4_path_compression_layout() {
+        let index = Index::new(4, vec![make_entry("dir/a.txt"), make_entry("dir/b.txt")]);
+        let data = write(&index);
+        let fixed = 40 + 20 + 2;
+        // First entry: strip 0, full name, NUL, no padding.
+        let first = 12 + fixed;
+        assert_eq!(data[first], 0);
+        assert_eq!(&data[first + 1..first + 11], b"dir/a.txt\0");
+        // Second entry strips "a.txt" (5 bytes) and appends "b.txt".
+        let second = first + 11 + fixed;
+        assert_eq!(data[second], 5);
+        assert_eq!(&data[second + 1..second + 7], b"b.txt\0");
+        assert_eq!(data.len(), second + 7 + 20);
+    }
+
+    #[test]
+    fn test_varint_roundtrip() {
+        for value in [
+            0u64,
+            1,
+            127,
+            128,
+            255,
+            16_383,
+            16_384,
+            1 << 20,
+            u32::MAX as u64,
+        ] {
+            let mut buffer = Vec::new();
+            encode_varint(&mut buffer, value);
+            let mut decoded = u64::from(buffer[0] & 0x7f);
+            for &byte in &buffer[1..] {
+                decoded = ((decoded + 1) << 7) | u64::from(byte & 0x7f);
+            }
+            assert_eq!(decoded, value);
+            assert_eq!(buffer.last().unwrap() & 0x80, 0);
+        }
     }
 }

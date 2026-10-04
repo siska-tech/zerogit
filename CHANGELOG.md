@@ -23,7 +23,8 @@
 - `DiffDelta::similarity()`（完全一致は100）、`TreeDiff::rename_limits()`
 
 #### エラー
-- `InvalidPackedRefs`、`PackedRefDeletionUnsupported`、`InvalidPackIndex`、`UnsupportedPackIndexVersion`、`InvalidPack`、`UnsupportedPackVersion`、`UnsupportedRepositoryFormat`、`PackLimitExceeded`
+- `InvalidPackedRefs`、`PackedRefDeletionUnsupported`、`InvalidPackIndex`、`UnsupportedPackIndexVersion`、`InvalidPack`、`UnsupportedPackVersion`、`UnsupportedRepositoryFormat`、`UnsupportedIndex`、`PackLimitExceeded`
+- `IndexEntry::ctime_nsec()`、`mtime_nsec()`、`skip_worktree()`、`intent_to_add()`
 
 ### Changed
 - `Repository::open`/`discover`/`init`は`.git/config`を読み、SHA-256（`extensions.objectFormat`）・reftable・未知の`repositoryformatversion`を`UnsupportedRepositoryFormat`として拒否する。configが壊れている場合もopen時にエラーになる
@@ -32,6 +33,11 @@
 ### Fixed
 - 完全一致リネームで、移動と同時に実行権限が変わった場合も旧新modeを正しく保持する。同じ内容のファイルが複数ある場合の対応付けを決定的・一対一にした
 - 製品コードでI/Oエラーや破損を「オブジェクトなし」として扱っていた箇所を、明示的なエラーにした
+- index v4（パス圧縮）を正しく読み書きする。以前はv4を誤解析し、書き戻すとGitが読めないindexになっていた（#16）。読んだバージョンで書き戻すため、ヘッダとエントリの形式は常に一致する
+- index読み取りでチェックサム・パディング・名前の終端・拡張フラグを検証する。nanosecond時刻とskip-worktree・intent-to-addのフラグを書き戻しで保持する
+- split index・sparse indexは`Error::UnsupportedIndex`として明示的に拒否する（誤読・破損書き込みを防止）。skip-worktreeを含むindexの全体reset・checkoutも同様に拒否する
+- intent-to-add（`git add -N`）のエントリをコミットに含めない。skip-worktreeのエントリをstatus・作業ツリー差分で削除扱いにしない
+- reset・checkoutでindexを作り直す際に、実行権限・symlinkのmodeを失っていた問題を修正
 
 ---
 

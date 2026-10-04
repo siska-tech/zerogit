@@ -1,7 +1,7 @@
 //! Rename detection options and similarity-based rename detection.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::{DiffDelta, DiffStatus};
 use crate::error::Result;
@@ -182,6 +182,52 @@ fn score(a: &Profile<'_>, b: &Profile<'_>) -> u8 {
 
 fn eligible(mode: Option<FileMode>) -> bool {
     matches!(mode, Some(FileMode::Regular | FileMode::Executable))
+}
+
+/// Pairs deleted files (`sources`) with added files (`targets`) by content
+/// similarity, as [`detect_similar_renames`] does for diffs, and returns
+/// `(source, target)` path pairs. Only regular and executable files take
+/// part.
+pub(crate) fn pair_similar(
+    sources: &[(String, Oid, FileMode)],
+    targets: &[(String, Oid, FileMode)],
+    options: &RenameOptions,
+    read: &mut dyn FnMut(&Oid) -> Result<Vec<u8>>,
+) -> Result<Vec<(String, String)>> {
+    let delta = |status, path: &str, oid: Oid, mode: FileMode| {
+        let (old, new) = match status {
+            DiffStatus::Deleted => ((Some(oid), Some(mode)), (None, None)),
+            _ => ((None, None), (Some(oid), Some(mode))),
+        };
+        DiffDelta {
+            status,
+            path: PathBuf::from(path),
+            old_path: None,
+            old_oid: old.0,
+            new_oid: new.0,
+            old_mode: old.1,
+            new_mode: new.1,
+            similarity: None,
+        }
+    };
+    let mut deltas: Vec<DiffDelta> = sources
+        .iter()
+        .map(|(p, oid, mode)| delta(DiffStatus::Deleted, p, *oid, *mode))
+        .chain(
+            targets
+                .iter()
+                .map(|(p, oid, mode)| delta(DiffStatus::Added, p, *oid, *mode)),
+        )
+        .collect();
+    detect_similar_renames(&mut deltas, options, read)?;
+    Ok(deltas
+        .into_iter()
+        .filter(|d| d.status == DiffStatus::Renamed)
+        .filter_map(|d| {
+            let source = d.old_path?.to_string_lossy().into_owned();
+            Some((source, d.path.to_string_lossy().into_owned()))
+        })
+        .collect())
 }
 
 /// Pairs remaining deletions and additions by similarity.

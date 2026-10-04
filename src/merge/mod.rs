@@ -110,6 +110,22 @@ impl Repository {
         Ok(self.merge_heads()?.first().copied())
     }
 
+    /// Whether merges follow renames: `merge.renames`, which defaults to
+    /// `diff.renames` (true unless set to false), as in Git.
+    pub(crate) fn merge_renames(&self) -> Result<bool> {
+        let config = self.config()?;
+        let enabled = |value: &str| {
+            !matches!(
+                value.to_ascii_lowercase().as_str(),
+                "false" | "no" | "off" | "0"
+            )
+        };
+        Ok(match config.get("merge", "renames") {
+            Some(value) => enabled(value),
+            None => config.get("diff", "renames").map_or(true, enabled),
+        })
+    }
+
     /// Removes `MERGE_HEAD`, `MERGE_MSG` and `MERGE_MODE`.
     pub(crate) fn clear_merge_state(&self) -> Result<()> {
         for name in ["MERGE_HEAD", "MERGE_MSG", "MERGE_MODE"] {
@@ -277,6 +293,7 @@ impl Repository {
                 &self.flat_tree(Some(next))?,
                 labels,
                 style,
+                self.merge_renames()?,
             )?
             .as_flat();
             merged_commits.push(*next);
@@ -418,6 +435,7 @@ impl Repository {
             &theirs_tree,
             labels,
             style,
+            self.merge_renames()?,
         )?;
 
         let mut worktree = self.worktree()?;

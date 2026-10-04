@@ -10,6 +10,8 @@
 - `zerogit-remote`: `Error::Connection`: 接続が応答の前に切れたとき、SSHクライアントの終了状態とメッセージ（認証失敗、ホスト鍵の不一致など）を含めて返す (#36)
 - CI: localhostの`sshd`に対してSSH経由のclone・fetch・pushをGitと比べるジョブ（`zerogit-remote/tests/ssh_test.rs`。ほかの環境では`#[ignore]`）(#36)
 
+- merge（rebase・stashの適用を含む）が、片側でリネームされたファイルを追う（Gitの`ort`と同じ）。完全一致または類似度50%以上のリネームを検出し、もう片側の変更をリネーム先に適用する。コンフリクトマーカーは`HEAD:新しいパス`・`topic:古いパス`のように両側のパスを示す。`merge.renames`（既定は`diff.renames`）が`false`なら追わない。別々のリネーム・リネームと削除などは従来どおり削除と追加として扱う (#35)
+
 ### Fixed
 - `zerogit-remote`: `-`で始まるホスト名・パスがSSHクライアントのオプションとして解釈されえた（CVE-2017-1000117と同じ問題）。Gitと同じく拒否する (#36)
 - `zerogit-remote`: `GIT_SSH_COMMAND`を空白で分割して実行していたため、クォートした引数（空白を含む鍵のパスなど）が扱えなかった。Gitと同じくシェルで実行する（Windowsで`sh`がない場合は従来どおり分割する）(#36)

@@ -700,6 +700,8 @@ impl Repository {
             }
         }
         self.restore_paths(&mut idx, &mut worktree, &ours, &paths)?;
+        // Back at HEAD, there is no resolved conflict left to recreate.
+        idx.clear_resolve_undo();
         index_lock.write(&idx)?;
         self.clear_merge_state()
     }

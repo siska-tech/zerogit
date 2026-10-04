@@ -6,8 +6,13 @@
 //! the entry layout always agree: v4 uses path compression without padding,
 //! v2/v3 use NUL padding. A version 2 index containing entries with extended
 //! flags (skip-worktree, intent-to-add) is written as version 3, the lowest
-//! version able to store them. Optional extensions are not written; Git
-//! rebuilds its caches as needed.
+//! version able to store them.
+//!
+//! Of the optional extensions, the cache tree (`TREE`) and the resolve-undo
+//! data (`REUC`) are written back, kept up to date as entries change. Others
+//! (the untracked cache `UNTR`, fsmonitor data `FSMN`, ...) are not: their
+//! content depends on the work tree in ways zerogit does not track, so
+//! keeping them could mislead Git, which rebuilds them as needed.
 
 use std::path::Path;
 
@@ -39,6 +44,23 @@ pub fn write(index: &Index) -> Vec<u8> {
         previous = path;
     }
 
+    if let Some(tree) = index.cache_tree() {
+        let mut data = Vec::new();
+        tree.write(&mut data);
+        write_extension(&mut buffer, b"TREE", &data);
+    }
+    if !index.resolve_undo().is_empty() {
+        let mut data = Vec::new();
+        super::resolve_undo::write(
+            index
+                .resolve_undo()
+                .iter()
+                .map(|(path, stages)| (path.as_slice(), stages)),
+            &mut data,
+        );
+        write_extension(&mut buffer, b"REUC", &data);
+    }
+
     // Calculate and append checksum
     let checksum = sha1(&buffer);
     buffer.extend_from_slice(&checksum);
@@ -62,6 +84,12 @@ fn output_version(index: &Index) -> u32 {
     } else {
         version
     }
+}
+
+fn write_extension(buffer: &mut Vec<u8>, signature: &[u8; 4], data: &[u8]) {
+    buffer.extend_from_slice(signature);
+    buffer.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    buffer.extend_from_slice(data);
 }
 
 fn write_header(buffer: &mut Vec<u8>, version: u32, entry_count: u32) {

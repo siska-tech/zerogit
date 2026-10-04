@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::commit::{cleanup_message, EmptyCheck};
 use crate::error::{Error, Result};
+use crate::index::cache_tree::{subtree_order, CacheTree};
 use crate::index::{self, Index, IndexEntry};
 use crate::infra::{read_file, LockFile};
 use crate::log::{LogIterator, LogOptions};
@@ -1265,104 +1266,28 @@ impl Repository {
 
     /// Builds a tree object from the current index.
     ///
-    /// This creates tree objects for all directories in the index,
-    /// constructing them bottom-up to handle nested directories.
-    ///
     /// # Returns
     ///
     /// The OID of the root tree object.
     pub(crate) fn build_tree_from_index(&self, idx: &Index) -> Result<Oid> {
+        Ok(self.build_cache_tree(idx)?.0)
+    }
+
+    /// Builds the tree objects of the index, reusing the trees of
+    /// directories the cache tree (`TREE` extension) still has as valid, and
+    /// returns the root tree with a cache tree covering every directory.
+    pub(crate) fn build_cache_tree(&self, idx: &Index) -> Result<(Oid, CacheTree)> {
+        let mut entries: Vec<(Vec<u8>, &IndexEntry)> = idx
+            .entries()
+            .iter()
+            .filter(|e| e.stage() == 0)
+            .map(|e| (index::path_key(e.path()), e))
+            .collect();
+        // Directories must be contiguous runs, even in an index read unsorted.
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
         let store = self.object_store();
-
-        // Group entries by directory
-        // Key: directory path (empty string for root)
-        // Value: Vec<(name, mode, oid)>
-        let mut dir_entries: BTreeMap<PathBuf, Vec<(String, FileMode, Oid)>> = BTreeMap::new();
-
-        // First, collect all blobs by their parent directory
-        // Intent-to-add entries (git add -N) have no staged content to commit.
-        for entry in idx.entries().iter().filter(|e| !e.intent_to_add()) {
-            let path = entry.path();
-            let parent = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-
-            dir_entries
-                .entry(parent)
-                .or_default()
-                .push((name, entry.mode(), *entry.oid()));
-        }
-
-        // Process directories from deepest to shallowest
-        // We need to build subtrees first, then include them in parent trees
-        let mut tree_oids: BTreeMap<PathBuf, Oid> = BTreeMap::new();
-
-        // Get all unique directory paths (including intermediate ones)
-        let mut all_dirs: Vec<PathBuf> = dir_entries.keys().cloned().collect();
-
-        // Also add parent directories that might only contain subdirectories
-        for entry in idx.entries().iter().filter(|e| !e.intent_to_add()) {
-            let mut current = entry.path().parent();
-            while let Some(p) = current {
-                if !p.as_os_str().is_empty() && !all_dirs.contains(&p.to_path_buf()) {
-                    all_dirs.push(p.to_path_buf());
-                }
-                current = p.parent();
-            }
-        }
-
-        // Sort directories by depth (deepest first)
-        all_dirs.sort_by(|a, b| {
-            let depth_a = a.components().count();
-            let depth_b = b.components().count();
-            depth_b.cmp(&depth_a) // Reverse order: deepest first
-        });
-
-        // Add root directory if not present
-        if !all_dirs.contains(&PathBuf::new()) {
-            all_dirs.push(PathBuf::new());
-        }
-
-        // Process each directory
-        for dir in all_dirs {
-            let mut entries: Vec<(String, FileMode, Oid)> = Vec::new();
-
-            // Add file entries for this directory
-            if let Some(file_entries) = dir_entries.get(&dir) {
-                entries.extend(file_entries.iter().cloned());
-            }
-
-            // Add subdirectory entries (trees we've already built)
-            for (subdir_path, tree_oid) in &tree_oids {
-                if let Some(parent) = subdir_path.parent() {
-                    if parent == dir {
-                        let name = subdir_path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_default();
-                        entries.push((name, FileMode::Directory, *tree_oid));
-                    }
-                }
-            }
-
-            // Git orders entries by name, comparing a directory as if its
-            // name ended with '/'.
-            entries.sort_by_key(|e| tree_sort_key(&e.0, e.1));
-
-            // Build tree object content
-            let tree_content = Self::build_tree_content(&entries);
-            let tree_oid = store.write(ObjectType::Tree, &tree_content)?;
-
-            tree_oids.insert(dir.clone(), tree_oid);
-        }
-
-        // Return the root tree OID
-        tree_oids
-            .get(&PathBuf::new())
-            .copied()
-            .ok_or(Error::EmptyCommit)
+        let (oid, tree) = build_tree_level(&store, &entries, 0, idx.cache_tree())?;
+        Ok((oid, tree))
     }
 
     /// Builds the binary content of a tree object.
@@ -2301,6 +2226,78 @@ impl IndexLock {
         self.0.write_all(&index::write(&idx))?;
         self.0.commit()
     }
+}
+
+/// Builds the tree of one directory of the index.
+///
+/// `entries` are the stage 0 entries under the directory, sorted by their
+/// `/`-separated paths, and `prefix` is the length of the directory's path
+/// with its trailing `/`. The tree recorded in `cached` is reused when it
+/// is valid for exactly these entries. Intent-to-add entries are left out
+/// of the tree, and a directory holding one is not cached, as in Git.
+fn build_tree_level(
+    store: &ObjectStore,
+    entries: &[(Vec<u8>, &IndexEntry)],
+    prefix: usize,
+    cached: Option<&CacheTree>,
+) -> Result<(Oid, CacheTree)> {
+    let has_intent_to_add = entries.iter().any(|(_, e)| e.intent_to_add());
+    if let Some((count, oid)) = cached.and_then(|tree| tree.valid) {
+        if count == entries.len() && !has_intent_to_add && store.exists(&oid)? {
+            return Ok((oid, cached.cloned().unwrap_or_default()));
+        }
+    }
+
+    let mut items: Vec<(String, FileMode, Oid)> = Vec::new();
+    let mut children: Vec<(Vec<u8>, CacheTree)> = Vec::new();
+    let mut i = 0;
+    while i < entries.len() {
+        let (key, entry) = &entries[i];
+        let rest = &key[prefix..];
+        match rest.iter().position(|&b| b == b'/') {
+            Some(slash) => {
+                let name = &rest[..slash];
+                let dir = &key[..prefix + slash + 1];
+                let end = i + entries[i..]
+                    .iter()
+                    .take_while(|(k, _)| k.starts_with(dir))
+                    .count();
+                let sub = &entries[i..end];
+                let (oid, child) = build_tree_level(
+                    store,
+                    sub,
+                    dir.len(),
+                    cached.and_then(|tree| tree.child(name)),
+                )?;
+                // A directory of intent-to-add entries has nothing to commit.
+                if sub.iter().any(|(_, e)| !e.intent_to_add()) {
+                    let name = String::from_utf8_lossy(name).into_owned();
+                    items.push((name, FileMode::Directory, oid));
+                }
+                children.push((name.to_vec(), child));
+                i = end;
+            }
+            None => {
+                if !entry.intent_to_add() {
+                    let name = String::from_utf8_lossy(rest).into_owned();
+                    items.push((name, entry.mode(), *entry.oid()));
+                }
+                i += 1;
+            }
+        }
+    }
+
+    // Git orders entries by name, comparing a directory as if its name
+    // ended with '/'.
+    items.sort_by_key(|e| tree_sort_key(&e.0, e.1));
+    children.sort_by(|a, b| subtree_order(&a.0, &b.0));
+    let oid = store.write(ObjectType::Tree, &Repository::build_tree_content(&items))?;
+    let valid = if has_intent_to_add {
+        None
+    } else {
+        Some((entries.len(), oid))
+    };
+    Ok((oid, CacheTree { valid, children }))
 }
 
 /// The key Git sorts tree entries by: the name, with `/` appended for a

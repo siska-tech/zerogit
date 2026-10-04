@@ -8,6 +8,9 @@
 ### Added
 - `Repository::rev_parse()`: `git rev-parse`と同じくリビジョンを解決する。参照名（Gitと同じ順: `refs/`・`refs/tags/`・`refs/heads/`・`refs/remotes/`・`refs/remotes/<name>/HEAD`）、短縮OID、`@`、`~<n>`・`^<n>`、`^{}`・`^{commit}`・`^{tree}`・`^{blob}`・`^{tag}`・`^{object}`、`<rev>:<path>`、`:<path>`・`:<n>:<path>`（index）、`<ref>@{<n>}`（reflog）、`@{-<n>}`、`@{upstream}`・`@{u}`に対応する。日付、`@{push}`、メッセージ検索（`^{/text}`・`:/text`）、範囲は未対応 (#44)
 - `Error::InvalidRevision`: 解決できないリビジョン。理由に問題の部分を含む (#44)
+- `Repository::reset_to(revision, ResetMode)`と`ResetMode`（`Soft`・`Mixed`・`Hard`）: `git reset --soft/--mixed/--hard <rev>`と同じくHEAD（ブランチ）を動かす。`ORIG_HEAD`と`reset: moving to <rev>`のreflogを記録し、mixed・hardはマージ中の状態を終える。mixedは内容の変わらないエントリのstat情報を保ち、ほかは作業ツリーから更新する。softはマージ中・コンフリクト中にはGitと同じく拒否する。ロック中などの失敗時は何も変えない (#45)
+- `Repository::reset_paths(revision, paths)`: `git reset <rev> -- <paths>`と同じく、ファイルまたはディレクトリ配下のindexのエントリを指定したコミットの内容にする (#45)
+- `Repository::amend_commit(message, &CommitOptions)`: `git commit --amend`と同じく、元のコミットの親・author（指定すれば変更可）と、新しいcommitterでコミットを置き換える。メッセージを省略すると元のメッセージをそのまま使う（`--no-edit`）。reflogは`commit (amend):`。Gitと同じく、親と同じtreeになる場合（マージコミットを除く）とマージ中は拒否する (#45)
 
 ### Changed
 - `Repository::commit()`・`tree()`・`blob()`・`object()`がリビジョンを受け付ける（`repo.commit("HEAD~1")`など）。短縮OIDの指定はこれまでどおり動く (#44)
@@ -15,6 +18,8 @@
 
 ### Fixed
 - 参照名の解決で、ディレクトリ（`origin`に対する`refs/remotes/origin`など）を読もうとしてI/Oエラーになっていた。参照がないものとして扱う (#44)
+- HEADを同じコミットへ動かす操作で、Gitと同じく、値の変わらないブランチのreflogには記録しない（ブランチを指すHEADのreflogには記録し、detachedのHEADには記録しない）(#45)
+- `refresh_index()`でstat情報を更新したエントリのcache treeを無効にしていた（内容は変わらないので有効なまま保つ）(#45)
 
 ## [0.6.0] - 2026-10-04
 

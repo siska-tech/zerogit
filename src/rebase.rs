@@ -211,7 +211,7 @@ impl State {
 }
 
 /// The raw message of a commit (everything after the headers).
-fn raw_message(repo: &Repository, oid: &Oid) -> Result<String> {
+pub(crate) fn raw_message(repo: &Repository, oid: &Oid) -> Result<String> {
     let raw = repo.object_store().read(oid)?;
     let content = String::from_utf8_lossy(&raw.content).into_owned();
     Ok(match content.find("\n\n") {
@@ -724,7 +724,7 @@ impl Repository {
         self.reset_hard_to(&self.flat_tree(head.as_ref())?)
     }
 
-    fn reset_hard_to(&self, target: &Flat) -> Result<()> {
+    pub(crate) fn reset_hard_to(&self, target: &Flat) -> Result<()> {
         let (index_lock, mut idx) = self.lock_index()?;
         let mut worktree = self.worktree()?;
         let mut paths: Vec<String> = Vec::new();

@@ -179,6 +179,20 @@ impl Index {
         removed
     }
 
+    /// Replaces the stage 0 entry at `entry`'s path with `entry`, which has
+    /// the same blob and mode but new stat data. Unlike [`Index::add`], the
+    /// cache tree stays valid: the content did not change.
+    pub(crate) fn refresh(&mut self, entry: IndexEntry) {
+        let range = self.path_range(&entry.path);
+        if let Some(existing) = self.entries[range].iter_mut().find(|e| e.stage == 0) {
+            debug_assert!(existing.oid == entry.oid && existing.mode == entry.mode);
+            let (skip_worktree, intent_to_add) = (existing.skip_worktree, existing.intent_to_add);
+            *existing = entry;
+            existing.skip_worktree = skip_worktree;
+            existing.intent_to_add = intent_to_add;
+        }
+    }
+
     /// Marks the cached trees of the directories leading to `path` as
     /// changed.
     fn invalidate(&mut self, path: &Path) {

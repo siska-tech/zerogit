@@ -227,17 +227,85 @@ impl Repository {
         } else {
             EmptyCheck::UnchangedTree
         };
-        self.commit_index(&message, &author, &committer, check)
+        self.commit_index(&message, &author, &committer, check, false)
+    }
+
+    /// Replaces the commit HEAD points to with a new one made from the
+    /// index, like `git commit --amend`, and returns the new commit.
+    ///
+    /// The new commit has the parents of the replaced one. Its author is
+    /// the replaced commit's (unless [`CommitOptions::author`] is set) and
+    /// its committer is [`CommitOptions::committer`] or
+    /// [`Repository::default_committer`], with the current time. With
+    /// `message`, the message is cleaned up as in
+    /// [`Repository::create_commit_with`]; without it, the replaced
+    /// commit's message is kept as it is (`--no-edit`). The reflogs record
+    /// `commit (amend): <subject>`.
+    ///
+    /// # Errors
+    ///
+    /// Nothing is changed when an error is returned.
+    ///
+    /// - `Error::RefNotFound` if HEAD has no commit to amend.
+    /// - `Error::MergeInProgress` while a merge is in progress, which Git
+    ///   refuses to amend.
+    /// - `Error::EmptyCommit` if the new commit would have the same tree as
+    ///   its parent, unless [`CommitOptions::allow_empty`] (a merge commit
+    ///   can always be amended).
+    /// - `Error::EmptyCommitMessage`, `Error::UnmergedPaths`,
+    ///   `Error::ConfigNotFound`, `Error::InvalidDate`: as in
+    ///   [`Repository::create_commit_with`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::{CommitOptions, Repository};
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// repo.add("forgotten.txt").unwrap();
+    /// // Add the file to the last commit, keeping its message.
+    /// repo.amend_commit(None, &CommitOptions::new()).unwrap();
+    /// ```
+    pub fn amend_commit(&self, message: Option<&str>, options: &CommitOptions) -> Result<Oid> {
+        let head = self
+            .optional_head_oid()?
+            .ok_or_else(|| Error::RefNotFound("HEAD".to_owned()))?;
+        let author = match &options.author {
+            Some(author) => author.clone(),
+            None => self.commit(&head.to_hex())?.author().clone(),
+        };
+        let committer = match &options.committer {
+            Some(committer) => committer.clone(),
+            None => self.default_committer()?,
+        };
+        let message = match message {
+            Some(message) => {
+                let message = cleanup_message(message);
+                if message.is_empty() && !options.allow_empty_message {
+                    return Err(Error::EmptyCommitMessage);
+                }
+                message
+            }
+            None => crate::rebase::raw_message(self, &head)?,
+        };
+        let check = if options.allow_empty {
+            EmptyCheck::Allow
+        } else {
+            EmptyCheck::UnchangedTree
+        };
+        self.commit_index(&message, &author, &committer, check, true)
     }
 
     /// Writes a commit of the index with an already cleaned-up message and
-    /// moves HEAD to it.
+    /// moves HEAD to it. With `amend`, the commit replaces the one HEAD
+    /// points to, taking its parents.
     pub(crate) fn commit_index(
         &self,
         message: &str,
         author: &Signature,
         committer: &Signature,
         check: EmptyCheck,
+        amend: bool,
     ) -> Result<Oid> {
         // Hold the index lock until HEAD is updated, as `git commit` does.
         let (index_lock, mut idx) = self.lock_index()?;
@@ -250,27 +318,41 @@ impl Repository {
             return Err(Error::EmptyCommit);
         }
 
-        let (tree_oid, cache_tree) = self.build_cache_tree(&idx)?;
-
-        // Parents: the current HEAD (if any), then MERGE_HEAD when
-        // concluding a merge.
-        let parent_oid = self.optional_head_oid()?;
+        let head = self.optional_head_oid()?;
         let merge_heads = self.merge_heads()?;
-        if check == EmptyCheck::UnchangedTree && merge_heads.is_empty() {
-            let parent_tree = match &parent_oid {
-                Some(parent) => Some(*self.commit(&parent.to_hex())?.tree()),
-                None => None,
+        // Parents: the current HEAD (if any), then MERGE_HEAD when
+        // concluding a merge; or, when amending, those of HEAD's commit.
+        let (parents, kind) = if amend {
+            let head = head.ok_or_else(|| Error::RefNotFound("HEAD".to_owned()))?;
+            if !merge_heads.is_empty() {
+                return Err(Error::MergeInProgress);
+            }
+            let parents = self.commit(&head.to_hex())?.parents().to_vec();
+            (parents, "commit (amend)")
+        } else {
+            let mut parents: Vec<Oid> = head.into_iter().collect();
+            parents.extend(merge_heads.iter().copied());
+            let kind = if !merge_heads.is_empty() {
+                "commit (merge)"
+            } else if head.is_some() {
+                "commit"
+            } else {
+                "commit (initial)"
             };
-            let unchanged = match parent_tree {
-                Some(tree) => tree == tree_oid,
+            (parents, kind)
+        };
+
+        let (tree_oid, cache_tree) = self.build_cache_tree(&idx)?;
+        // A commit that changes nothing is refused, except a merge.
+        if check == EmptyCheck::UnchangedTree && parents.len() <= 1 {
+            let unchanged = match parents.first() {
+                Some(parent) => *self.commit(&parent.to_hex())?.tree() == tree_oid,
                 None => idx.is_empty(),
             };
             if unchanged {
                 return Err(Error::EmptyCommit);
             }
         }
-        let mut parents: Vec<Oid> = parent_oid.into_iter().collect();
-        parents.extend(merge_heads.iter().copied());
 
         let content = Self::format_commit(
             &tree_oid,
@@ -283,15 +365,9 @@ impl Repository {
 
         // Update HEAD, logging "commit: <subject>" as Git does.
         let subject = message.lines().next().unwrap_or("");
-        let reflog_message = if !merge_heads.is_empty() {
-            format!("commit (merge): {}", subject)
-        } else if parent_oid.is_some() {
-            format!("commit: {}", subject)
-        } else {
-            format!("commit (initial): {}", subject)
-        };
-        self.update_head(&commit_oid, parent_oid, committer, &reflog_message)?;
-        if !merge_heads.is_empty() {
+        let reflog_message = format!("{}: {}", kind, subject);
+        self.update_head(&commit_oid, head, committer, &reflog_message)?;
+        if !amend && !merge_heads.is_empty() {
             self.clear_merge_state()?;
         }
 

@@ -30,6 +30,10 @@ impl ReflogEntry {
         &self.old_oid
     }
 
+    pub(crate) fn set_old_oid(&mut self, oid: Oid) {
+        self.old_oid = oid;
+    }
+
     /// The value after the update (all zeros when the reference was deleted).
     pub fn new_oid(&self) -> &Oid {
         &self.new_oid
@@ -91,6 +95,10 @@ impl Reflog {
     }
 
     fn should_log(&self, refname: &str) -> bool {
+        // The stash list is its reflog, so it is always written.
+        if refname == "refs/stash" {
+            return true;
+        }
         match self.mode {
             LogAll::Always => true,
             LogAll::True => {
@@ -194,6 +202,27 @@ impl Reflog {
         }
         entries.reverse();
         Ok(entries)
+    }
+}
+
+impl Reflog {
+    /// Replaces the reflog with `entries` (newest first), or deletes it when
+    /// empty.
+    pub(crate) fn rewrite(&self, refname: &str, entries: &[ReflogEntry]) -> Result<()> {
+        if entries.is_empty() {
+            return self.delete(refname);
+        }
+        let mut content = String::new();
+        for entry in entries.iter().rev() {
+            content.push_str(&format!(
+                "{} {} {}\t{}\n",
+                entry.old_oid.to_hex(),
+                entry.new_oid.to_hex(),
+                entry.committer.to_git_string(),
+                entry.message
+            ));
+        }
+        crate::infra::write_file_atomic(self.path(refname), content.as_bytes())
     }
 }
 

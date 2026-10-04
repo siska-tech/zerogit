@@ -250,7 +250,7 @@ impl Repository {
     }
 
     /// The flattened tree of a commit (empty for `None`).
-    fn flat_tree(&self, commit: Option<&Oid>) -> Result<Flat> {
+    pub(crate) fn flat_tree(&self, commit: Option<&Oid>) -> Result<Flat> {
         let mut flat = BTreeMap::new();
         if let Some(oid) = commit {
             let tree = *self.commit(&oid.to_hex())?.tree();
@@ -263,7 +263,7 @@ impl Repository {
         Ok(flat)
     }
 
-    fn conflict_style(&self) -> Result<ConflictStyle> {
+    pub(crate) fn conflict_style(&self) -> Result<ConflictStyle> {
         Ok(match self.config()?.get("merge", "conflictstyle") {
             Some(style)
                 if style.eq_ignore_ascii_case("diff3") || style.eq_ignore_ascii_case("zdiff3") =>
@@ -516,7 +516,7 @@ impl Repository {
     /// whose work tree file differs from the index, an untracked file (not
     /// ignored) where a file is written, or an untracked file where a
     /// directory is needed.
-    fn check_overwrites(
+    pub(crate) fn check_overwrites(
         &self,
         idx: &Index,
         ours: &Flat,
@@ -586,7 +586,7 @@ impl Repository {
 
     /// Writes a merge result to the work tree and the index. Paths whose
     /// result equals ours are left alone.
-    fn apply_merge(
+    pub(crate) fn apply_merge(
         &self,
         idx: &mut Index,
         worktree: &mut Worktree,
@@ -687,7 +687,6 @@ impl Repository {
         let ours = self.flat_tree(head.as_ref())?;
         let mut idx = self.read_index()?;
         let mut worktree = self.worktree()?;
-        let store = self.object_store();
 
         // Paths whose index state differs from HEAD.
         let mut paths: Vec<String> = Vec::new();
@@ -704,10 +703,27 @@ impl Repository {
                 paths.push(path.clone());
             }
         }
-        for path in &paths {
+        self.restore_paths(&mut idx, &mut worktree, &ours, &paths)?;
+        self.write_index(&idx)?;
+        self.clear_merge_state()
+    }
+}
+
+impl Repository {
+    /// Resets `paths` to their version in `target` in both the index and the
+    /// work tree (removing them where `target` has none).
+    pub(crate) fn restore_paths(
+        &self,
+        idx: &mut Index,
+        worktree: &mut Worktree,
+        target: &Flat,
+        paths: &[String],
+    ) -> Result<()> {
+        let store = self.object_store();
+        for path in paths {
             let native = native_path(Path::new(path));
             let index_path = PathBuf::from(path);
-            match ours.get(path) {
+            match target.get(path) {
                 Some((oid, mode)) => {
                     worktree.write(&native, &store.read(oid)?.content, *mode)?;
                     idx.remove(&index_path);
@@ -719,9 +735,23 @@ impl Repository {
                 }
             }
         }
-        self.write_index(&idx)?;
-        self.clear_merge_state()
+        Ok(())
     }
+}
+
+/// The stage 0 entries of an index as a flattened tree (intent-to-add
+/// entries have no content and are left out).
+pub(crate) fn index_flat(idx: &Index) -> Flat {
+    idx.entries()
+        .iter()
+        .filter(|e| e.stage() == 0 && !e.intent_to_add())
+        .map(|e| {
+            (
+                String::from_utf8_lossy(&crate::index::path_key(e.path())).into_owned(),
+                (*e.oid(), e.mode()),
+            )
+        })
+        .collect()
 }
 
 /// Paths where the index (stage 0) differs from the tree.

@@ -103,3 +103,49 @@ pub fn conflicted_repository() -> TempDir {
     assert!(!git_output(dir, &["merge", "-q", "other"]).status.success());
     temp
 }
+
+pub fn copy_dir(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+/// Copies a prepared repository so Git and zerogit can each merge in one.
+pub fn twin(source: &Path) -> TempDir {
+    let temp = TempDir::new().unwrap();
+    copy_dir(source, temp.path());
+    temp
+}
+
+/// Files of the work tree (excluding .git) with their contents.
+pub fn worktree_files(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_name() == ".git" {
+                continue;
+            }
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                walk(root, &path, out);
+            } else {
+                let rel = path.strip_prefix(root).unwrap();
+                out.push((
+                    rel.to_string_lossy().replace('\\', "/"),
+                    fs::read(&path).unwrap(),
+                ));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
+}

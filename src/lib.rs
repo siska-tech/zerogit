@@ -60,6 +60,7 @@ pub mod merge;
 pub mod objects;
 pub mod refs;
 pub mod repository;
+pub mod stash;
 pub mod status;
 pub(crate) mod worktree;
 
@@ -90,6 +91,9 @@ pub use log::LogOptions;
 
 // Re-export merge types
 pub use merge::{FastForward, MergeOptions, MergeOutcome};
+
+// Re-export stash types
+pub use stash::{StashApplyOutcome, StashEntry, StashOptions};
 
 // Re-export diff types
 pub use diff::{

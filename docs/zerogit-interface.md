@@ -477,6 +477,22 @@ pub fn merge_bases(&self, a: &Oid, b: &Oid) -> Result<Vec<Oid>>
 
 内容のマージは`git merge`と同じhistogram diffとzealousレベルの調整で行い、`merge.conflictStyle`（`merge`/`diff3`。`zdiff3`は`diff3`として扱う）に従う。片側だけの変更・同じ変更は採用し、両側の変更が重なるか接すればコンフリクトになる。変更/削除、型の変更（ファイル・symlink・submodule）、バイナリはマーカーを書かずにコンフリクトとする。実行ビットは内容と別にマージする。リネームは検出しない。コンフリクトはindexのstage 1〜3と`MERGE_HEAD`・`MERGE_MSG`・`MERGE_MODE`・`ORIG_HEAD`に記録し、`create_commit`（またはGitの`git commit`）で完了、`abort_merge`（または`git merge --abort`）で中止できる。`abort_merge`はマージで変わったパスだけをHEADに戻し、それ以外の作業ツリーの変更は残す。
 
+##### `Repository::stash_save` / `stash_list` / `stash_apply` / `stash_pop` / `stash_drop`
+
+```rust
+pub fn stash_save(&self, name: &str, email: &str, options: &StashOptions) -> Result<Option<Oid>>
+pub fn stash_list(&self) -> Result<Vec<StashEntry>>
+pub fn stash_apply(&self, index: usize, restore_index: bool) -> Result<StashApplyOutcome>
+pub fn stash_pop(&self, index: usize, restore_index: bool) -> Result<StashApplyOutcome>
+pub fn stash_drop(&self, index: usize) -> Result<()>
+```
+
+| 項目   | 説明 |
+| ------ | ---- |
+| 保存 | indexの状態のコミット（親はHEAD）、追跡ファイルの作業ツリーの状態のコミット（親はHEAD・index・未追跡）をGitと同じ形式とメッセージ（`WIP on <branch>: <短縮OID> <件名>`、`On <branch>: <メッセージ>`）で書き、`refs/stash`とreflogを更新して、indexと作業ツリーをHEADに戻す。`StashOptions::include_untracked(true)`で無視されていない未追跡ファイルも退避・削除する。変更がなければ`None`で何もしない |
+| 適用 | stashのベースを共通祖先とする3-way merge。`restore_index`がfalseなら変更は未ステージ（stashで追加したファイルはステージ済み）、trueならindexの状態も戻す。コンフリクトは`Updated upstream`/`Stashed changes`のマーカーとindexのstageで記録し、`stash_pop`はstashを残す |
+| エラー | `RefNotFound`（stashがない）、`UnmergedPaths`、`MergeInProgress`、`LocalChangesWouldBeOverwritten`、`UnsupportedMerge`（`restore_index`でindexの変更がコンフリクト）。いずれも何も変更しない |
+
 ##### `Repository::reflog`
 
 ```rust

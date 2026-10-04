@@ -280,6 +280,18 @@ impl Commit {
         self.message.lines().next().unwrap_or("")
     }
 
+    /// Returns the subject as Git formats it (`%s`): the first paragraph of
+    /// the message with its lines joined by spaces.
+    pub(crate) fn subject(&self) -> String {
+        self.message
+            .lines()
+            .skip_while(|l| l.trim().is_empty())
+            .take_while(|l| !l.trim().is_empty())
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// Returns true if this is a root commit (no parents).
     pub fn is_root(&self) -> bool {
         self.parents.is_empty()

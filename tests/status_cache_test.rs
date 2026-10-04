@@ -164,7 +164,19 @@ fn files_with_matching_stat_data_are_not_read() {
         return;
     }
     let_a_second_pass();
+    // Git rewrites the index only when a refresh changes something, and an
+    // index from the same second as the file would leave it racily clean
+    // (read by content). Touch another file so the refresh writes a newer
+    // index.
+    write(dir, "a.txt", "content of a.txt\n");
     git(dir, &["update-index", "-q", "--refresh"]);
+    let modified = |path: &str| {
+        std::fs::metadata(dir.join(path))
+            .unwrap()
+            .modified()
+            .unwrap()
+    };
+    assert!(modified(".git/index") > modified("secret.txt"));
 
     // Reading the unreadable file would fail; matching stat data skips it.
     let repo = Repository::open(dir).unwrap();

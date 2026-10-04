@@ -19,29 +19,11 @@
 
 ## フィクスチャの作成
 
-フィクスチャの定義は `create_fixtures.sh` に一本化しています。
+事前の準備は不要です。テストが `common::fixtures::fixture("simple")` のように呼ぶと、そのフィクスチャがまだなければGitで作成します。定義は `tests/common/fixtures.rs` にあります。bashは使わないので、Windowsでもそのまま `cargo test` を実行できます。
 
-### Linux / macOS
-
-```bash
-cd tests/fixtures
-bash create_fixtures.sh
-```
-
-### Windows
-
-Git for Windows 付属のbashで `create_fixtures.sh` を実行します。
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tests\fixtures\create_fixtures.ps1
-```
-
-## CI設定
-
-`.github/workflows/ci.yml` では、全OSで `bash create_fixtures.sh` を実行してからテストします。
+作成中のリポジトリは `.<名前>-<プロセスID>` に作ってから所定の名前に移すため、複数のテストバイナリが同時に実行されても、作りかけのフィクスチャを読むことはありません。
 
 ## 注意事項
 
 - フィクスチャは `.gitignore` に追加されているため、リポジトリにはコミットされません
-- テスト実行前に必ずフィクスチャ作成スクリプトを実行してください
-- スクリプトは冪等性があり、再実行しても問題ありません
+- 定義を変えたときは、該当するディレクトリを削除すると次のテスト実行で作り直されます

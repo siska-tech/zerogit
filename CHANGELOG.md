@@ -5,6 +5,10 @@
 
 ## [Unreleased]
 
+### Development
+- テスト用fixtureを、テストが初回に使うときにGitで自動生成するようにした。クリーンなクローンで`cargo test`だけを実行して通る。`create_fixtures.sh`・`create_fixtures.ps1`は削除した (#47)
+- CIのcoreのlintを`cargo clippy --all-targets -- -D warnings`にし、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`を追加した。既存の指摘と壊れたdocリンクを解消した (#47)
+
 ## [0.5.0] - 2026-10-04
 
 ### Added

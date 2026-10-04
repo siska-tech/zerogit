@@ -2484,7 +2484,7 @@ mod tests {
         }
         content.push_str("author Test User <test@example.com> 1700000000 +0000\n");
         content.push_str("committer Test User <test@example.com> 1700000000 +0000\n");
-        content.push_str("\n");
+        content.push('\n');
         content.push_str(message);
         content
     }
@@ -2768,7 +2768,7 @@ mod tests {
             "committer Test User <test@example.com> {} +0000\n",
             timestamp
         ));
-        content.push_str("\n");
+        content.push('\n');
         content.push_str(message);
         content
     }

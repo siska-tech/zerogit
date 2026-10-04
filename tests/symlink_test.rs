@@ -4,7 +4,7 @@ mod common;
 
 use common::*;
 use std::fs;
-use zerogit::{FileStatus, Repository};
+use zerogit::Repository;
 
 /// Commits a symlink entry `link -> target.txt` on a new branch `with-link`
 /// without creating a link on disk, then returns to `main`.
@@ -71,6 +71,7 @@ fn checkout_with_symlinks_disabled_writes_target_as_file() {
 mod unix {
     use super::*;
     use std::os::unix::fs::symlink;
+    use zerogit::FileStatus;
 
     /// `git ls-files -s` for `path` after staging it with zerogit and with Git.
     fn staged_by_both(dir: &std::path::Path, path: &str) -> (Vec<String>, Vec<String>) {

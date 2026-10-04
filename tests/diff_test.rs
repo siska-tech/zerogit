@@ -1,26 +1,18 @@
 //! Integration tests for Tree Diff and Commit Diff functionality.
 
+mod common;
+
+use common::fixtures::fixture;
+
 use std::fs;
 use std::path::Path;
 use zerogit::diff::DiffStatus;
 use zerogit::Repository;
 
-/// Path to the diff test fixture
-const DIFF_FIXTURE: &str = "tests/fixtures/diff";
-
-/// Path to the rename test fixture
-const RENAME_FIXTURE: &str = "tests/fixtures/rename";
-
-/// Path to the simple test fixture
-const SIMPLE_FIXTURE: &str = "tests/fixtures/simple";
-
-/// Path to the merge test fixture
-const MERGE_FIXTURE: &str = "tests/fixtures/merge";
-
 // TD-001: Detect added files
 #[test]
 fn test_td001_detect_added() {
-    let repo = Repository::open(DIFF_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("diff")).unwrap();
 
     // Get the two commits
     let commits: Vec<_> = repo.log().unwrap().take(2).collect();
@@ -48,7 +40,7 @@ fn test_td001_detect_added() {
 // TD-002: Detect deleted files
 #[test]
 fn test_td002_detect_deleted() {
-    let repo = Repository::open(DIFF_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("diff")).unwrap();
 
     // Get the two commits
     let commits: Vec<_> = repo.log().unwrap().take(2).collect();
@@ -76,7 +68,7 @@ fn test_td002_detect_deleted() {
 // TD-003: Detect modified files
 #[test]
 fn test_td003_detect_modified() {
-    let repo = Repository::open(DIFF_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("diff")).unwrap();
 
     // Get the two commits
     let commits: Vec<_> = repo.log().unwrap().take(2).collect();
@@ -112,7 +104,7 @@ fn test_td003_detect_modified() {
 // TD-004: No changes when comparing same tree
 #[test]
 fn test_td004_same_tree_no_changes() {
-    let repo = Repository::open(SIMPLE_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("simple")).unwrap();
 
     let head = repo.head().unwrap();
     let commit = repo.commit(&head.oid().to_hex()).unwrap();
@@ -129,7 +121,7 @@ fn test_td004_same_tree_no_changes() {
 // TD-005: Empty old tree (initial commit)
 #[test]
 fn test_td005_empty_old_tree() {
-    let repo = Repository::open(DIFF_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("diff")).unwrap();
 
     // Get the initial commit (oldest)
     let commits: Vec<_> = repo.log().unwrap().collect();
@@ -156,7 +148,7 @@ fn test_td005_empty_old_tree() {
 // TD-006: Same tree comparison returns empty diff
 #[test]
 fn test_td006_identical_trees_empty_diff() {
-    let repo = Repository::open(SIMPLE_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("simple")).unwrap();
 
     let head = repo.head().unwrap();
     let commit = repo.commit(&head.oid().to_hex()).unwrap();
@@ -171,7 +163,7 @@ fn test_td006_identical_trees_empty_diff() {
 // TD-007: Nested paths are correctly reported
 #[test]
 fn test_td007_nested_paths() {
-    let repo = Repository::open(DIFF_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("diff")).unwrap();
 
     // Get the two commits
     let commits: Vec<_> = repo.log().unwrap().take(2).collect();
@@ -198,7 +190,7 @@ fn test_td007_nested_paths() {
 // TD-008: Multiple changes (A, D, M mixed)
 #[test]
 fn test_td008_multiple_changes() {
-    let repo = Repository::open(DIFF_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("diff")).unwrap();
 
     // Get the two commits
     let commits: Vec<_> = repo.log().unwrap().take(2).collect();
@@ -220,7 +212,7 @@ fn test_td008_multiple_changes() {
 // TD-009: Rename detection
 #[test]
 fn test_td009_rename_detection() {
-    let repo = Repository::open(RENAME_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("rename")).unwrap();
 
     // Get the two commits
     let commits: Vec<_> = repo.log().unwrap().take(2).collect();
@@ -249,7 +241,7 @@ fn test_td009_rename_detection() {
 // TD-010: Stats calculation
 #[test]
 fn test_td010_stats_calculation() {
-    let repo = Repository::open(DIFF_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("diff")).unwrap();
 
     // Get the two commits
     let commits: Vec<_> = repo.log().unwrap().take(2).collect();
@@ -276,7 +268,7 @@ fn test_td010_stats_calculation() {
 // Additional: status_char returns correct characters
 #[test]
 fn test_status_char() {
-    let repo = Repository::open(DIFF_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("diff")).unwrap();
 
     // Get the two commits
     let commits: Vec<_> = repo.log().unwrap().take(2).collect();
@@ -303,7 +295,7 @@ fn test_status_char() {
 // Additional: Deltas are sorted by path
 #[test]
 fn test_deltas_sorted_by_path() {
-    let repo = Repository::open(DIFF_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("diff")).unwrap();
 
     // Get the two commits
     let commits: Vec<_> = repo.log().unwrap().take(2).collect();
@@ -325,7 +317,7 @@ fn test_deltas_sorted_by_path() {
 // Additional: Iterator support
 #[test]
 fn test_iterator_support() {
-    let repo = Repository::open(DIFF_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("diff")).unwrap();
 
     let commits: Vec<_> = repo.log().unwrap().take(2).collect();
     let new_commit = commits[0].as_ref().unwrap();
@@ -351,7 +343,7 @@ fn test_iterator_support() {
 // Additional: OID accessors
 #[test]
 fn test_oid_accessors() {
-    let repo = Repository::open(DIFF_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("diff")).unwrap();
 
     let commits: Vec<_> = repo.log().unwrap().take(2).collect();
     let new_commit = commits[0].as_ref().unwrap();
@@ -397,7 +389,7 @@ fn test_oid_accessors() {
 // CD-001: Normal commit (single parent)
 #[test]
 fn test_cd001_normal_commit() {
-    let repo = Repository::open(DIFF_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("diff")).unwrap();
 
     // Get the second commit (has one parent)
     let commits: Vec<_> = repo.log().unwrap().take(2).collect();
@@ -418,7 +410,7 @@ fn test_cd001_normal_commit() {
 // CD-002: Initial commit (no parent)
 #[test]
 fn test_cd002_initial_commit() {
-    let repo = Repository::open(DIFF_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("diff")).unwrap();
 
     // Get the initial commit (oldest)
     let commits: Vec<_> = repo.log().unwrap().collect();
@@ -444,7 +436,7 @@ fn test_cd002_initial_commit() {
 // CD-003: Merge commit (multiple parents)
 #[test]
 fn test_cd003_merge_commit() {
-    let repo = Repository::open(MERGE_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("merge")).unwrap();
 
     // Get HEAD which should be the merge commit
     let head = repo.head().unwrap();
@@ -470,7 +462,7 @@ fn test_cd003_merge_commit() {
 // CD-004: Empty commit (no changes)
 #[test]
 fn test_cd004_empty_commit_equivalent() {
-    let repo = Repository::open(SIMPLE_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("simple")).unwrap();
 
     let head = repo.head().unwrap();
     let commit = repo.commit(&head.oid().to_hex()).unwrap();
@@ -489,7 +481,7 @@ fn test_cd004_empty_commit_equivalent() {
 // CD-005: Multiple change types (A/D/M mixed)
 #[test]
 fn test_cd005_mixed_changes() {
-    let repo = Repository::open(DIFF_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("diff")).unwrap();
 
     let commits: Vec<_> = repo.log().unwrap().take(2).collect();
     let commit = commits[0].as_ref().unwrap();
@@ -517,7 +509,7 @@ fn test_cd005_mixed_changes() {
 // CD-006: Log integration
 #[test]
 fn test_cd006_log_integration() {
-    let repo = Repository::open(DIFF_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("diff")).unwrap();
 
     // Iterate through all commits and get their diffs
     let mut count = 0;
@@ -555,7 +547,7 @@ fn test_cd006_log_integration() {
 // ============================================================================
 
 /// Helper to copy a fixture to a temporary directory for modification
-fn copy_fixture_to_temp(fixture_path: &str) -> tempfile::TempDir {
+fn copy_fixture_to_temp(fixture_path: &Path) -> tempfile::TempDir {
     let temp_dir = tempfile::tempdir().unwrap();
     let target = temp_dir.path();
 
@@ -575,14 +567,14 @@ fn copy_fixture_to_temp(fixture_path: &str) -> tempfile::TempDir {
         }
     }
 
-    copy_dir_all(Path::new(fixture_path), target);
+    copy_dir_all(fixture_path, target);
     temp_dir
 }
 
 // WD-001: Unstaged modification
 #[test]
 fn test_wd001_unstaged_modification() {
-    let temp = copy_fixture_to_temp(DIFF_FIXTURE);
+    let temp = copy_fixture_to_temp(&fixture("diff"));
     let repo = Repository::open(temp.path()).unwrap();
 
     // Modify a file without staging
@@ -606,7 +598,7 @@ fn test_wd001_unstaged_modification() {
 // WD-002: Unstaged deletion
 #[test]
 fn test_wd002_unstaged_deletion() {
-    let temp = copy_fixture_to_temp(DIFF_FIXTURE);
+    let temp = copy_fixture_to_temp(&fixture("diff"));
     let repo = Repository::open(temp.path()).unwrap();
 
     // Delete a file without staging
@@ -630,7 +622,7 @@ fn test_wd002_unstaged_deletion() {
 // WD-003: Untracked file (shows as Added in diff_index_to_workdir)
 #[test]
 fn test_wd003_untracked_file() {
-    let temp = copy_fixture_to_temp(DIFF_FIXTURE);
+    let temp = copy_fixture_to_temp(&fixture("diff"));
     let repo = Repository::open(temp.path()).unwrap();
 
     // Create a new untracked file
@@ -656,7 +648,7 @@ fn test_wd003_untracked_file() {
 // WD-004: Staged modification (diff_head_to_index)
 #[test]
 fn test_wd004_staged_modification() {
-    let temp = copy_fixture_to_temp(DIFF_FIXTURE);
+    let temp = copy_fixture_to_temp(&fixture("diff"));
     let repo = Repository::open(temp.path()).unwrap();
 
     // Modify and stage a file
@@ -681,7 +673,7 @@ fn test_wd004_staged_modification() {
 // WD-005: Staged addition (new file added to index)
 #[test]
 fn test_wd005_staged_addition() {
-    let temp = copy_fixture_to_temp(DIFF_FIXTURE);
+    let temp = copy_fixture_to_temp(&fixture("diff"));
     let repo = Repository::open(temp.path()).unwrap();
 
     // Create and stage a new file
@@ -708,7 +700,7 @@ fn test_wd005_staged_addition() {
 // WD-006: Clean state (no changes)
 #[test]
 fn test_wd006_clean_state() {
-    let repo = Repository::open(DIFF_FIXTURE).unwrap();
+    let repo = Repository::open(fixture("diff")).unwrap();
 
     // Fixture is clean, all diffs should be empty
     let unstaged = repo.diff_index_to_workdir().unwrap();
@@ -732,7 +724,7 @@ fn test_wd006_clean_state() {
 // WD-007: HEAD diff (combined staged + unstaged)
 #[test]
 fn test_wd007_head_diff_combined() {
-    let temp = copy_fixture_to_temp(DIFF_FIXTURE);
+    let temp = copy_fixture_to_temp(&fixture("diff"));
     let repo = Repository::open(temp.path()).unwrap();
 
     // Stage one change
@@ -761,7 +753,7 @@ fn test_wd007_head_diff_combined() {
 // WD-008: Status consistency
 #[test]
 fn test_wd008_status_consistency() {
-    let temp = copy_fixture_to_temp(DIFF_FIXTURE);
+    let temp = copy_fixture_to_temp(&fixture("diff"));
     let repo = Repository::open(temp.path()).unwrap();
 
     // Create various changes

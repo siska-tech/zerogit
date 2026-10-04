@@ -397,14 +397,14 @@ fn sha1_hash(data: &[u8]) -> [u8; 20] {
 
         let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
 
-        for i in 0..80 {
+        for (i, &wi) in w.iter().enumerate() {
             let (f, k) = match i {
                 0..=19 => ((b & c) | ((!b) & d), Wrapping(0x5A827999u32)),
                 20..=39 => (b ^ c ^ d, Wrapping(0x6ED9EBA1u32)),
                 40..=59 => ((b & c) | (b & d) | (c & d), Wrapping(0x8F1BBCDCu32)),
                 _ => (b ^ c ^ d, Wrapping(0xCA62C1D6u32)),
             };
-            let temp = Wrapping(a.0.rotate_left(5)) + f + e + k + Wrapping(w[i]);
+            let temp = Wrapping(a.0.rotate_left(5)) + f + e + k + Wrapping(wi);
             e = d;
             d = c;
             c = Wrapping(b.0.rotate_left(30));

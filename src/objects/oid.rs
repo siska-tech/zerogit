@@ -281,7 +281,7 @@ mod tests {
     fn test_clone_copy() {
         let oid1 = Oid::from_hex(EMPTY_SHA1).unwrap();
         let oid2 = oid1; // Copy
-        let oid3 = oid1.clone(); // Clone
+        let oid3 = oid1; // Clone
         assert_eq!(oid1, oid2);
         assert_eq!(oid1, oid3);
     }

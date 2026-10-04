@@ -1,11 +1,10 @@
 //! Integration tests for remote branches and tags.
 
-use std::path::PathBuf;
-use zerogit::Repository;
+mod common;
 
-fn fixtures_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
-}
+use common::fixtures::fixture;
+
+use zerogit::Repository;
 
 // ============================================================================
 // Remote Branches Tests (RB-001 to RB-004)
@@ -14,7 +13,7 @@ fn fixtures_path() -> PathBuf {
 // RB-001: リモートブランチ一覧 - refs/remotes/origin/* が存在すれば全リモートブランチを取得
 #[test]
 fn test_rb001_remote_branches_list() {
-    let repo = Repository::open(fixtures_path().join("remotes")).unwrap();
+    let repo = Repository::open(fixture("remotes")).unwrap();
     let branches = repo.remote_branches().unwrap();
 
     // origin/main, origin/develop, origin/feature/xyz, upstream/main が存在するはず
@@ -29,7 +28,7 @@ fn test_rb001_remote_branches_list() {
 // RB-002: 複数リモート - origin, upstream が存在する場合、両方のブランチを取得
 #[test]
 fn test_rb002_multiple_remotes() {
-    let repo = Repository::open(fixtures_path().join("remotes")).unwrap();
+    let repo = Repository::open(fixture("remotes")).unwrap();
     let branches = repo.remote_branches().unwrap();
 
     let remotes: Vec<&str> = branches.iter().map(|b| b.remote()).collect();
@@ -40,7 +39,7 @@ fn test_rb002_multiple_remotes() {
 // RB-003: ネストしたブランチ - feature/xyz 形式を正しくパース
 #[test]
 fn test_rb003_nested_branch_name() {
-    let repo = Repository::open(fixtures_path().join("remotes")).unwrap();
+    let repo = Repository::open(fixture("remotes")).unwrap();
     let branches = repo.remote_branches().unwrap();
 
     let nested = branches
@@ -57,7 +56,7 @@ fn test_rb003_nested_branch_name() {
 // RB-004: リモートなし - refs/remotes が空の場合、空のVecを返す
 #[test]
 fn test_rb004_no_remotes() {
-    let repo = Repository::open(fixtures_path().join("simple")).unwrap();
+    let repo = Repository::open(fixture("simple")).unwrap();
     let branches = repo.remote_branches().unwrap();
 
     assert!(branches.is_empty());
@@ -66,7 +65,7 @@ fn test_rb004_no_remotes() {
 // Additional: RemoteBranch accessor methods
 #[test]
 fn test_remote_branch_accessors() {
-    let repo = Repository::open(fixtures_path().join("remotes")).unwrap();
+    let repo = Repository::open(fixture("remotes")).unwrap();
     let branches = repo.remote_branches().unwrap();
 
     let origin_main = branches
@@ -87,7 +86,7 @@ fn test_remote_branch_accessors() {
 // T-001: 軽量タグ一覧 - refs/tags/* が存在すれば全タグを取得
 #[test]
 fn test_t001_lightweight_tags() {
-    let repo = Repository::open(fixtures_path().join("tags")).unwrap();
+    let repo = Repository::open(fixture("tags")).unwrap();
     let tags = repo.tags().unwrap();
 
     let names: Vec<&str> = tags.iter().map(|t| t.name()).collect();
@@ -97,7 +96,7 @@ fn test_t001_lightweight_tags() {
 // T-002: 注釈付きタグ - tag objectが存在する場合、message, taggerを取得
 #[test]
 fn test_t002_annotated_tag() {
-    let repo = Repository::open(fixtures_path().join("tags")).unwrap();
+    let repo = Repository::open(fixture("tags")).unwrap();
     let tags = repo.tags().unwrap();
 
     let annotated = tags
@@ -115,7 +114,7 @@ fn test_t002_annotated_tag() {
 // T-003: 混在 - 軽量・注釈付き両方を正しく取得
 #[test]
 fn test_t003_mixed_tags() {
-    let repo = Repository::open(fixtures_path().join("tags")).unwrap();
+    let repo = Repository::open(fixture("tags")).unwrap();
     let tags = repo.tags().unwrap();
 
     // v1.0.0 は軽量タグ
@@ -138,7 +137,7 @@ fn test_t003_mixed_tags() {
 // Additional: Tags are sorted
 #[test]
 fn test_tags_sorted() {
-    let repo = Repository::open(fixtures_path().join("tags")).unwrap();
+    let repo = Repository::open(fixture("tags")).unwrap();
     let tags = repo.tags().unwrap();
 
     let names: Vec<&str> = tags.iter().map(|t| t.name()).collect();
@@ -150,7 +149,7 @@ fn test_tags_sorted() {
 // Additional: Tag target points to a valid commit
 #[test]
 fn test_tag_target_valid() {
-    let repo = Repository::open(fixtures_path().join("tags")).unwrap();
+    let repo = Repository::open(fixture("tags")).unwrap();
     let tags = repo.tags().unwrap();
 
     for tag in &tags {
@@ -163,7 +162,7 @@ fn test_tag_target_valid() {
 // Additional: No tags returns empty vec
 #[test]
 fn test_no_tags() {
-    let repo = Repository::open(fixtures_path().join("simple")).unwrap();
+    let repo = Repository::open(fixture("simple")).unwrap();
     let tags = repo.tags().unwrap();
 
     assert!(tags.is_empty());
@@ -177,7 +176,7 @@ fn test_no_tags() {
 fn test_ref_store_remote_branches() {
     use zerogit::refs::RefStore;
 
-    let git_dir = fixtures_path().join("remotes").join(".git");
+    let git_dir = fixture("remotes").join(".git");
     let store = RefStore::new(&git_dir);
 
     let branches = store.remote_branches().unwrap();
@@ -193,7 +192,7 @@ fn test_ref_store_remote_branches() {
 fn test_ref_store_remotes() {
     use zerogit::refs::RefStore;
 
-    let git_dir = fixtures_path().join("remotes").join(".git");
+    let git_dir = fixture("remotes").join(".git");
     let store = RefStore::new(&git_dir);
 
     let remotes = store.remotes().unwrap();

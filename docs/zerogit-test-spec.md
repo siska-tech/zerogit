@@ -74,26 +74,17 @@ jobs:
 
 ### 2.3 テストフィクスチャ
 
-テスト用Gitリポジトリを `tests/fixtures/` に配置。
+テスト用Gitリポジトリは `tests/fixtures/create_fixtures.sh` で生成する（git管理外）。`simple`、`empty`、`branches`、`remotes`、`tags`、`diff`、`rename`、`merge`がある。生成時はユーザー・システムのGit設定と自動メンテナンスを無効にし、作成者と日時を固定する。
 
-```
-tests/
-├── fixtures/
-│   ├── simple/           # 基本的なリポジトリ
-│   │   └── .git/
-│   ├── empty/            # 空のリポジトリ（コミットなし）
-│   │   └── .git/
-│   ├── branches/         # 複数ブランチ
-│   │   └── .git/
-│   ├── merge/            # マージコミットあり
-│   │   └── .git/
-│   ├── large/            # 多数のファイル・コミット
-│   │   └── .git/
-│   └── corrupted/        # 破損したオブジェクト
-│       └── .git/
-└── integration/
-    └── *.rs
-```
+Phase 3のテスト（`pack_*`、`packed_refs_test`、`blob_diff_test`、`rename_test`、`document_flow_test`）は、各テストが一時ディレクトリにGit CLIでリポジトリを作る。Git CLIはfixture生成と期待値の比較にだけ使い、製品コードからは呼ばない。テスト中はバックグラウンドの自動repackを防ぐため、`maintenance.auto=false`と`gc.auto=0`を環境変数で与える。
+
+| テスト | 内容 |
+| --- | --- |
+| `pack_index_test` / `pack_reader_test` | `git show-index`・`git cat-file`との一致、idx v1の拒否、破損・切り詰めでpanicしないこと |
+| `pack_integration_test` | repack・pack-refsの前後で全APIの結果が一致すること、loose/複数pack/重複/短縮OIDの衝突、外部gcへの追従、未対応形式 |
+| `blob_diff_test` | `git diff --numstat --minimal`との一致と差分からの復元（loose/pack） |
+| `rename_test` | `git diff --raw -M100%`との旧新パス・旧新modeの一致 |
+| `document_flow_test` | 文書差分フロー、OID固定、破損・省略・未対応を空の差分にしないこと |
 
 ### 2.4 フィクスチャ生成スクリプト
 
@@ -735,6 +726,9 @@ fn non_ascii_filename_works() {
 | P-001 | オブジェクト読み取り | 1000オブジェクト | 1秒以内   |
 | P-002 | status               | 10000ファイル    | 1秒以内   |
 | P-003 | log走査              | 1000コミット     | 500ms以内 |
+| P-004 | 行差分・pack読み取り | `examples/measure_document_diff.rs` | 処理上限の既定値の根拠（README参照） |
+
+P-004は`cargo run --release --example measure_document_diff`で実行する。行数（1k/5k/20k）×変更率（1%/10%/全置換）について、ユニーク行の文書と繰り返しの多い文書（最悪ケース）の計算量・時間を測る。あわせて、1,000コミット・50文書をpack化したリポジトリで、履歴走査・変更一覧・行差分の時間を測る。
 
 ```rust
 #[test]

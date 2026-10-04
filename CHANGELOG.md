@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-04
+
 ### Added
 - `Error::UnmergedPaths`: indexにコンフリクト（stage 1〜3）が残っている場合のエラー
 - `Index::get_stage()`、`Index::has_conflicts()`、`Index::conflicted_paths()`
@@ -282,6 +284,7 @@ Phase 1: Repository Layer（読み取り操作）の完全実装。
 - 対応プラットフォーム: Linux, macOS, Windows
 - テストカバレッジ: 94%以上
 
+[0.5.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.5.0
 [0.4.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.4.0
 [0.3.7]: https://github.com/siska-tech/zerogit/releases/tag/v0.3.7
 [0.3.6]: https://github.com/siska-tech/zerogit/releases/tag/v0.3.6

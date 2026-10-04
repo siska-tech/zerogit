@@ -11,7 +11,7 @@ categories = ["development-tools"]
 exclude = ["tests/"]
 
 [dependencies]
-zerogit = { path = "..", version = "0.4" }
+zerogit = { path = "..", version = "0.5" }
 ureq = { version = "2", default-features = false, features = ["tls"], optional = true }
 
 [features]

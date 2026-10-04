@@ -2,7 +2,7 @@
 //! clone).
 
 use crate::error::{Error, Result};
-use crate::infra::write_file_atomic;
+use crate::infra::LockFile;
 use crate::objects::Oid;
 use crate::refs::reflog::zero_oid;
 use crate::repository::Repository;
@@ -53,6 +53,10 @@ impl Repository {
             .strip_prefix("refs/")
             .ok_or_else(|| Error::InvalidRefName(name.to_owned()))?;
         crate::repository::validate_ref_name("reference", rest)?;
+        // Lock the reference before reading it, so that the comparison and
+        // the update are one step (compare-and-swap), as in Git.
+        let path = self.git_dir().join(name);
+        let mut lock = LockFile::acquire(&path)?;
         let current = self.find_reference(name)?;
         if let Some(expected) = expected {
             if current != expected {
@@ -63,12 +67,9 @@ impl Repository {
         let who = self.reflog_identity()?;
         match new {
             Some(oid) => {
-                let path = self.git_dir().join(name);
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                write_file_atomic(&path, format!("{}\n", oid.to_hex()).as_bytes())?;
+                lock.write_all(format!("{}\n", oid.to_hex()).as_bytes())?;
                 reflog.append(name, &current.unwrap_or_else(zero_oid), oid, &who, message)?;
+                lock.commit()?;
             }
             None => {
                 if current.is_none() {
@@ -77,7 +78,6 @@ impl Repository {
                 if self.ref_store().is_packed(name)? {
                     self.remove_packed_ref(name)?;
                 }
-                let path = self.git_dir().join(name);
                 match std::fs::remove_file(&path) {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -107,12 +107,9 @@ impl Repository {
                 crate::repository::validate_ref_name("reference", rest)?;
             }
         }
+        let mut lock = LockFile::acquire(self.git_dir().join(name))?;
         let old = self.find_reference(name)?;
-        let path = self.git_dir().join(name);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        write_file_atomic(&path, format!("ref: {}\n", target).as_bytes())?;
+        lock.write_all(format!("ref: {}\n", target).as_bytes())?;
         if let (Some(message), Some(new)) = (message, self.find_reference(target)?) {
             self.reflog_writer()?.append(
                 name,
@@ -122,7 +119,7 @@ impl Repository {
                 message,
             )?;
         }
-        Ok(())
+        lock.commit()
     }
 
     /// Returns whether an object exists (loose or packed).

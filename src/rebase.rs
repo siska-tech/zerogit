@@ -15,7 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::infra::write_file_atomic;
+use crate::infra::{write_locked, LockFile};
 use crate::merge::file::Labels;
 use crate::merge::tree::{merge_trees, Flat};
 use crate::merge::{index_flat, two_way};
@@ -159,7 +159,7 @@ impl State {
     fn save(&self, repo: &Repository) -> Result<()> {
         fs::create_dir_all(&self.dir)?;
         let write =
-            |name: &str, content: &str| write_file_atomic(self.dir.join(name), content.as_bytes());
+            |name: &str, content: &str| write_locked(self.dir.join(name), content.as_bytes());
         write(
             "head-name",
             &format!("{}\n", self.head_name.as_deref().unwrap_or("detached HEAD")),
@@ -419,18 +419,22 @@ impl Repository {
         let head = self.optional_head_oid()?;
         let from = self.flat_tree(head.as_ref())?;
         let to = self.flat_tree(Some(target))?;
-        let mut idx = self.read_index()?;
+        let (index_lock, mut idx) = self.lock_index()?;
+        let mut head_lock = LockFile::acquire(self.git_dir().join("HEAD"))?;
         let mut worktree = self.worktree()?;
         let result = two_way(&from, &to);
         self.check_overwrites(&idx, &from, &result, &mut worktree)?;
         self.apply_merge(&mut idx, &mut worktree, &from, &result)?;
-        self.write_index(&idx)?;
-        write_file_atomic(
-            self.git_dir().join("HEAD"),
-            format!("{}\n", target.to_hex()).as_bytes(),
+        index_lock.write(&idx)?;
+        head_lock.write_all(format!("{}\n", target.to_hex()).as_bytes())?;
+        self.reflog_writer()?.append(
+            "HEAD",
+            &head.unwrap_or_else(zero_oid),
+            target,
+            who,
+            message,
         )?;
-        self.reflog_writer()?
-            .append("HEAD", &head.unwrap_or_else(zero_oid), target, who, message)
+        head_lock.commit()
     }
 
     /// Replays the branch onto a new base, like `git rebase <upstream>` or
@@ -538,7 +542,7 @@ impl Repository {
 
             let base = self.flat_tree(commit.parents().first())?;
             let theirs = self.flat_tree(Some(&commit_oid))?;
-            let mut idx = self.read_index()?;
+            let (index_lock, mut idx) = self.lock_index()?;
             let ours = index_flat(&idx);
             let theirs_label = format!("{} ({})", Self::short(&commit_oid), subject);
             let base_label = format!("parent of {}", theirs_label);
@@ -551,7 +555,7 @@ impl Repository {
             let mut worktree = self.worktree()?;
             self.check_overwrites(&idx, &ours, &result, &mut worktree)?;
             self.apply_merge(&mut idx, &mut worktree, &ours, &result)?;
-            self.write_index(&idx)?;
+            index_lock.write(&idx)?;
 
             let conflicts = result.conflicted_paths();
             if !conflicts.is_empty() {
@@ -591,17 +595,17 @@ impl Repository {
         for path in conflicts {
             message.push_str(&format!("#\t{}\n", path));
         }
-        write_file_atomic(state.dir.join("author-script"), script.as_bytes())?;
-        write_file_atomic(state.dir.join("message"), message.as_bytes())?;
-        write_file_atomic(
+        write_locked(state.dir.join("author-script"), script.as_bytes())?;
+        write_locked(state.dir.join("message"), message.as_bytes())?;
+        write_locked(
             state.dir.join("stopped-sha"),
             format!("{}\n", commit_oid.to_hex()).as_bytes(),
         )?;
-        write_file_atomic(
+        write_locked(
             self.git_dir().join("REBASE_HEAD"),
             format!("{}\n", commit_oid.to_hex()).as_bytes(),
         )?;
-        write_file_atomic(self.git_dir().join("MERGE_MSG"), message.as_bytes())?;
+        write_locked(self.git_dir().join("MERGE_MSG"), message.as_bytes())?;
         state.stopped = Some(*commit_oid);
         Ok(())
     }
@@ -640,6 +644,7 @@ impl Repository {
         let new = self.object_store().write(ObjectType::Commit, &content)?;
         self.update_head(
             &new,
+            Some(*head),
             who,
             &format!("rebase ({}): {}", action, commit.subject()),
         )?;
@@ -655,7 +660,7 @@ impl Repository {
             .ok_or_else(|| Error::RefNotFound("HEAD".to_owned()))?;
         let reflog = self.reflog_writer()?;
         if let Some(branch) = &state.head_name {
-            write_file_atomic(
+            write_locked(
                 self.git_dir().join(branch),
                 format!("{}\n", new.to_hex()).as_bytes(),
             )?;
@@ -666,7 +671,7 @@ impl Repository {
                 who,
                 &format!("rebase (finish): {} onto {}", branch, state.onto.to_hex()),
             )?;
-            write_file_atomic(
+            write_locked(
                 self.git_dir().join("HEAD"),
                 format!("ref: {}\n", branch).as_bytes(),
             )?;
@@ -753,7 +758,7 @@ impl Repository {
     }
 
     fn reset_hard_to(&self, target: &Flat) -> Result<()> {
-        let mut idx = self.read_index()?;
+        let (index_lock, mut idx) = self.lock_index()?;
         let mut worktree = self.worktree()?;
         let mut paths: Vec<String> = Vec::new();
         for entry in idx.entries() {
@@ -782,7 +787,7 @@ impl Repository {
             }
         }
         self.restore_paths(&mut idx, &mut worktree, target, &changed)?;
-        self.write_index(&idx)
+        index_lock.write(&idx)
     }
 
     /// Abandons a rebase, like `git rebase --abort`: the index, the work
@@ -802,11 +807,11 @@ impl Repository {
         match &state.head_name {
             Some(branch) => {
                 // The branch itself never moved; make sure it is unchanged.
-                write_file_atomic(
+                write_locked(
                     self.git_dir().join(branch),
                     format!("{}\n", state.orig_head.to_hex()).as_bytes(),
                 )?;
-                write_file_atomic(
+                write_locked(
                     self.git_dir().join("HEAD"),
                     format!("ref: {}\n", branch).as_bytes(),
                 )?;
@@ -819,7 +824,7 @@ impl Repository {
                 )?;
             }
             None => {
-                write_file_atomic(
+                write_locked(
                     self.git_dir().join("HEAD"),
                     format!("{}\n", state.orig_head.to_hex()).as_bytes(),
                 )?;

@@ -222,7 +222,7 @@ impl Reflog {
                 entry.message
             ));
         }
-        crate::infra::write_file_atomic(self.path(refname), content.as_bytes())
+        crate::infra::write_locked(self.path(refname), content.as_bytes())
     }
 }
 

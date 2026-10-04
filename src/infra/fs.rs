@@ -3,6 +3,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::error::{Error, Result};
 
@@ -31,6 +32,11 @@ pub fn read_file<P: AsRef<Path>>(path: P) -> Result<Vec<u8>> {
 /// target path. This ensures that the file is either fully written or not
 /// modified at all, preventing partial writes.
 ///
+/// No lock is taken, so this suits files that only ever get one content
+/// (objects, packs) or that Git does not lock (work tree files). Files Git
+/// locks, such as the index and references, are written through a lock
+/// file instead.
+///
 /// # Arguments
 ///
 /// * `path` - The path to write to.
@@ -50,28 +56,41 @@ pub fn write_file_atomic<P: AsRef<Path>>(path: P, data: &[u8]) -> Result<()> {
         }
     }
 
-    // Create a temporary file in the same directory
+    // Create a temporary file in the same directory. The name is unique to
+    // this process and call, so concurrent writers of the same path (two
+    // processes storing the same object, say) never share a temporary file.
     let temp_path = {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let mut temp = path.to_path_buf();
         let file_name = path
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "temp".to_string());
-        temp.set_file_name(format!(".{}.tmp", file_name));
+        temp.set_file_name(format!(
+            ".{}.tmp-{}-{}",
+            file_name,
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
         temp
     };
 
-    // Write to temporary file
-    {
-        let mut file = fs::File::create(&temp_path)?;
+    let result = (|| -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
         file.write_all(data)?;
         file.sync_all()?;
+        drop(file);
+        // Rename temporary file to target (atomic on most filesystems)
+        fs::rename(&temp_path, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
     }
-
-    // Rename temporary file to target (atomic on most filesystems)
-    fs::rename(&temp_path, path)?;
-
-    Ok(())
+    result
 }
 
 /// Validates that a path does not escape its root directory (path traversal prevention).

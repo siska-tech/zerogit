@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::index::{Index, IndexEntry};
-use crate::infra::write_file_atomic;
+use crate::infra::write_locked;
 use crate::objects::{ObjectType, Oid, Signature, TagObject};
 use crate::repository::Repository;
 use crate::worktree::{native_path, Worktree};
@@ -370,7 +370,7 @@ impl Repository {
         if !self.merge_heads()?.is_empty() {
             return Err(Error::MergeInProgress);
         }
-        let mut idx = self.read_index()?;
+        let (index_lock, mut idx) = self.lock_index()?;
         if idx.has_conflicts() {
             return Err(Error::UnmergedPaths(idx.conflicted_paths()));
         }
@@ -397,9 +397,10 @@ impl Repository {
                 self.write_orig_head(&head)?;
             }
             self.apply_merge(&mut idx, &mut worktree, &ours, &result)?;
-            self.write_index(&idx)?;
+            index_lock.write(&idx)?;
             self.update_head(
                 &theirs,
+                head,
                 &committer,
                 &format!("{}: Fast-forward", reflog_prefix),
             )?;
@@ -456,12 +457,12 @@ impl Repository {
         };
         self.write_orig_head(&head)?;
         self.apply_merge(&mut idx, &mut worktree, &ours, &result)?;
-        self.write_index(&idx)?;
+        index_lock.write(&idx)?;
 
         let conflicts = result.conflicted_paths();
         if !conflicts.is_empty() {
             let git_dir = self.git_dir();
-            write_file_atomic(
+            write_locked(
                 git_dir.join("MERGE_HEAD"),
                 format!("{}\n", theirs.to_hex()).as_bytes(),
             )?;
@@ -470,12 +471,12 @@ impl Repository {
             } else {
                 ""
             };
-            write_file_atomic(git_dir.join("MERGE_MODE"), mode.as_bytes())?;
+            write_locked(git_dir.join("MERGE_MODE"), mode.as_bytes())?;
             let mut merge_msg = format!("{}\n\n# Conflicts:\n", message);
             for path in &conflicts {
                 merge_msg.push_str(&format!("#\t{}\n", path));
             }
-            write_file_atomic(git_dir.join("MERGE_MSG"), merge_msg.as_bytes())?;
+            write_locked(git_dir.join("MERGE_MSG"), merge_msg.as_bytes())?;
             return Ok(MergeOutcome::Conflicts(
                 conflicts.iter().map(PathBuf::from).collect(),
             ));
@@ -493,6 +494,7 @@ impl Repository {
         let commit = self.object_store().write(ObjectType::Commit, &content)?;
         self.update_head(
             &commit,
+            Some(head),
             &committer,
             &format!("{}: Merge made by the 'zerogit' strategy.", reflog_prefix),
         )?;
@@ -500,7 +502,7 @@ impl Repository {
     }
 
     pub(crate) fn write_orig_head(&self, head: &Oid) -> Result<()> {
-        write_file_atomic(
+        write_locked(
             self.git_dir().join("ORIG_HEAD"),
             format!("{}\n", head.to_hex()).as_bytes(),
         )
@@ -679,7 +681,7 @@ impl Repository {
         }
         let head = self.optional_head_oid()?;
         let ours = self.flat_tree(head.as_ref())?;
-        let mut idx = self.read_index()?;
+        let (index_lock, mut idx) = self.lock_index()?;
         let mut worktree = self.worktree()?;
 
         // Paths whose index state differs from HEAD.
@@ -698,7 +700,7 @@ impl Repository {
             }
         }
         self.restore_paths(&mut idx, &mut worktree, &ours, &paths)?;
-        self.write_index(&idx)?;
+        index_lock.write(&idx)?;
         self.clear_merge_state()
     }
 }

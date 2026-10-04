@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::index::{self, Index, IndexEntry};
-use crate::infra::{read_file, write_file_atomic};
+use crate::infra::{read_file, LockFile};
 use crate::log::{LogIterator, LogOptions};
 use crate::objects::tree::FileMode;
 use crate::objects::Signature;
@@ -944,11 +944,19 @@ impl Repository {
         }
     }
 
-    /// Writes the index to disk.
-    pub(crate) fn write_index(&self, idx: &Index) -> Result<()> {
-        let index_path = self.git_dir.join("index");
-        let data = index::write(idx);
-        write_file_atomic(&index_path, &data)
+    /// Locks the index (`index.lock`, as Git does) and then reads it, for an
+    /// operation that changes it. Holding the lock from the read to the
+    /// write keeps a concurrent Git (or zerogit) from changing the index in
+    /// between; the change is saved with [`IndexLock::write`], and dropping
+    /// the lock without writing leaves the index as it was.
+    ///
+    /// # Errors
+    ///
+    /// `Error::Locked` if `index.lock` already exists.
+    pub(crate) fn lock_index(&self) -> Result<(IndexLock, Index)> {
+        let lock = IndexLock(LockFile::acquire(self.git_dir.join("index"))?);
+        let idx = self.read_index()?;
+        Ok((lock, idx))
     }
 
     /// Adds a file to the staging area (index).
@@ -992,7 +1000,7 @@ impl Repository {
     }
 
     fn add_impl(&self, path: &Path, force: bool) -> Result<()> {
-        let mut idx = self.read_index()?;
+        let (index_lock, mut idx) = self.lock_index()?;
         let mut worktree = self.worktree()?;
         let tracked = idx.get(path).cloned();
         let tracked_mode = tracked.as_ref().map(IndexEntry::mode);
@@ -1001,7 +1009,7 @@ impl Repository {
         // `git add` does; this also resolves a conflict by deletion.
         let Some(file) = worktree.read(path, tracked.as_ref())? else {
             if idx.remove(path) {
-                return self.write_index(&idx);
+                return index_lock.write(&idx);
             }
             return Err(Error::PathNotFound(path.to_path_buf()));
         };
@@ -1013,7 +1021,7 @@ impl Repository {
         // Write the blob and stage it.
         let oid = self.object_store().write(ObjectType::Blob, &file.content)?;
         idx.add(file.index_entry(path.to_path_buf(), oid));
-        self.write_index(&idx)
+        index_lock.write(&idx)
     }
 
     /// Adds all modified and untracked files to the staging area.
@@ -1034,7 +1042,7 @@ impl Repository {
     /// ```
     pub fn add_all(&self) -> Result<()> {
         let store = self.object_store();
-        let mut idx = self.read_index()?;
+        let (index_lock, mut idx) = self.lock_index()?;
 
         // Report a missing or corrupt HEAD commit before touching the index.
         self.head_tree_oid()?;
@@ -1068,7 +1076,7 @@ impl Repository {
             idx.remove(path);
         }
 
-        self.write_index(&idx)?;
+        index_lock.write(&idx)?;
 
         Ok(())
     }
@@ -1101,7 +1109,7 @@ impl Repository {
     /// ```
     pub fn reset<P: AsRef<Path>>(&self, path: Option<P>) -> Result<()> {
         let store = self.object_store();
-        let mut idx = self.read_index()?;
+        let (index_lock, mut idx) = self.lock_index()?;
 
         // Get HEAD tree files
         let head_tree_oid = self.head_tree_oid()?;
@@ -1173,7 +1181,7 @@ impl Repository {
             }
         }
 
-        self.write_index(&idx)?;
+        index_lock.write(&idx)?;
 
         Ok(())
     }
@@ -1361,30 +1369,52 @@ impl Repository {
     ///
     /// If HEAD points to a branch, updates the branch reference.
     /// If HEAD is detached, updates HEAD directly.
+    ///
+    /// `expected` is the commit HEAD pointed to when the caller read it
+    /// (`None` for an unborn branch). HEAD and the branch are locked, as Git
+    /// does, and the update is refused with `Error::StaleReference` if HEAD
+    /// has moved since, so a concurrent update is never overwritten.
     pub(crate) fn update_head(
         &self,
         new_oid: &Oid,
+        expected: Option<Oid>,
         committer: &Signature,
         message: &str,
     ) -> Result<()> {
         let store = self.ref_store();
         let reflog = self.reflog_writer()?;
-        let old_oid = self.optional_head_oid()?.unwrap_or_else(zero_oid);
-
-        match store.read_ref_file("HEAD")? {
-            crate::refs::RefValue::Symbolic(target) => {
-                // HEAD points to a branch, update the branch
-                let branch_path = self.git_dir.join(&target);
-                write_file_atomic(&branch_path, format!("{}\n", new_oid.to_hex()).as_bytes())?;
-                reflog.append(&target, &old_oid, new_oid, committer, message)?;
-            }
-            crate::refs::RefValue::Direct(_) => {
-                // HEAD is detached, update HEAD directly
-                let head_path = self.git_dir.join("HEAD");
-                write_file_atomic(&head_path, format!("{}\n", new_oid.to_hex()).as_bytes())?;
-            }
+        let mut head_lock = LockFile::acquire(self.git_dir.join("HEAD"))?;
+        let branch = match store.read_ref_file("HEAD")? {
+            crate::refs::RefValue::Symbolic(target) => Some(target),
+            crate::refs::RefValue::Direct(_) => None,
+        };
+        let mut branch_lock = match &branch {
+            Some(target) => Some(LockFile::acquire(self.git_dir.join(target))?),
+            None => None,
+        };
+        let old = self.optional_head_oid()?;
+        if old != expected {
+            return Err(Error::StaleReference(
+                branch.unwrap_or_else(|| "HEAD".to_owned()),
+            ));
         }
-        reflog.append("HEAD", &old_oid, new_oid, committer, message)
+        let old_oid = old.unwrap_or_else(zero_oid);
+        let content = format!("{}\n", new_oid.to_hex());
+
+        // Write the new value and the reflogs while holding the locks.
+        match (&branch, branch_lock.as_mut()) {
+            (Some(target), Some(lock)) => {
+                lock.write_all(content.as_bytes())?;
+                reflog.append(target, &old_oid, new_oid, committer, message)?;
+            }
+            _ => head_lock.write_all(content.as_bytes())?,
+        }
+        reflog.append("HEAD", &old_oid, new_oid, committer, message)?;
+        match branch_lock {
+            // HEAD itself is unchanged; dropping its lock leaves it as it is.
+            Some(lock) => lock.commit(),
+            None => head_lock.commit(),
+        }
     }
 
     /// The reflog writer, configured by `core.logAllRefUpdates`.
@@ -1485,8 +1515,8 @@ impl Repository {
         author_name: &str,
         author_email: &str,
     ) -> Result<Oid> {
-        // Read the current index
-        let idx = self.read_index()?;
+        // Hold the index lock until HEAD is updated, as `git commit` does.
+        let (_index_lock, idx) = self.lock_index()?;
 
         // A tree built from conflict stages would contain duplicate names.
         if idx.has_conflicts() {
@@ -1531,7 +1561,7 @@ impl Repository {
         } else {
             format!("commit (initial): {}", subject)
         };
-        self.update_head(&commit_oid, &committer, &reflog_message)?;
+        self.update_head(&commit_oid, parent_oid, &committer, &reflog_message)?;
         if !merge_heads.is_empty() {
             self.clear_merge_state()?;
         }
@@ -1587,19 +1617,11 @@ impl Repository {
         };
 
         // Check if branch already exists (or conflicts as a directory)
-        let branch_path = self.git_dir.join("refs/heads").join(name);
         let ref_name = self.check_new_ref("heads", name)?;
 
-        // Ensure parent directories exist (for nested branch names like feature/foo)
-        if let Some(parent) = branch_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        // Write the branch ref file
-        write_file_atomic(
-            &branch_path,
-            format!("{}\n", target_oid.to_hex()).as_bytes(),
-        )?;
+        // Write the branch ref file and its reflog under the ref's lock.
+        let mut lock = self.lock_new_ref(&ref_name)?;
+        lock.write_all(format!("{}\n", target_oid.to_hex()).as_bytes())?;
         // Git names the start point as given, or the current branch.
         let start = match target {
             Some(oid) => oid.to_hex(),
@@ -1615,6 +1637,7 @@ impl Repository {
             &self.reflog_identity()?,
             &format!("branch: Created from {}", start),
         )?;
+        lock.commit()?;
 
         Ok(Branch::new(name, target_oid))
     }
@@ -1694,9 +1717,12 @@ impl Repository {
     /// repo.checkout("abc1234").unwrap();
     /// ```
     pub fn checkout(&self, target: &str) -> Result<()> {
-        // Rebuilding the index would drop skip-worktree flags; refuse before
-        // touching the working tree.
-        let idx = self.read_index()?;
+        // Lock the index and HEAD before checking anything, so that a
+        // concurrent Git cannot change them and no work tree file is touched
+        // when either is locked. Rebuilding the index would drop
+        // skip-worktree flags; refuse before touching the working tree.
+        let (index_lock, idx) = self.lock_index()?;
+        let mut head_lock = LockFile::acquire(self.git_dir.join("HEAD"))?;
         reject_sparse_checkout(&idx, "checkout")?;
         if idx.has_conflicts() {
             return Err(Error::UnmergedPaths(idx.conflicted_paths()));
@@ -1742,11 +1768,10 @@ impl Repository {
         };
 
         // Update working tree and index
-        self.checkout_tree(&tree_oid)?;
+        self.checkout_tree(&tree_oid, index_lock, idx.version())?;
 
         // Update HEAD
-        let head_path = self.git_dir.join("HEAD");
-        write_file_atomic(&head_path, new_head_content.as_bytes())?;
+        head_lock.write_all(new_head_content.as_bytes())?;
         self.reflog_writer()?.append(
             "HEAD",
             &old_oid.unwrap_or_else(zero_oid),
@@ -1754,12 +1779,11 @@ impl Repository {
             &self.reflog_identity()?,
             &format!("checkout: moving from {} to {}", from, target),
         )?;
-
-        Ok(())
+        head_lock.commit()
     }
 
     /// Updates the working tree and index to match a tree object.
-    fn checkout_tree(&self, tree_oid: &Oid) -> Result<()> {
+    fn checkout_tree(&self, tree_oid: &Oid, index_lock: IndexLock, version: u32) -> Result<()> {
         let store = self.object_store();
         let mut worktree = self.worktree()?;
 
@@ -1825,7 +1849,6 @@ impl Repository {
 
         // Rebuild index from target tree
         // Keep the index version the user configured (e.g. v4).
-        let version = self.read_index()?.version();
         let mut idx = Index::empty(version);
         for (path, entry) in &target_files {
             // The stat data of the file just written, with the tree's mode.
@@ -1837,7 +1860,7 @@ impl Repository {
             )?);
         }
 
-        self.write_index(&idx)?;
+        index_lock.write(&idx)?;
 
         Ok(())
     }
@@ -2044,11 +2067,21 @@ impl Repository {
 
     /// Writes a loose reference file.
     fn write_ref(&self, ref_name: &str, oid: &Oid) -> Result<()> {
-        let path = self.git_dir.join(ref_name);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        let mut lock = self.lock_new_ref(ref_name)?;
+        lock.write_all(format!("{}\n", oid.to_hex()).as_bytes())?;
+        lock.commit()
+    }
+
+    /// Locks a reference that is about to be created, and checks under the
+    /// lock that it still does not exist, so that a reference created
+    /// concurrently (after [`Repository::check_new_ref`]) is not overwritten.
+    fn lock_new_ref(&self, ref_name: &str) -> Result<LockFile> {
+        let lock = LockFile::acquire(self.git_dir.join(ref_name))?;
+        match self.ref_store().read_ref_file(ref_name) {
+            Ok(_) => Err(Error::RefAlreadyExists(ref_name.to_owned())),
+            Err(Error::RefNotFound(_)) => Ok(lock),
+            Err(e) => Err(e),
         }
-        write_file_atomic(&path, format!("{}\n", oid.to_hex()).as_bytes())
     }
 
     /// Deletes a tag (lightweight or annotated). A tag object is left in the
@@ -2076,6 +2109,8 @@ impl Repository {
     /// Removes a reference (and its peeled line) from `packed-refs`.
     pub(crate) fn remove_packed_ref(&self, ref_name: &str) -> Result<()> {
         let path = self.git_dir.join("packed-refs");
+        // Read under the lock so a concurrent rewrite is not lost.
+        let mut lock = LockFile::acquire(&path)?;
         let content = match fs::read_to_string(&path) {
             Ok(content) => content,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -2097,7 +2132,8 @@ impl Repository {
                 out.push('\n');
             }
         }
-        write_file_atomic(&path, out.as_bytes())
+        lock.write_all(out.as_bytes())?;
+        lock.commit()
     }
 
     /// Deletes a loose reference, its reflog and the directories under
@@ -2107,10 +2143,13 @@ impl Repository {
         if store.is_packed(ref_name)? {
             return Err(Error::PackedRefDeletionUnsupported(ref_name.to_owned()));
         }
-        store.read_ref_file(ref_name)?;
         let path = self.git_dir.join(ref_name);
+        let lock = LockFile::acquire(&path)?;
+        store.read_ref_file(ref_name)?;
         fs::remove_file(&path)?;
         self.reflog_writer()?.delete(ref_name)?;
+        // Release the lock first: its file would keep the directory non-empty.
+        drop(lock);
 
         let root = self.git_dir.join(root);
         let mut parent = path.parent();
@@ -2257,6 +2296,17 @@ pub(crate) fn now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// The lock on the index taken by [`Repository::lock_index`].
+pub(crate) struct IndexLock(LockFile);
+
+impl IndexLock {
+    /// Saves `idx` as the new index and releases the lock.
+    pub(crate) fn write(mut self, idx: &Index) -> Result<()> {
+        self.0.write_all(&index::write(idx))?;
+        self.0.commit()
+    }
 }
 
 /// The key Git sorts tree entries by: the name, with `/` appended for a

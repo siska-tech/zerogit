@@ -7,6 +7,7 @@
 
 use crate::config::edit::ConfigFile;
 use crate::error::{Error, Result};
+use crate::infra::LockFile;
 use crate::repository::Repository;
 
 /// A refspec such as `+refs/heads/*:refs/remotes/origin/*`.
@@ -232,9 +233,11 @@ fn validate_remote_name(name: &str) -> Result<()> {
 impl Repository {
     fn edit_config(&self, f: impl FnOnce(&mut ConfigFile) -> Result<()>) -> Result<()> {
         let path = self.git_dir().join("config");
+        // Lock before reading so a concurrent edit is not lost.
+        let lock = LockFile::acquire(&path)?;
         let mut file = ConfigFile::open(&path)?;
         f(&mut file)?;
-        file.save(&path)
+        file.save(lock)
     }
 
     /// Lists the configured remotes, sorted by name.

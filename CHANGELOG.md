@@ -5,6 +5,18 @@
 
 ## [Unreleased]
 
+### Added
+- `Error::Locked`: 書き込み先のロックファイル（`<path>.lock`）が既にある場合のエラー。メッセージにロックファイルのパスを含む (#39)
+
+### Changed
+- index・参照（HEAD・ブランチ・タグ・`refs/stash`など）・`packed-refs`・config・`MERGE_*`・`ORIG_HEAD`・`rebase-merge/`の書き込みを、Gitと同じロックファイル（`<path>.lock`を排他的に作成して書き込み、renameで置き換える）経由にした。Gitが操作中（ロックあり）なら、zerogitは何も変えずに`Error::Locked`を返す (#39)
+- indexを読んで書き戻す操作（`add`・`add_all`・`reset`・`checkout`・`merge`・`stash`・`rebase`など）は、ロックを取ってからindexを読む。`create_commit`はHEADの更新が終わるまでindexのロックを持つ (#39)
+- `checkout`は、作業ツリーを変える前にindexとHEADのロックを取る (#39)
+
+### Fixed
+- `update_reference()`の期待値付き更新が、ロックを取ってから現在値を比べるようになり、compare-and-swapとして正しく働く。同時に更新すると1つだけが成功し、残りは`StaleReference`か`Locked`になる。`create_commit`・merge・rebaseによるHEADの更新も、読んだときから動いていれば`StaleReference`で拒否する。reflogは参照のロックを持っている間に追記する (#39)
+- `write_file_atomic`の一時ファイル名を、プロセスと呼び出しごとに一意にした。同じファイル（同じオブジェクトなど）を同時に書いても壊れない (#39)
+
 ### Development
 - テスト用fixtureを、テストが初回に使うときにGitで自動生成するようにした。クリーンなクローンで`cargo test`だけを実行して通る。`create_fixtures.sh`・`create_fixtures.ps1`は削除した (#47)
 - CIのcoreのlintを`cargo clippy --all-targets -- -D warnings`にし、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`を追加した。既存の指摘と壊れたdocリンクを解消した (#47)

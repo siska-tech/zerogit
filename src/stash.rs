@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::index::{Index, IndexEntry};
+use crate::infra::LockFile;
 use crate::merge::file::Labels;
 use crate::merge::index_flat;
 use crate::merge::tree::{merge_trees, Flat, Resolution};
@@ -163,7 +164,7 @@ impl Repository {
         email: &str,
         options: &StashOptions,
     ) -> Result<Option<Oid>> {
-        let mut idx = self.read_index()?;
+        let (index_lock, mut idx) = self.lock_index()?;
         if idx.has_conflicts() {
             return Err(Error::UnmergedPaths(idx.conflicted_paths()));
         }
@@ -255,12 +256,11 @@ impl Repository {
             .first()
             .map(|e| e.oid)
             .unwrap_or_else(zero_oid);
-        crate::infra::write_file_atomic(
-            self.git_dir().join("refs").join("stash"),
-            format!("{}\n", stash.to_hex()).as_bytes(),
-        )?;
+        let mut lock = LockFile::acquire(self.git_dir().join("refs").join("stash"))?;
+        lock.write_all(format!("{}\n", stash.to_hex()).as_bytes())?;
         self.reflog_writer()?
             .append("refs/stash", &previous, &stash, &who, &message)?;
+        lock.commit()?;
 
         // Reset the index and the tracked files to HEAD, and remove the
         // stashed untracked files.
@@ -288,7 +288,7 @@ impl Repository {
         for path in &untracked {
             worktree.remove(path)?;
         }
-        self.write_index(&idx)?;
+        index_lock.write(&idx)?;
         Ok(Some(stash))
     }
 
@@ -337,7 +337,7 @@ impl Repository {
         if !self.merge_heads()?.is_empty() {
             return Err(Error::MergeInProgress);
         }
-        let mut idx = self.read_index()?;
+        let (index_lock, mut idx) = self.lock_index()?;
         if idx.has_conflicts() {
             return Err(Error::UnmergedPaths(idx.conflicted_paths()));
         }
@@ -440,7 +440,7 @@ impl Repository {
                 *mode,
             )?;
         }
-        self.write_index(&idx)?;
+        index_lock.write(&idx)?;
         Ok(if conflicts.is_empty() {
             StashApplyOutcome::Applied
         } else {
@@ -466,6 +466,9 @@ impl Repository {
     /// `Error::RefNotFound` if there is no such stash.
     pub fn stash_drop(&self, index: usize) -> Result<()> {
         let reflog = self.reflog_writer()?;
+        let ref_path = self.git_dir().join("refs").join("stash");
+        // Hold the reference's lock while rewriting its reflog, as Git does.
+        let mut lock = LockFile::acquire(&ref_path)?;
         let mut entries = self.reflog("refs/stash")?;
         if index >= entries.len() {
             return Err(Error::RefNotFound(format!("stash@{{{}}}", index)));
@@ -479,13 +482,12 @@ impl Repository {
                 .unwrap_or_else(zero_oid);
             entries[index - 1].set_old_oid(older);
         }
-        let ref_path = self.git_dir().join("refs").join("stash");
         reflog.rewrite("refs/stash", &entries)?;
         match entries.first() {
-            Some(newest) => crate::infra::write_file_atomic(
-                &ref_path,
-                format!("{}\n", newest.new_oid().to_hex()).as_bytes(),
-            ),
+            Some(newest) => {
+                lock.write_all(format!("{}\n", newest.new_oid().to_hex()).as_bytes())?;
+                lock.commit()
+            }
             None => match std::fs::remove_file(&ref_path) {
                 Ok(()) => Ok(()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),

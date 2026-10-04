@@ -854,8 +854,14 @@ impl Repository {
         let path = path.as_ref();
         let full_path = self.work_dir.join(path);
 
-        // Check if file exists
+        // Check if file exists. A tracked file that was deleted has its
+        // removal staged, as `git add` does; this also resolves a conflict
+        // by deletion.
         if !full_path.exists() {
+            let mut idx = self.read_index()?;
+            if idx.remove(path) {
+                return self.write_index(&idx);
+            }
             return Err(Error::PathNotFound(path.to_path_buf()));
         }
 
@@ -939,13 +945,8 @@ impl Repository {
         let store = self.object_store();
         let mut idx = self.read_index()?;
 
-        // Get HEAD tree files (if exists)
-        let head_tree_oid = self.head_tree_oid()?;
-
-        let mut head_files: BTreeMap<PathBuf, Oid> = BTreeMap::new();
-        if let Some(tree_oid) = head_tree_oid {
-            flatten_tree(&store, &tree_oid, Path::new(""), &mut head_files)?;
-        }
+        // Report a missing or corrupt HEAD commit before touching the index.
+        self.head_tree_oid()?;
 
         // Get working tree files
         let working_files = crate::infra::list_working_tree(&self.work_dir)?;
@@ -1003,12 +1004,18 @@ impl Repository {
             idx.add(entry);
         }
 
-        // Handle deleted files: remove from index files that are in HEAD but not in working tree
+        // Handle deleted files: remove index entries (including conflict
+        // stages) whose file is gone from the working tree. Skip-worktree
+        // entries are absent on purpose and stay.
         let working_set: std::collections::HashSet<_> = working_files.into_iter().collect();
-        for head_path in head_files.keys() {
-            if !working_set.contains(head_path) {
-                idx.remove(head_path);
-            }
+        let deleted: Vec<PathBuf> = idx
+            .entries()
+            .iter()
+            .filter(|e| !e.skip_worktree() && !working_set.contains(e.path()))
+            .map(|e| e.path().to_path_buf())
+            .collect();
+        for path in &deleted {
+            idx.remove(path);
         }
 
         self.write_index(&idx)?;
@@ -1218,8 +1225,9 @@ impl Repository {
                 }
             }
 
-            // Sort entries by name (Git requires this)
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            // Git orders entries by name, comparing a directory as if its
+            // name ended with '/'.
+            entries.sort_by_key(|e| tree_sort_key(&e.0, e.1));
 
             // Build tree object content
             let tree_content = Self::build_tree_content(&entries);
@@ -1341,6 +1349,9 @@ impl Repository {
     /// # Errors
     ///
     /// - `Error::EmptyCommit` if there are no staged changes.
+    /// - `Error::UnmergedPaths` if the index has unresolved merge conflicts.
+    ///   Nothing is written; resolve each path with [`Repository::add`] (or
+    ///   [`Repository::reset`]) first.
     ///
     /// # Examples
     ///
@@ -1363,6 +1374,11 @@ impl Repository {
     ) -> Result<Oid> {
         // Read the current index
         let idx = self.read_index()?;
+
+        // A tree built from conflict stages would contain duplicate names.
+        if idx.has_conflicts() {
+            return Err(Error::UnmergedPaths(idx.conflicted_paths()));
+        }
 
         // Check if there are any staged changes
         if idx.is_empty() {
@@ -1617,6 +1633,7 @@ impl Repository {
     ///
     /// - `Error::RefNotFound` if the target cannot be resolved.
     /// - `Error::DirtyWorkingTree` if there are uncommitted changes.
+    /// - `Error::UnmergedPaths` if the index has unresolved merge conflicts.
     ///
     /// # Examples
     ///
@@ -1634,7 +1651,11 @@ impl Repository {
     pub fn checkout(&self, target: &str) -> Result<()> {
         // Rebuilding the index would drop skip-worktree flags; refuse before
         // touching the working tree.
-        reject_sparse_checkout(&self.read_index()?, "checkout")?;
+        let idx = self.read_index()?;
+        reject_sparse_checkout(&idx, "checkout")?;
+        if idx.has_conflicts() {
+            return Err(Error::UnmergedPaths(idx.conflicted_paths()));
+        }
 
         // Check for uncommitted changes
         if self.has_uncommitted_changes()? {
@@ -1901,6 +1922,16 @@ impl Repository {
         }
         Ok(result)
     }
+}
+
+/// The key Git sorts tree entries by: the name, with `/` appended for a
+/// subtree, so `foo.txt` sorts before the directory `foo`.
+fn tree_sort_key(name: &str, mode: FileMode) -> Vec<u8> {
+    let mut key = name.as_bytes().to_vec();
+    if mode == FileMode::Directory {
+        key.push(b'/');
+    }
+    key
 }
 
 /// Converts a path to the `/`-separated form used for index and tree paths.

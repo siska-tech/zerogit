@@ -122,6 +122,10 @@ pub enum Error {
 
     /// A repository already exists at the specified path.
     AlreadyARepository(PathBuf),
+
+    /// The index has unresolved merge conflicts (entries at stages 1-3), so
+    /// the operation cannot proceed until the listed paths are resolved.
+    UnmergedPaths(Vec<PathBuf>),
 }
 
 impl fmt::Display for Error {
@@ -175,6 +179,13 @@ impl fmt::Display for Error {
             Error::ConfigNotFound(key) => write!(f, "configuration not found: {}", key),
             Error::AlreadyARepository(path) => {
                 write!(f, "repository already exists: {}", path.display())
+            }
+            Error::UnmergedPaths(paths) => {
+                write!(f, "index has unmerged paths:")?;
+                for path in paths {
+                    write!(f, " {}", path.display())?;
+                }
+                Ok(())
             }
         }
     }
@@ -271,6 +282,7 @@ mod tests {
             Error::DirtyWorkingTree,
             Error::ConfigNotFound("user.name".to_string()),
             Error::AlreadyARepository(PathBuf::from("/test/repo")),
+            Error::UnmergedPaths(vec![PathBuf::from("file.txt")]),
         ];
 
         // All variants should implement Display without panicking

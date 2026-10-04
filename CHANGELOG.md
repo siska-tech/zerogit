@@ -5,8 +5,22 @@
 
 ## [Unreleased]
 
+### Added
+- `Error::UnmergedPaths`: indexにコンフリクト（stage 1〜3）が残っている場合のエラー
+- `Index::get_stage()`、`Index::has_conflicts()`、`Index::conflicted_paths()`
+
 ### Changed
 - crates.ioのパッケージから`issues/`・`docs/`・`tests/`を除外した
+- **破壊的変更**: `Error`に`UnmergedPaths`を追加した
+- `Index::add`はstage 0の追加で同じパスの全stageを置き換え、`Index::remove`は全stageを削除する。エントリはGitと同じ順（パスのバイト列、次にstage）に保つ
+- `Repository::add`は、作業ツリーから削除された追跡中のファイルの削除をステージする（`git add`と同じ）
+- `Repository::add_all`は、HEADにないファイルを含め、作業ツリーにないindexのエントリを削除する（`git add -A`と同じ）
+
+### Fixed
+- コンフリクト中のindexから`create_commit`すると、同名エントリが重複した不正なtreeを作っていた。`UnmergedPaths`を返し、何も書き込まない (#23)
+- コンフリクト中の`checkout`を`UnmergedPaths`で拒否する (#23)
+- `status()`がコンフリクト中のパスをstage 3の内容で比較していた。`Modified`として1件報告する (#23)
+- treeのエントリを名前順に並べていたため、`foo`ディレクトリと`foo.txt`などが並ぶとGitの順序（ディレクトリは`foo/`として比較）と異なり、`git fsck`が不正と判定するtreeを作っていた
 
 ---
 

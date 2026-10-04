@@ -182,9 +182,18 @@ pub(crate) fn compute_status_with_store(
         flatten_tree_with_store(store, tree_oid, Path::new(""), &mut head_files)?;
     }
 
-    // Build index map: path -> IndexEntry
+    // Build index map: path -> IndexEntry. Conflicted paths (stages 1-3)
+    // are reported separately.
+    let conflicted: HashSet<PathBuf> = index
+        .map(|idx| idx.conflicted_paths().into_iter().collect())
+        .unwrap_or_default();
     let index_files: BTreeMap<PathBuf, &IndexEntry> = index
-        .map(|idx| idx.iter().map(|e| (e.path().to_path_buf(), e)).collect())
+        .map(|idx| {
+            idx.iter()
+                .filter(|e| !e.is_conflicted())
+                .map(|e| (e.path().to_path_buf(), e))
+                .collect()
+        })
         .unwrap_or_default();
 
     // Get working tree files
@@ -195,12 +204,19 @@ pub(crate) fn compute_status_with_store(
     all_paths.extend(head_files.keys().cloned());
     all_paths.extend(index_files.keys().cloned());
     all_paths.extend(working_files.iter().cloned());
+    all_paths.extend(conflicted.iter().cloned());
 
     // Analyze each path
     for path in all_paths {
         let in_head = head_files.get(&path);
         let in_index = index_files.get(&path);
         let in_working = working_files.contains(&path);
+
+        // A conflict still needs resolving in the working tree.
+        if conflicted.contains(&path) {
+            entries.push(StatusEntry::new(path, FileStatus::Modified));
+            continue;
+        }
 
         // Skip-worktree (sparse checkout) entries are not compared with the
         // working tree, only with HEAD, as Git does.

@@ -64,6 +64,9 @@ impl Index {
 
     /// Finds an entry by path.
     ///
+    /// For a conflicted path (stages 1-3) this returns the entry with the
+    /// lowest stage; use [`Index::get_stage`] to pick a specific stage.
+    ///
     /// # Arguments
     ///
     /// * `path` - The path to search for.
@@ -72,7 +75,15 @@ impl Index {
     ///
     /// The entry if found, or `None` if not found.
     pub fn get(&self, path: &Path) -> Option<&IndexEntry> {
-        self.entries.iter().find(|e| e.path == path)
+        let range = self.path_range(path);
+        self.entries[range].first()
+    }
+
+    /// Finds the entry for a path at a specific stage (0 for a normal entry,
+    /// 1-3 for the base, ours and theirs sides of a conflict).
+    pub fn get_stage(&self, path: &Path, stage: u8) -> Option<&IndexEntry> {
+        let range = self.path_range(path);
+        self.entries[range].iter().find(|e| e.stage == stage)
     }
 
     /// Returns an iterator over the entries.
@@ -80,29 +91,52 @@ impl Index {
         self.entries.iter()
     }
 
+    /// Returns true if any entry is in a merge conflict (stage 1-3).
+    pub fn has_conflicts(&self) -> bool {
+        self.entries.iter().any(IndexEntry::is_conflicted)
+    }
+
+    /// Returns the paths that are in a merge conflict, each once, in index order.
+    pub fn conflicted_paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for entry in self.entries.iter().filter(|e| e.is_conflicted()) {
+            if paths.last().map(PathBuf::as_path) != Some(entry.path()) {
+                paths.push(entry.path.clone());
+            }
+        }
+        paths
+    }
+
     /// Adds or updates an entry in the index.
     ///
-    /// If an entry with the same path already exists, it is replaced.
-    /// Entries are kept sorted by path.
+    /// Adding a stage 0 entry replaces every entry for the same path, which
+    /// resolves a conflict the way `git add` does. Adding a conflict stage
+    /// (1-3) replaces the stage 0 entry and the entry with the same stage.
+    /// Entries are kept in Git's order: by path bytes, then by stage.
     ///
     /// # Arguments
     ///
     /// * `entry` - The entry to add or update.
     pub fn add(&mut self, entry: IndexEntry) {
-        // Find or insert position
-        match self.entries.binary_search_by(|e| e.path.cmp(&entry.path)) {
-            Ok(pos) => {
-                // Replace existing entry
-                self.entries[pos] = entry;
-            }
-            Err(pos) => {
-                // Insert at correct position to maintain sort order
-                self.entries.insert(pos, entry);
+        let range = self.path_range(&entry.path);
+        let start = range.start;
+        let stage = entry.stage;
+        let mut end = range.end;
+        let mut i = start;
+        while i < end {
+            let existing = self.entries[i].stage;
+            if stage == 0 || existing == 0 || existing == stage {
+                self.entries.remove(i);
+                end -= 1;
+            } else {
+                i += 1;
             }
         }
+        let pos = start + self.entries[start..end].partition_point(|e| e.stage < stage);
+        self.entries.insert(pos, entry);
     }
 
-    /// Removes an entry from the index by path.
+    /// Removes every entry for a path, including all conflict stages.
     ///
     /// # Arguments
     ///
@@ -112,11 +146,31 @@ impl Index {
     ///
     /// `true` if an entry was removed, `false` if no entry was found.
     pub fn remove(&mut self, path: &Path) -> bool {
-        if let Some(pos) = self.entries.iter().position(|e| e.path == path) {
-            self.entries.remove(pos);
-            true
-        } else {
-            false
+        let range = self.path_range(path);
+        let removed = !range.is_empty();
+        self.entries.drain(range);
+        removed
+    }
+
+    /// The range of entries for a path, located by binary search in Git's
+    /// index order. Falls back to a linear scan for an index that is not
+    /// sorted (Git never writes one, but parsing does not reject it).
+    fn path_range(&self, path: &Path) -> std::ops::Range<usize> {
+        let key = path_key(path);
+        let start = self
+            .entries
+            .partition_point(|e| path_key(&e.path).as_slice() < key.as_slice());
+        let end = start
+            + self.entries[start..]
+                .iter()
+                .take_while(|e| path_key(&e.path) == key)
+                .count();
+        if start < end {
+            return start..end;
+        }
+        match self.entries.iter().position(|e| e.path == path) {
+            Some(pos) => pos..pos + 1,
+            None => start..start,
         }
     }
 
@@ -124,6 +178,11 @@ impl Index {
     pub fn clear(&mut self) {
         self.entries.clear();
     }
+}
+
+/// The `/`-separated path bytes Git sorts index entries by.
+pub(crate) fn path_key(path: &Path) -> Vec<u8> {
+    path.to_string_lossy().replace('\\', "/").into_bytes()
 }
 
 /// An entry in the Git index.
@@ -400,5 +459,73 @@ mod tests {
         // Simulate conflict stage
         entry.stage = 1;
         assert!(entry.is_conflicted());
+    }
+
+    fn staged(path: &str, stage: u8) -> IndexEntry {
+        let mut entry = make_entry(path);
+        entry.stage = stage;
+        entry
+    }
+
+    fn listing(index: &Index) -> Vec<(String, u8)> {
+        index
+            .iter()
+            .map(|e| (e.path().to_string_lossy().into_owned(), e.stage()))
+            .collect()
+    }
+
+    #[test]
+    fn test_add_keeps_git_order() {
+        let mut index = Index::empty(2);
+        // Path bytes order: '-' < '.' < '/'.
+        for path in ["a/b", "a.b", "a-b", "a"] {
+            index.add(make_entry(path));
+        }
+        let paths: Vec<_> = listing(&index).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(paths, ["a", "a-b", "a.b", "a/b"]);
+    }
+
+    #[test]
+    fn test_conflict_stages_and_resolution() {
+        let mut index = Index::empty(2);
+        index.add(make_entry("a.txt"));
+        index.add(staged("file.txt", 3));
+        index.add(staged("file.txt", 1));
+        index.add(staged("file.txt", 2));
+        index.add(make_entry("z.txt"));
+        assert!(index.has_conflicts());
+        assert_eq!(index.conflicted_paths(), vec![PathBuf::from("file.txt")]);
+        assert_eq!(index.get(Path::new("file.txt")).unwrap().stage(), 1);
+        assert_eq!(
+            index.get_stage(Path::new("file.txt"), 3).unwrap().stage(),
+            3
+        );
+        assert_eq!(
+            listing(&index),
+            [
+                ("a.txt".to_owned(), 0),
+                ("file.txt".to_owned(), 1),
+                ("file.txt".to_owned(), 2),
+                ("file.txt".to_owned(), 3),
+                ("z.txt".to_owned(), 0)
+            ]
+        );
+
+        // Staging the path at stage 0 resolves the conflict.
+        index.add(make_entry("file.txt"));
+        assert!(!index.has_conflicts());
+        assert_eq!(index.len(), 3);
+        assert_eq!(index.get(Path::new("file.txt")).unwrap().stage(), 0);
+    }
+
+    #[test]
+    fn test_remove_drops_all_stages() {
+        let mut index = Index::empty(2);
+        for stage in 1..=3 {
+            index.add(staged("file.txt", stage));
+        }
+        assert!(index.remove(Path::new("file.txt")));
+        assert!(index.is_empty());
+        assert!(!index.remove(Path::new("file.txt")));
     }
 }

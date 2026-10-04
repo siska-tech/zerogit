@@ -396,6 +396,7 @@ pub fn create_commit(
 | 戻り値 | `Ok(Oid)` - 作成されたコミットのID                       |
 | エラー | `Error::EmptyCommit` - ステージされた変更がない          |
 | エラー | `Error::ConfigNotFound` - author未指定でgit config未設定 |
+| エラー | `Error::UnmergedPaths` - indexにコンフリクト（stage 1〜3）が残っている。何も書き込まない |
 
 ##### `Repository::create_branch`
 
@@ -1303,6 +1304,20 @@ pub fn entries(&self) -> &[IndexEntry]
 pub fn get(&self, path: &Path) -> Option<&IndexEntry>
 ```
 
+コンフリクト中のパスでは、最も小さいstageのエントリを返す。
+
+##### `Index::get_stage` / `Index::has_conflicts` / `Index::conflicted_paths`
+
+```rust
+pub fn get_stage(&self, path: &Path, stage: u8) -> Option<&IndexEntry>
+pub fn has_conflicts(&self) -> bool
+pub fn conflicted_paths(&self) -> Vec<PathBuf>
+```
+
+##### `Index::add` / `Index::remove`
+
+エントリはGitと同じ順（パスのバイト列、次にstage）に保つ。stage 0の`add`は同じパスの全stageを置き換え（コンフリクトの解消）、`remove`は全stageを削除する。
+
 ##### `Index::len`
 
 ```rust
@@ -1816,6 +1831,9 @@ pub enum Error {
 
     /// pack読み取りのサイズ・delta深度の上限超過（Phase 3）
     PackLimitExceeded { reason: String },
+
+    /// indexに未解消のコンフリクトがある（commit・checkoutを拒否）
+    UnmergedPaths(Vec<PathBuf>),
 }
 ```
 

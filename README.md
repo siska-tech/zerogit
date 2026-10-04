@@ -441,14 +441,15 @@ fn main() -> Result<()> {
 - [x] コミット変更一覧（`commit_diff()`）
 - [x] ワーキングツリー差分（`diff_index_to_workdir()`, `diff_head_to_index()`）
 
-### Phase 3: Packfile・行単位差分（✅ 読み取りと差分） / マージ（将来）
+### Phase 3: Packfile・行単位差分・マージ ✅
 
 - [x] Packfile読み取り - pack v2/v3、idx v2（64bit offset含む）、OFS_DELTA/REF_DELTA、多段delta。looseと複数packを透過的に扱い、`git repack`/`git gc`後も開いたままの`Repository`で読み続けられる
 - [x] `packed-refs` - loose参照を優先し、HEAD・ブランチ・リモートブランチ・タグを解決・列挙。packed参照の削除は参照の復活を防ぐため`Error::PackedRefDeletionUnsupported`
 - [x] 行単位差分（`diff_blobs()` / `BlobDiff::compute()`）- 最小編集のMyers法、旧新行番号、文脈行数指定、LF/CRLF・末尾改行の保持
 - [x] 完全一致リネームの旧新mode保持と決定的な対応付け
 - [x] 類似度によるリネーム検出（任意）- `diff_trees_with_options()`/`commit_diff_with_options()`に`RenameOptions::new().detection(RenameDetection::Similar)`を渡す。既定は完全一致のみ
-- [ ] 3-way merge - 共通祖先ベースのマージ（将来）
+- [x] 3-way merge（`merge()`）- fast-forward、共通祖先（複数の場合は仮想祖先）ベースのマージ、Gitと同じ形のコンフリクト記録。内容のマージは`git merge`と同じhistogram diff
+- [x] stash（`stash_save()`など）・rebase（`rebase()`など）- Gitと同じ形式で状態を保存し、Gitと相互に扱える
 
 #### 対応形式と制限
 
@@ -458,7 +459,7 @@ fn main() -> Result<()> {
 | オブジェクト格納 | loose、pack v2/v3（idx v2）。idx v1・multi-pack-index・commit-graph・bitmapは使用しない（packの`.idx`を直接読む） |
 | 参照 | loose refs、`packed-refs`。reftableは`Error::UnsupportedRepositoryFormat` |
 | index | v2/v3/v4（読んだバージョンで書き戻す）。split index・sparse indexは`Error::UnsupportedIndex`。sparse checkout（skip-worktree）中の全体reset・checkoutは未対応 |
-| 未対応 | 3-way merge、リモート通信、worktree、shallow/partial clone、alternates |
+| 未対応 | merge時のリネーム検出、対話的rebase、worktree、shallow/partial clone、alternates |
 | 差分の結果 | `Text`（完全な行差分）、`NonText`（NULを含む・不正UTF-8。暗黙の置換はしない）、`Skipped`（サイズ・計算量の上限超過。部分結果は返さない） |
 | リネーム検出 | 既定は完全一致のみ。類似度検出（任意）は通常・実行ファイルのテキストが対象で、類似度は「共通する行のバイト数 ÷ 大きい方のサイズ」。既定しきい値50%、候補ペア10万組、1ファイル1 MiBまで。上限に達した分は追加・削除のまま残り、`TreeDiff::rename_limits()`で識別できる |
 | パス | `DiffDelta::path()`はプラットフォームの`PathBuf`（Windowsでは`\`区切り）。比較は`Path`同士で行う |
@@ -478,87 +479,40 @@ fn main() -> Result<()> {
 
 測定は`cargo run --release --example measure_document_diff`で再現できます（Windows 11、release build。1,000コミット・50文書をpack化したリポジトリで、全履歴の走査50〜220 ms、全コミットの変更一覧160〜670 ms、全変更ファイルの行差分は1件あたり0.6〜2.5 ms、ピークメモリ約46 MiB）。
 
-### Phase 4: リモート操作（別crate: `zerogit-remote`）
+### Phase 4: リモート操作（別crate: `zerogit-remote`）✅
 
-ネットワーク操作は依存関係が増えるため、別crateとして提供予定です。
+ネットワーク操作は依存関係が増えるため、別crate [`zerogit-remote`](zerogit-remote/) として提供します。コアの`zerogit`の依存は`miniz_oxide`のみのままです。
 
-#### なぜ別crateなのか？
+| 観点         | zerogit (コア)     | zerogit-remote                     |
+| ------------ | ------------------ | ---------------------------------- |
+| 依存         | `miniz_oxide` のみ | `zerogit`、`ureq`（`rustls`、`https` feature） |
+| ビルド時間   | 高速               | TLS依存で増加                      |
+| WASM対応     | ○                  | △（制限あり）                      |
 
-| 観点         | zerogit (コア)     | zerogit-remote               |
-| ------------ | ------------------ | ---------------------------- |
-| 依存         | `miniz_oxide` のみ | `rustls`, `russh`, `ureq` 等 |
-| ビルド時間   | 高速               | TLS/SSH依存で増加            |
-| WASM対応     | ○                  | △（制限あり）                |
-| 組み込み用途 | ○                  | △                            |
-
-#### サポート予定プロトコル
-
-| プロトコル | URL形式                  | 認証方式             | 優先度 |
-| ---------- | ------------------------ | -------------------- | ------ |
-| HTTPS      | `https://github.com/...` | Basic / Bearer Token | 高     |
-| SSH        | `git@github.com:...`     | SSH鍵                | 中     |
-| Git        | `git://...`              | なし（読み取り専用） | 低     |
-
-#### 想定API
+| プロトコル | URL形式 | 認証方式 | 状態 |
+| --- | --- | --- | --- |
+| ローカル | パス、`file://` | なし | ✅（Gitを起動せず直接読み書き） |
+| HTTPS / HTTP | `https://...` | Basic（URLまたは`HttpAuth`）/ Bearer Token | ✅ Smart HTTP、protocol v2 |
+| SSH | `git@host:path`、`ssh://...` | SSH鍵（システムの`ssh`クライアントとagent） | ✅ |
+| Git | `git://...` | なし | 未対応 |
 
 ```rust
-use zerogit::Repository;
-use zerogit_remote::{Remote, Credentials};
+use std::path::Path;
+use zerogit_remote::{clone, fetch, push, CloneOptions, PushOptions};
 
-// クローン
-let repo = Remote::clone(
-    "https://github.com/user/repo.git",
-    "./local-repo",
-    Credentials::token("ghp_xxxx"),
-)?;
-
-// フェッチ
-let remote = repo.remote("origin")?;
-remote.fetch(&Credentials::ssh_key("~/.ssh/id_ed25519"))?;
-
-// プッシュ
-remote.push("main", &Credentials::token("ghp_xxxx"))?;
+let repo = clone("https://github.com/user/repo.git", Path::new("./local-repo"), &CloneOptions::new())?;
+fetch(&repo, "origin")?;
+push(&repo, "origin", &["main"], &PushOptions::new())?;
 ```
 
-#### 技術的な実装要素
-
-```
-Smart HTTP Protocol:
-┌─────────┐                              ┌─────────┐
-│ Client  │  GET /info/refs              │ Server  │
-│         │ ───────────────────────────> │         │
-│         │  200 OK (refs + capabilities)│         │
-│         │ <─────────────────────────── │         │
-│         │                              │         │
-│         │  POST /git-upload-pack       │         │
-│         │  (want/have negotiation)     │         │
-│         │ ───────────────────────────> │         │
-│         │  200 OK (packfile)           │         │
-│         │ <─────────────────────────── │         │
-└─────────┘                              └─────────┘
-```
-
-#### 代替アプローチ
-
-リモート操作が必要だが `zerogit-remote` を待てない場合、システムのgitコマンドと連携できます：
-
-```rust
-use std::process::Command;
-
-fn fetch_with_git(repo_path: &str, remote: &str) -> std::io::Result {
-    Command::new("git")
-        .args(["-C", repo_path, "fetch", remote])
-        .status()?;
-    Ok(())
-}
-```
+コア側には、受け取ったpackの検証・保存（`store_pack()`、thin packの補完）、送るpackの作成（`pack_objects()`）、リモート設定とrefspec（`remotes()`、`add_remote()`、`Refspec`）、upstream（`set_branch_upstream()`）、参照の更新（`update_reference()`）を追加しました。shallow・partial cloneは対象外です。
 
 ### 将来の検討事項
 
 - **Worktree対応**: 複数のワーキングツリー
 - **Submodule対応**: サブモジュールの読み取り
 - **Sparse checkout**: 部分的なチェックアウト
-- **Shallow clone**: 履歴を限定したクローン
+- **Shallow / partial clone**: 履歴・オブジェクトを限定したクローン
 
 ## 貢献
 

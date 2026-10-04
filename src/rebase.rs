@@ -735,7 +735,14 @@ impl Repository {
         self.run_rebase(&mut state, &who)
     }
 
-    /// Resets the index and the tracked files to HEAD (`git reset --hard`).
+    /// Resets the index and the tracked files to HEAD, like
+    /// `git reset --hard`: staged and unstaged changes to tracked files are
+    /// discarded, files HEAD does not have are removed from the index and the
+    /// work tree, and untracked files are kept.
+    pub fn reset_hard(&self) -> Result<()> {
+        self.reset_to_head()
+    }
+
     fn reset_to_head(&self) -> Result<()> {
         let head = self.optional_head_oid()?;
         self.reset_hard_to(&self.flat_tree(head.as_ref())?)

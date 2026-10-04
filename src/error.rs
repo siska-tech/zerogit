@@ -180,6 +180,9 @@ pub enum Error {
 
     /// A remote with this name is already configured.
     RemoteAlreadyExists(String),
+
+    /// A reference did not have the value an update expected.
+    StaleReference(String),
 }
 
 impl fmt::Display for Error {
@@ -266,6 +269,7 @@ impl fmt::Display for Error {
             Error::UnsupportedRebase(reason) => write!(f, "unsupported rebase: {}", reason),
             Error::RemoteNotFound(name) => write!(f, "remote not found: {}", name),
             Error::RemoteAlreadyExists(name) => write!(f, "remote already exists: {}", name),
+            Error::StaleReference(name) => write!(f, "reference changed concurrently: {}", name),
             Error::IrreversibleLineEndings(path) => write!(
                 f,
                 "line ending conversion would not round-trip: {}",
@@ -383,6 +387,7 @@ mod tests {
             Error::UnsupportedRebase("reason".to_string()),
             Error::RemoteNotFound("origin".to_string()),
             Error::RemoteAlreadyExists("origin".to_string()),
+            Error::StaleReference("refs/heads/main".to_string()),
         ];
 
         // All variants should implement Display without panicking

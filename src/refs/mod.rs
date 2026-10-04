@@ -7,6 +7,7 @@ pub(crate) mod reflog;
 pub mod remote_branch;
 pub mod resolver;
 pub mod tag;
+mod update;
 
 pub use branch::{Branch, BranchList};
 pub use head::Head;

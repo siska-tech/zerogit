@@ -25,6 +25,9 @@
 - rebase: `Repository::rebase()`（`git rebase <upstream>`、`--onto`相当）、`rebase_continue()`、`rebase_skip()`、`rebase_abort()`、`is_rebasing()`、`RebaseOutcome`。Gitの既定（mergeバックエンド・非対話）と同じく、upstreamにないコミットを古い順に3-way mergeで付け替え、作者・メッセージを保つ。マージコミットは除外し、upstreamに同じ変更があるコミット（patch-id）は飛ばし、空になったコミットは捨てる。途中の状態を`.git/rebase-merge/`にGitと同じ形式で保存し、zerogit・Gitのどちらからでも再開・スキップ・中止できる。reflog（`rebase (start)`・`(pick)`・`(continue)`・`(finish)`・`(abort)`）と`ORIG_HEAD`もGitと同じ。対話的rebaseは範囲外 (#31)
 - リモート設定: `Repository::remotes()`、`remote()`、`add_remote()`（既定のfetch refspec付き）、`set_remote_url()`、`remove_remote()`（設定・リモート追跡ブランチ・upstream設定を削除）、`branch_upstream()`、`set_branch_upstream()`、`Remote`、`Refspec`（`+`・`^`・`*`のパターン、対応付けと逆引き）(#32)
 - packの受信と送信: `Repository::store_pack()`（受け取ったpackを検証し、deltaを解決してversion 2の`.idx`を作り`objects/pack/`に保存する。thin packは手元のオブジェクトで補う。`.idx`は`git index-pack`の出力と一致する）、`objects_to_send()`・`pack_objects()`（wantsから到達しhavesから到達しないオブジェクトのpackを作る。deltaなし）、`StoredPack` (#32)
+- 新しいcrate `zerogit-remote`: `clone()`・`fetch()`・`push()`（と、トランスポートを指定する`*_with`）。Git protocol v2（v0へのフォールバックあり）でのfetch、receive-packでのpush。トランスポートはローカル（Gitを起動せず直接読み書き）、SSH（システムの`ssh`クライアント）、Smart HTTP(S)（`ureq`+`rustls`、Basic/Bearer認証）。clone・fetch・pushの結果（参照、設定、`FETCH_HEAD`、reflog、作業ツリー）がGitと一致することを、ローカル・`git upload-pack`/`receive-pack`・`git http-backend`の各経路で確認している (#32)
+- 参照の操作: `Repository::references()`、`find_reference()`、`update_reference()`（期待値付きの更新・削除。packed参照も削除できる）、`set_symbolic_reference()`、`is_ancestor()`、`has_object()`、`object_type()`、`peel()`、`reset_hard()`、`is_bare()`
+- `Error::StaleReference`
 - `Config::get_all()`: 複数値のキー（`remote.<name>.fetch`など）の取得
 - `Error::RemoteNotFound`、`RemoteAlreadyExists`
 - `Error::RebaseInProgress`、`NoRebaseInProgress`、`UnsupportedRebase`
@@ -34,8 +37,9 @@
 
 ### Changed
 - crates.ioのパッケージから`issues/`・`docs/`・`tests/`を除外した
-- **破壊的変更**: `Error`に`UnmergedPaths`・`IgnoredPath`・`UnsupportedAttribute`・`IrreversibleLineEndings`・`MergeInProgress`・`NoMergeInProgress`・`NotFastForward`・`LocalChangesWouldBeOverwritten`・`UnsupportedMerge`・`RebaseInProgress`・`NoRebaseInProgress`・`UnsupportedRebase`・`RemoteNotFound`・`RemoteAlreadyExists`を追加した
+- **破壊的変更**: `Error`に`UnmergedPaths`・`IgnoredPath`・`UnsupportedAttribute`・`IrreversibleLineEndings`・`MergeInProgress`・`NoMergeInProgress`・`NotFastForward`・`LocalChangesWouldBeOverwritten`・`UnsupportedMerge`・`RebaseInProgress`・`NoRebaseInProgress`・`UnsupportedRebase`・`RemoteNotFound`・`RemoteAlreadyExists`・`StaleReference`を追加した
 - ブランチ名・タグ名を`git check-ref-format`の規則で検証する（空白、`@{`、`//`、末尾の`.`、`.`で始まる・`.lock`で終わる要素を追加で拒否。ブランチ名の`@`・`HEAD`も拒否）。`a`と`a/b`のように衝突する参照は`RefAlreadyExists`になる
+- `Repository::open`が、`.git`を持たないbareリポジトリ（`core.bare=true`、または名前が`.git`で終わらないGitディレクトリ）をbareとして開く
 - グローバル設定は`$XDG_CONFIG_HOME/git/config`の後に`~/.gitconfig`を読む（Gitと同じく`~/.gitconfig`が優先）
 - 作業ツリーの走査で、名前が`.`で始まるファイル・ディレクトリ（`.github/`、`.env.example`など）を除外しない。除外するのは`.git`だけ (#20)
 - `Repository::add`は、無視された未追跡ファイルを`IgnoredPath`で拒否する（`git add`と同じ）

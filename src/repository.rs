@@ -146,6 +146,16 @@ impl Repository {
             .canonicalize()
             .map_err(|_| Error::NotARepository(path.to_path_buf()))?;
 
+        // A bare repository: the directory itself is the Git directory.
+        if !abs_path.join(".git").exists() && Self::validate_git_dir(&abs_path).is_ok() {
+            let bare = crate::config::Config::from_file(abs_path.join("config"))
+                .map(|c| c.get_bool_or("core", "bare", false))
+                .unwrap_or(false);
+            if bare || !abs_path.ends_with(".git") {
+                return Self::from_dirs(abs_path.clone(), abs_path);
+            }
+        }
+
         // Determine if we're given the .git directory or the work tree
         let (work_dir, git_dir) = if abs_path.ends_with(".git") {
             // Given the .git directory directly
@@ -324,6 +334,11 @@ impl Repository {
         fs::write(git_dir.join("config"), config_content)?;
 
         Self::from_dirs(work_dir, git_dir)
+    }
+
+    /// Returns whether the repository is bare (has no work tree).
+    pub fn is_bare(&self) -> bool {
+        self.work_dir == self.git_dir
     }
 
     /// Returns the path to the repository root (working directory).
@@ -2166,7 +2181,7 @@ impl Repository {
 /// `/` or `.`, contains `//`, `..`, `@{`, a space, a control character or
 /// one of `~ ^ : ? * [ \`, is `@`, or has a component that starts with `.`
 /// or ends with `.lock`.
-fn validate_ref_name(kind: &str, name: &str) -> Result<()> {
+pub(crate) fn validate_ref_name(kind: &str, name: &str) -> Result<()> {
     let invalid = |reason: &str| {
         Err(Error::InvalidRefName(format!(
             "{} name {}: {}",

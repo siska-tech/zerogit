@@ -16,8 +16,10 @@
 - pathspec: 上記はパス・ディレクトリ（配下すべて）・glob（`*`・`?`・`[...]`。Gitの既定と同じく`/`にもマッチする）・`.`（すべて）を受け付ける。どのファイルにも一致しないpathspecは`Error::PathspecNotMatched` (#46)
 - `RestoreOptions`、`RemoveOptions`、`Error::PathspecNotMatched`、`Error::InvalidPathOperation`、`Error::UncommittedChanges` (#46)
 - `Repository::amend_commit(message, &CommitOptions)`: `git commit --amend`と同じく、元のコミットの親・author（指定すれば変更可）と、新しいcommitterでコミットを置き換える。メッセージを省略すると元のメッセージをそのまま使う（`--no-edit`）。reflogは`commit (amend):`。Gitと同じく、親と同じtreeになる場合（マージコミットを除く）とマージ中は拒否する (#45)
+- `Repository::checkout_with(target, &CheckoutOptions)`と`CheckoutOptions::force`: `git checkout -f`と同じく、ローカルの変更・邪魔になる未追跡ファイル・コンフリクトを捨てて切り替える (#43)
 
 ### Changed
+- `checkout`は、Gitの2-way merge（`read-tree -m -u`）と同じく、現在のHEADと切り替え先で異なるパスだけを変える。無関係な未追跡ファイルや、切り替えで変わらないパスの変更（ステージ済みを含む）は残したまま切り替える。これまでは変更が1つでもあると`Error::DirtyWorkingTree`で止まっていた。上書き・削除されるファイルに変更があるとき、または無視されていない未追跡ファイルと衝突するときは、`Error::LocalChangesWouldBeOverwritten`でパスを列挙して止まり、何も変えない。無視されたファイルはGitと同じく上書きする。判定はmerge・rebaseと共通 (#43)
 - `Repository::commit()`・`tree()`・`blob()`・`object()`がリビジョンを受け付ける（`repo.commit("HEAD~1")`など）。短縮OIDの指定はこれまでどおり動く (#44)
 - `checkout`・`merge`・`rebase`の対象の解決を`rev_parse`にそろえた。参照名はGitと同じ順で探す（同名のタグとブランチではタグ、`origin`は`origin/HEAD`）。`checkout`は`-`・`@{-<n>}`がブランチを指すとき、Gitと同じくそのブランチに切り替える (#44)
 

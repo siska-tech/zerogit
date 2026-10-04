@@ -311,10 +311,10 @@ fn test_w009_checkout_updates_content() {
 }
 
 // =============================================================================
-// W-010: Checkout with dirty working tree
+// W-010: Checkout with local changes (see also tests/checkout_test.rs)
 // =============================================================================
 
-/// W-010: Cannot checkout with modified files
+/// W-010: A modified file the switch does not touch is carried over
 #[test]
 fn test_w010_checkout_dirty_modified() {
     let temp = TempDir::new().unwrap();
@@ -325,12 +325,14 @@ fn test_w010_checkout_dirty_modified() {
     // Modify tracked file
     fs::write(temp.path().join("README.md"), "Modified").unwrap();
 
-    // Should fail
-    let result = repo.checkout("feature");
-    assert!(matches!(result, Err(Error::DirtyWorkingTree)));
+    repo.checkout("feature").unwrap();
+    assert_eq!(
+        fs::read_to_string(temp.path().join("README.md")).unwrap(),
+        "Modified"
+    );
 }
 
-/// W-010: Cannot checkout with untracked files
+/// W-010: An unrelated untracked file does not block the switch
 #[test]
 fn test_w010_checkout_dirty_untracked() {
     let temp = TempDir::new().unwrap();
@@ -341,9 +343,8 @@ fn test_w010_checkout_dirty_untracked() {
     // Create untracked file
     fs::write(temp.path().join("untracked.txt"), "Untracked").unwrap();
 
-    // Should fail
-    let result = repo.checkout("feature");
-    assert!(matches!(result, Err(Error::DirtyWorkingTree)));
+    repo.checkout("feature").unwrap();
+    assert!(temp.path().join("untracked.txt").exists());
 }
 
 /// W-010: Cannot checkout nonexistent ref

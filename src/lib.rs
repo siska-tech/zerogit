@@ -80,7 +80,7 @@ pub use commit::CommitOptions;
 pub use config::{Config, ConfigLevel};
 pub use error::{Error, Result};
 pub use path_ops::{RemoveOptions, RestoreOptions};
-pub use repository::Repository;
+pub use repository::{CheckoutOptions, Repository};
 pub use reset::ResetMode;
 
 // Re-export object types

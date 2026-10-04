@@ -81,11 +81,27 @@ pub trait Transport {
 /// [`LocalTransport`], `ssh://` and `user@host:path` by running `ssh`, and
 /// `http(s)://` with the HTTP connector (with the `https` feature).
 pub fn open(url: &str) -> Result<Box<dyn Transport>> {
+    open_with_ssh_command(url, None)
+}
+
+/// Opens the transport for a URL like [`open`], using the repository's
+/// `core.sshCommand` for SSH when the environment sets neither
+/// `GIT_SSH_COMMAND` nor `GIT_SSH`, as Git does.
+pub fn open_for(repo: &zerogit::Repository, url: &str) -> Result<Box<dyn Transport>> {
+    let config = repo.config()?;
+    open_with_ssh_command(url, config.get("core", "sshCommand"))
+}
+
+fn open_with_ssh_command(url: &str, ssh_command: Option<&str>) -> Result<Box<dyn Transport>> {
     match crate::url::parse(url)? {
         crate::url::Location::Local(path) => Ok(Box::new(LocalTransport::open(&path)?)),
-        crate::url::Location::Ssh { host, port, path } => Ok(Box::new(GitTransport::new(
-            ProcessConnector::ssh(&host, port, &path),
-        ))),
+        crate::url::Location::Ssh { host, port, path } => {
+            let mut connector = ProcessConnector::ssh(&host, port, &path);
+            if let Some(command) = ssh_command {
+                connector = connector.ssh_command(command);
+            }
+            Ok(Box::new(GitTransport::new(connector)))
+        }
         #[cfg(feature = "https")]
         crate::url::Location::Http(url) => {
             Ok(Box::new(GitTransport::new(HttpConnector::new(&url)?)))

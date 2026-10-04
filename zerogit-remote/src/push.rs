@@ -138,7 +138,7 @@ pub fn push(
         .push_url()
         .ok_or_else(|| Error::UnsupportedUrl(format!("remote {} has no URL", remote)))?
         .to_owned();
-    let mut transport = transport::open(&url)?;
+    let mut transport = transport::open_for(repo, &url)?;
     push_with(repo, remote, transport.as_mut(), refspecs, options)
 }
 

@@ -17,6 +17,10 @@ pub enum Error {
     Http(String),
     /// The URL is not one this crate can handle.
     UnsupportedUrl(String),
+    /// The connection ended before the remote answered: for SSH, the
+    /// client's exit status and messages (authentication failed, host key
+    /// verification failed, repository not found, ...).
+    Connection(String),
 }
 
 impl fmt::Display for Error {
@@ -28,6 +32,7 @@ impl fmt::Display for Error {
             Error::Remote(message) => write!(f, "remote error: {}", message),
             Error::Http(reason) => write!(f, "HTTP error: {}", reason),
             Error::UnsupportedUrl(url) => write!(f, "unsupported URL: {}", url),
+            Error::Connection(details) => write!(f, "connection failed: {}", details),
         }
     }
 }

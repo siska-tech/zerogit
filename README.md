@@ -426,14 +426,13 @@ fn main() -> Result<()> {
 - [x] コミット変更一覧（`commit_diff()`）
 - [x] ワーキングツリー差分（`diff_index_to_workdir()`, `diff_head_to_index()`）
 
-### Phase 3: Packfile・行単位差分（✅ 読み取りと差分） / マージ（将来）
+### Phase 3: Packfile・行単位差分 ✅
 
 - [x] Packfile読み取り - pack v2/v3、idx v2（64bit offset含む）、OFS_DELTA/REF_DELTA、多段delta。looseと複数packを透過的に扱い、`git repack`/`git gc`後も開いたままの`Repository`で読み続けられる
 - [x] `packed-refs` - loose参照を優先し、HEAD・ブランチ・リモートブランチ・タグを解決・列挙。packed参照の削除は参照の復活を防ぐため`Error::PackedRefDeletionUnsupported`
 - [x] 行単位差分（`diff_blobs()` / `BlobDiff::compute()`）- 最小編集のMyers法、旧新行番号、文脈行数指定、LF/CRLF・末尾改行の保持
 - [x] 完全一致リネームの旧新mode保持と決定的な対応付け
 - [x] 類似度によるリネーム検出（任意）- `diff_trees_with_options()`/`commit_diff_with_options()`に`RenameOptions::new().detection(RenameDetection::Similar)`を渡す。既定は完全一致のみ
-- [ ] 3-way merge - 共通祖先ベースのマージ（将来）
 
 #### 対応形式と制限
 
@@ -463,69 +462,24 @@ fn main() -> Result<()> {
 
 測定は`cargo run --release --example measure_document_diff`で再現できます（Windows 11、release build。1,000コミット・50文書をpack化したリポジトリで、全履歴の走査50〜220 ms、全コミットの変更一覧160〜670 ms、全変更ファイルの行差分は1件あたり0.6〜2.5 ms、ピークメモリ約46 MiB）。
 
-### Phase 4: リモート操作（別crate: `zerogit-remote`）
+### 次の予定
 
-ネットワーク操作は依存関係が増えるため、別crateとして提供予定です。
+- [ ] タグの作成・削除 - 軽量タグ、注釈付きタグ（tagオブジェクトの書き込み）（[#27](https://github.com/siska-tech/zerogit/issues/27)）
 
-#### なぜ別crateなのか？
+### 対象外
 
-| 観点         | zerogit (コア)     | zerogit-remote               |
-| ------------ | ------------------ | ---------------------------- |
-| 依存         | `miniz_oxide` のみ | `rustls`, `russh`, `ureq` 等 |
-| ビルド時間   | 高速               | TLS/SSH依存で増加            |
-| WASM対応     | ○                  | △（制限あり）                |
-| 組み込み用途 | ○                  | △                            |
+次の機能は実装しません（[#26](https://github.com/siska-tech/zerogit/issues/26)で検討）。zerogitは履歴と差分の読み取り、基本的なステージング・コミット・ブランチ・タグの操作に絞り、Pure Rustと最小依存を保ちます。
 
-#### サポート予定プロトコル
-
-| プロトコル | URL形式                  | 認証方式             | 優先度 |
-| ---------- | ------------------------ | -------------------- | ------ |
-| HTTPS      | `https://github.com/...` | Basic / Bearer Token | 高     |
-| SSH        | `git@github.com:...`     | SSH鍵                | 中     |
-| Git        | `git://...`              | なし（読み取り専用） | 低     |
-
-#### 想定API
-
-```rust
-use zerogit::Repository;
-use zerogit_remote::{Remote, Credentials};
-
-// クローン
-let repo = Remote::clone(
-    "https://github.com/user/repo.git",
-    "./local-repo",
-    Credentials::token("ghp_xxxx"),
-)?;
-
-// フェッチ
-let remote = repo.remote("origin")?;
-remote.fetch(&Credentials::ssh_key("~/.ssh/id_ed25519"))?;
-
-// プッシュ
-remote.push("main", &Credentials::token("ghp_xxxx"))?;
-```
-
-#### 技術的な実装要素
-
-```
-Smart HTTP Protocol:
-┌─────────┐                              ┌─────────┐
-│ Client  │  GET /info/refs              │ Server  │
-│         │ ───────────────────────────> │         │
-│         │  200 OK (refs + capabilities)│         │
-│         │ <─────────────────────────── │         │
-│         │                              │         │
-│         │  POST /git-upload-pack       │         │
-│         │  (want/have negotiation)     │         │
-│         │ ───────────────────────────> │         │
-│         │  200 OK (packfile)           │         │
-│         │ <─────────────────────────── │         │
-└─────────┘                              └─────────┘
-```
+| 機能 | 理由 |
+| --- | --- |
+| merge（fast-forward・3-way） | 共通祖先の探索、3-wayの行マージ、コンフリクトの記録と解消の流れが必要で、規模が大きい |
+| rebase | mergeが前提 |
+| stash | 復元が3-way mergeになるため、mergeが前提 |
+| リモート操作（fetch・push・clone） | TLS・SSHなどの依存が増え、最小依存の方針と両立しない。別crate（`zerogit-remote`）の計画も取りやめる |
 
 #### 代替アプローチ
 
-リモート操作が必要だが `zerogit-remote` を待てない場合、システムのgitコマンドと連携できます：
+これらの操作が必要な場合は、システムのgitコマンドと連携できます：
 
 ```rust
 use std::process::Command;

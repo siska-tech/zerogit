@@ -161,7 +161,7 @@ LogOptionsでサポートするフィルタ:
 | `config()`         | -                 | `Result<Config>` |
 | `Config::get(key)` | "section.key"形式 | `Option<&str>`   |
 
-### Phase 3: Packfile・行差分（✅ 読み取りと差分）・マージ（将来）
+### Phase 3: Packfile・行差分（✅ 完了）
 
 | 機能                  | 入力                  | 出力         | 優先度 | 状態      |
 | --------------------- | --------------------- | ------------ | ------ | --------- |
@@ -171,20 +171,23 @@ LogOptionsでサポートするフィルタ:
 | `diff_blobs()`        | 旧新Blob OID          | `BlobDiff`（旧新行番号付き） | 高 | ✅ 完了 |
 | 完全一致リネームのmode保持 | -                | -            | 中     | ✅ 完了   |
 | 類似度リネーム（任意）| 2つのtree + `RenameOptions` | `TreeDiff`（`similarity()`付き） | 中 | ✅ 完了 |
-| merge（fast-forward） | ブランチ名            | `Result<()>` | 低     | 未着手    |
-| merge（3-way）        | ブランチ名            | `Result<()>` | 低     | 未着手    |
 
 対応形式はSHA-1、loose/pack、loose refs/packed-refsに限る。SHA-256・reftableは開く時点で`Error::UnsupportedRepositoryFormat`とする。実行時にGit CLIへ依存しない。
 
-### Phase 4: リモート操作（将来・別crate検討）
+### 次の予定
 
-| 機能  | 備考                   |
-| ----- | ---------------------- |
-| fetch | HTTPSならTLS依存が発生 |
-| push  | 同上                   |
-| clone | 同上                   |
+| 機能                  | 入力                  | 出力         | 優先度 | 状態      |
+| --------------------- | --------------------- | ------------ | ------ | --------- |
+| タグの作成・削除（軽量・注釈付き） | タグ名、対象OID、（注釈付きは）メッセージ・tagger | `Result<Tag>` / `Result<()>` | 中 | 未着手（#27） |
 
-**注:** リモート操作は最小依存原則と競合するため、別crateまたはfeature flag化を検討。
+### 対象外（#26で決定）
+
+| 機能                         | 理由 |
+| ---------------------------- | ---- |
+| merge（fast-forward・3-way） | 共通祖先の探索、3-wayの行マージ、コンフリクトの記録と解消の流れが必要で、規模が大きい |
+| rebase                       | mergeが前提 |
+| stash                        | 復元が3-way mergeになるため、mergeが前提 |
+| fetch・push・clone           | TLS・SSHなどの依存が増え、最小依存原則と両立しない。別crate・feature flagでも提供しない |
 
 ---
 

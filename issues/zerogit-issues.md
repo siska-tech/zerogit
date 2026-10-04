@@ -1035,4 +1035,4 @@ Commitから直接変更ファイル一覧を取得できるようにする。
 | 051 | [#24](https://github.com/siska-tech/zerogit/issues/24) | statusがステージ済み・未ステージを区別できない |
 | 052 | [#25](https://github.com/siska-tech/zerogit/issues/25) | reflogを書かない |
 | 053 | [#26](https://github.com/siska-tech/zerogit/issues/26) | 未実装機能（merge・rebase・stash・タグ作成・リモート操作）の追跡 |
-
+| 054 | [#27](https://github.com/siska-tech/zerogit/issues/27) | タグの作成・削除（軽量タグ・注釈付きタグ） |

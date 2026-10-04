@@ -21,9 +21,9 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::infra::{write_locked, LockFile};
-use crate::merge::file::Labels;
+use crate::merge::file::{ConflictStyle, Labels};
 use crate::merge::tree::{merge_trees, Flat};
-use crate::merge::{index_flat, two_way};
+use crate::merge::{index_flat, staged_changes, two_way};
 use crate::objects::{ObjectType, Oid, Signature};
 use crate::refs::reflog::zero_oid;
 use crate::repository::Repository;
@@ -186,7 +186,7 @@ fn parse_todo(dir: &Path, content: &str) -> Result<Vec<RebaseStep>> {
 
 /// Removes comment lines, then cleans up the message as `git commit -m`
 /// does: Git's `--cleanup=strip`, used for messages its editor prepared.
-fn strip_message(message: &str) -> String {
+pub(crate) fn strip_message(message: &str) -> String {
     let kept: Vec<&str> = message.lines().filter(|l| !l.starts_with('#')).collect();
     crate::commit::cleanup_message(&kept.join("\n"))
 }
@@ -342,12 +342,12 @@ impl Repository {
     }
 
     /// A short identifier for a commit, as Git shows it (7 hex digits).
-    fn short(oid: &Oid) -> String {
+    pub(crate) fn short(oid: &Oid) -> String {
         oid.to_hex()[..7].to_owned()
     }
 
     /// Resolves a revision (see [`Repository::rev_parse`]) to a commit.
-    fn resolve_commit(&self, name: &str) -> Result<Oid> {
+    pub(crate) fn resolve_commit(&self, name: &str) -> Result<Oid> {
         match self.rev_parse(name) {
             Ok(oid) => self.peel_to(oid, ObjectType::Commit),
             Err(
@@ -727,8 +727,6 @@ impl Repository {
 
             let base = self.flat_tree(commit.parents().first())?;
             let theirs = self.flat_tree(Some(&commit_oid))?;
-            let (index_lock, mut idx) = self.lock_index()?;
-            let ours = index_flat(&idx);
             let theirs_label = format!("{} ({})", Self::short(&commit_oid), subject);
             let base_label = format!("parent of {}", theirs_label);
             let labels = Labels {
@@ -736,21 +734,7 @@ impl Repository {
                 base: &base_label,
                 theirs: &theirs_label,
             };
-            let result = merge_trees(
-                &self.object_store(),
-                &base,
-                &ours,
-                &theirs,
-                labels,
-                style,
-                self.merge_renames()?,
-            )?;
-            let mut worktree = self.worktree()?;
-            self.check_overwrites(&idx, &ours, &result, &mut worktree)?;
-            self.apply_merge(&mut idx, &mut worktree, &ours, &result)?;
-            index_lock.write(&idx)?;
-
-            let conflicts = result.conflicted_paths();
+            let conflicts = self.pick_merge(&head, &base, &theirs, labels, style)?;
             if !conflicts.is_empty() {
                 self.record_stop(state, &commit_oid, &conflicts)?;
                 return Ok(RebaseOutcome::Conflicts {
@@ -765,6 +749,43 @@ impl Repository {
             }
         }
         self.finish_rebase(state, who)
+    }
+
+    /// Applies the change from `base` to `theirs` onto the index and work
+    /// tree with a three-way merge (ours is the index, which must match
+    /// `head`), as a pick, revert or rebase step does, and returns the
+    /// conflicted paths. Nothing is changed when an error is returned.
+    pub(crate) fn pick_merge(
+        &self,
+        head: &Oid,
+        base: &Flat,
+        theirs: &Flat,
+        labels: Labels,
+        style: ConflictStyle,
+    ) -> Result<Vec<String>> {
+        let (index_lock, mut idx) = self.lock_index()?;
+        if idx.has_conflicts() {
+            return Err(Error::UnmergedPaths(idx.conflicted_paths()));
+        }
+        let staged = staged_changes(&idx, &self.flat_tree(Some(head))?);
+        if !staged.is_empty() {
+            return Err(Error::LocalChangesWouldBeOverwritten(staged));
+        }
+        let ours = index_flat(&idx);
+        let result = merge_trees(
+            &self.object_store(),
+            base,
+            &ours,
+            theirs,
+            labels,
+            style,
+            self.merge_renames()?,
+        )?;
+        let mut worktree = self.worktree()?;
+        self.check_overwrites(&idx, &ours, &result, &mut worktree)?;
+        self.apply_merge(&mut idx, &mut worktree, &ours, &result)?;
+        index_lock.write(&idx)?;
+        Ok(result.conflicted_paths())
     }
 
     /// Records a stop for an `edit` step the way Git does.
@@ -1077,7 +1098,7 @@ impl Repository {
         self.reset_to_head()
     }
 
-    fn reset_to_head(&self) -> Result<()> {
+    pub(crate) fn reset_to_head(&self) -> Result<()> {
         let head = self.optional_head_oid()?;
         self.reset_hard_to(&self.flat_tree(head.as_ref())?)
     }

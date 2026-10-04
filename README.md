@@ -249,6 +249,8 @@ repo.stash_save(name, email, &StashOptions::new())?; // 変更の退避
 repo.stash_list()?;                       // stash一覧
 repo.stash_pop(0, false)?;                // 復元して削除（apply/dropも）
 repo.rebase("main", None, name, email)?;  // rebase（continue/skip/abortも）
+repo.cherry_pick(&["topic~1"], &CherryPickOptions::new(), name, email)?; // cherry-pick（continue/skip/abortも）
+repo.revert(&["HEAD"], name, email)?;   // revert（continue/skip/abortも）
 ```
 
 詳細は [APIドキュメント](https://docs.rs/zerogit) を参照してください。
@@ -486,7 +488,7 @@ fn main() -> Result<()> {
 | オブジェクト格納 | loose、pack v2/v3（idx v2）。idx v1・multi-pack-index・commit-graph・bitmapは使用しない（packの`.idx`を直接読む） |
 | 参照 | loose refs、`packed-refs`。reftableは`Error::UnsupportedRepositoryFormat` |
 | index | v2/v3/v4（読んだバージョンで書き戻す）。split index・sparse indexは`Error::UnsupportedIndex`。sparse checkout（skip-worktree）中の全体reset・mixed reset・checkoutは未対応 |
-| 未対応 | merge時のディレクトリのリネーム検出（ファイルのリネームは追従する）、対話的rebaseの`exec`・`break`・`label`・`reset`・`merge`、worktree、shallow/partial clone、alternates |
+| 未対応 | merge時のディレクトリのリネーム検出（ファイルのリネームは追従する）、対話的rebaseの`exec`・`break`・`label`・`reset`・`merge`、マージコミットのcherry-pick・revert（`-m`）、worktree、shallow/partial clone、alternates |
 | 差分の結果 | `Text`（完全な行差分）、`NonText`（NULを含む・不正UTF-8。暗黙の置換はしない）、`Skipped`（サイズ・計算量の上限超過。部分結果は返さない） |
 | リネーム検出 | 既定は完全一致のみ。類似度検出（任意）は通常・実行ファイルのテキストが対象で、類似度は「共通する行のバイト数 ÷ 大きい方のサイズ」。既定しきい値50%、候補ペア10万組、1ファイル1 MiBまで。上限に達した分は追加・削除のまま残り、`TreeDiff::rename_limits()`で識別できる |
 | パス | `DiffDelta::path()`はプラットフォームの`PathBuf`（Windowsでは`\`区切り）。比較は`Path`同士で行う |

@@ -34,7 +34,9 @@ impl Repository {
     /// branch record `reset: moving to <revision>`, and a mixed or hard
     /// reset ends a merge in progress (`MERGE_HEAD` and its files are
     /// removed; resolved or not, the conflicts are replaced by the commit's
-    /// content).
+    /// content) and a stopped cherry-pick or revert (`CHERRY_PICK_HEAD` /
+    /// `REVERT_HEAD`; a sequence of several commits can still be continued
+    /// with the next one).
     ///
     /// A mixed reset keeps the stat data of index entries whose content is
     /// unchanged and refreshes the others from the work tree, as Git does,
@@ -91,6 +93,7 @@ impl Repository {
         )?;
         if mode != ResetMode::Soft {
             self.clear_merge_state()?;
+            self.conclude_pick()?;
         }
         Ok(target)
     }

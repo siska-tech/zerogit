@@ -323,7 +323,8 @@ impl Repository {
     /// # Errors
     ///
     /// Nothing is changed when any of these is returned:
-    /// - `Error::MergeInProgress` if a merge is already in progress.
+    /// - `Error::MergeInProgress` if a merge is already in progress, or
+    ///   `Error::CherryPickInProgress` while a cherry-pick is stopped.
     /// - `Error::UnmergedPaths` if the index has unresolved conflicts.
     /// - `Error::NotFastForward` with [`FastForward::Only`] when the
     ///   histories have diverged.
@@ -357,6 +358,10 @@ impl Repository {
     ) -> Result<MergeOutcome> {
         if !self.merge_heads()?.is_empty() {
             return Err(Error::MergeInProgress);
+        }
+        // Git refuses to merge before a stopped cherry-pick is concluded.
+        if self.git_dir().join("CHERRY_PICK_HEAD").exists() {
+            return Err(Error::CherryPickInProgress);
         }
         let (index_lock, mut idx) = self.lock_index()?;
         if idx.has_conflicts() {
@@ -670,6 +675,21 @@ impl Repository {
         }
         let head = self.optional_head_oid()?;
         let ours = self.flat_tree(head.as_ref())?;
+        self.reset_merge_to(&ours, &ours)?;
+        self.clear_merge_state()
+    }
+
+    /// Moves the index and work tree from HEAD's tree `ours` to `target`
+    /// like `git reset --merge` (HEAD itself is not moved): paths whose
+    /// index entry differs from HEAD (including conflicts) and paths that
+    /// differ between the trees get `target`'s version; local changes to
+    /// other paths are kept.
+    ///
+    /// # Errors
+    ///
+    /// `Error::LocalChangesWouldBeOverwritten` if a path that differs
+    /// between the trees has local changes; nothing is changed.
+    pub(crate) fn reset_merge_to(&self, ours: &Flat, target: &Flat) -> Result<()> {
         let (index_lock, mut idx) = self.lock_index()?;
         let mut worktree = self.worktree()?;
 
@@ -688,11 +708,17 @@ impl Repository {
                 paths.push(path.clone());
             }
         }
-        self.restore_paths(&mut idx, &mut worktree, &ours, &paths)?;
-        // Back at HEAD, there is no resolved conflict left to recreate.
+        // Paths the move between the trees changes must not have local
+        // changes.
+        let mut moving = two_way(ours, target);
+        moving.paths.retain(|path, _| !paths.contains(path));
+        self.check_overwrites(&idx, ours, &moving, &mut worktree)?;
+        paths.extend(moving.paths.into_keys());
+
+        self.restore_paths(&mut idx, &mut worktree, target, &paths)?;
+        // Back at a commit, there is no resolved conflict left to recreate.
         idx.clear_resolve_undo();
-        index_lock.write(&idx)?;
-        self.clear_merge_state()
+        index_lock.write(&idx)
     }
 }
 
@@ -754,7 +780,7 @@ pub(crate) fn index_flat(idx: &Index) -> Flat {
 }
 
 /// Paths where the index (stage 0) differs from the tree.
-fn staged_changes(idx: &Index, tree: &Flat) -> Vec<PathBuf> {
+pub(crate) fn staged_changes(idx: &Index, tree: &Flat) -> Vec<PathBuf> {
     let mut changed = Vec::new();
     let mut seen = HashSet::new();
     for entry in idx.entries() {

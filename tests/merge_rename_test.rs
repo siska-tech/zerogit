@@ -189,7 +189,9 @@ fn same_rename_on_both_sides_and_mode_changes() {
     git(temp.path(), &["checkout", "-q", "topic"]);
     git(temp.path(), &["update-index", "--chmod=+x", "run.sh"]);
     git(temp.path(), &["commit", "-q", "-m", "Executable"]);
-    git(temp.path(), &["checkout", "-q", "main"]);
+    // Only the index has the executable bit (the file on disk does not);
+    // on Unix that is a local change, so leave it behind.
+    git(temp.path(), &["checkout", "-q", "-f", "main"]);
     let (outcome, _) = merge_both(temp.path());
     assert!(matches!(outcome, MergeOutcome::Merged(_)));
 }

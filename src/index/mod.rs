@@ -178,6 +178,23 @@ impl Index {
     pub fn clear(&mut self) {
         self.entries.clear();
     }
+
+    /// Smudges the entries of files modified at or after `now` (seconds
+    /// since the epoch, taken just before the index is written), as Git
+    /// does when writing an index: their size is set to 0 so that the next
+    /// reader compares their content instead of trusting the stat data.
+    ///
+    /// Such a file may change again within the timestamp granularity
+    /// without its stat data changing. The new index file is not older than
+    /// `now`, so readers already treat these entries as racy; smudging
+    /// keeps them so after the index is rewritten later.
+    pub(crate) fn smudge_racy_entries(&mut self, now: u64) {
+        for entry in &mut self.entries {
+            if entry.stage == 0 && entry.mtime as u32 >= now as u32 {
+                entry.size = 0;
+            }
+        }
+    }
 }
 
 /// The `/`-separated path bytes Git sorts index entries by.

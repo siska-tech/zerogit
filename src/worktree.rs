@@ -55,26 +55,21 @@ impl WorkFile {
 
     /// Builds a stage 0 index entry for this file, with its stat data.
     pub(crate) fn index_entry(&self, path: PathBuf, oid: Oid) -> IndexEntry {
-        let (mtime, mtime_nsec) = timestamp(self.metadata.modified().ok());
-        let (ctime, ctime_nsec) = match self.metadata.created().ok() {
-            Some(created) => timestamp(Some(created)),
-            None => (mtime, mtime_nsec),
-        };
+        let stat = Stat::of(&self.metadata);
         IndexEntry::new(
-            ctime,
-            mtime,
-            0, // dev (not portable, use 0)
-            0, // ino (not portable, use 0)
+            stat.ctime.0,
+            stat.mtime.0,
+            stat.dev,
+            stat.ino,
             self.mode,
-            0, // uid (not portable, use 0)
-            0, // gid (not portable, use 0)
-            // The size of the file on disk, as Git records it.
-            self.metadata.len() as u32,
+            stat.uid,
+            stat.gid,
+            stat.size,
             oid,
             path,
             0,
         )
-        .with_nanos(ctime_nsec, mtime_nsec)
+        .with_nanos(stat.ctime.1, stat.mtime.1)
     }
 }
 
@@ -83,6 +78,123 @@ fn timestamp(time: Option<std::time::SystemTime>) -> (u64, u32) {
         .map(|d| (d.as_secs(), d.subsec_nanos()))
         .unwrap_or((0, 0))
 }
+
+/// The stat data Git records in an index entry, taken from file metadata
+/// the way Git takes it from `lstat`. Git keeps the low 32 bits of each
+/// value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Stat {
+    pub(crate) ctime: (u64, u32),
+    pub(crate) mtime: (u64, u32),
+    pub(crate) dev: u32,
+    pub(crate) ino: u32,
+    pub(crate) uid: u32,
+    pub(crate) gid: u32,
+    pub(crate) size: u32,
+}
+
+impl Stat {
+    #[cfg(unix)]
+    pub(crate) fn of(metadata: &fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Stat {
+            ctime: (metadata.ctime() as u64, metadata.ctime_nsec() as u32),
+            mtime: (metadata.mtime() as u64, metadata.mtime_nsec() as u32),
+            dev: metadata.dev() as u32,
+            ino: metadata.ino() as u32,
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+            size: metadata.size() as u32,
+        }
+    }
+
+    /// Git for Windows records the creation time as ctime, and no device,
+    /// inode or owner.
+    #[cfg(not(unix))]
+    pub(crate) fn of(metadata: &fs::Metadata) -> Self {
+        let mtime = timestamp(metadata.modified().ok());
+        Stat {
+            ctime: metadata
+                .created()
+                .ok()
+                .map_or(mtime, |created| timestamp(Some(created))),
+            mtime,
+            dev: 0,
+            ino: 0,
+            uid: 0,
+            gid: 0,
+            size: metadata.len() as u32,
+        }
+    }
+}
+
+/// How much of the stat data is compared (`core.trustCtime`,
+/// `core.checkStat`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StatCheck {
+    /// `core.trustCtime`: compare the ctime.
+    trust_ctime: bool,
+    /// `core.checkStat=minimal`: compare only the size and the whole
+    /// seconds of the mtime.
+    minimal: bool,
+}
+
+impl StatCheck {
+    pub(crate) fn from_config(config: &Config) -> Self {
+        StatCheck {
+            trust_ctime: config.get_bool_or("core", "trustctime", true),
+            minimal: config
+                .get("core", "checkstat")
+                .is_some_and(|v| v.eq_ignore_ascii_case("minimal")),
+        }
+    }
+}
+
+/// Whether the stat data of a file still matches its index entry, so that
+/// its content can be taken as unchanged without reading it, as Git's
+/// `ie_match_stat` decides.
+///
+/// `index_mtime` is the modification time of the index file. An entry
+/// modified in the same second as the index was written, or later, is
+/// "racily clean": the file may have changed again within the timestamp
+/// granularity, so only its content can tell (see Git's racy-git). An entry
+/// with size 0 but a non-empty blob was smudged for the same reason.
+pub(crate) fn stat_unchanged(
+    entry: &IndexEntry,
+    stat: &Stat,
+    check: StatCheck,
+    index_mtime: Option<(u64, u32)>,
+) -> bool {
+    let Some(index_mtime) = index_mtime else {
+        return false;
+    };
+    if index_mtime.0 as u32 <= entry.mtime() as u32 {
+        return false;
+    }
+    if entry.size() == 0 && entry.oid().to_hex() != EMPTY_BLOB_HEX {
+        return false;
+    }
+    if entry.size() != stat.size || entry.mtime() as u32 != stat.mtime.0 as u32 {
+        return false;
+    }
+    if check.minimal {
+        return true;
+    }
+    if entry.mtime_nsec() != stat.mtime.1 {
+        return false;
+    }
+    if check.trust_ctime
+        && (entry.ctime() as u32 != stat.ctime.0 as u32 || entry.ctime_nsec() != stat.ctime.1)
+    {
+        return false;
+    }
+    // The device is not compared, as Git is built by default.
+    entry.ino() == stat.ino && entry.uid() == stat.uid && entry.gid() == stat.gid
+}
+
+/// The OID of the empty blob, the one blob an entry of size 0 that was not
+/// smudged can have.
+const EMPTY_BLOB_HEX: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
 
 /// The working tree of a repository and the settings that control how its
 /// files map to blobs.
@@ -101,6 +213,11 @@ pub(crate) struct Worktree {
     symlinks: bool,
     /// `core.fileMode`: trust the executable bit of files.
     filemode: bool,
+    /// Which stat data is compared with index entries.
+    stat_check: StatCheck,
+    /// The modification time of the index file when the work tree was
+    /// loaded, for the racy-git check; `None` without an index.
+    index_mtime: Option<(u64, u32)>,
 }
 
 /// Attributes whose conversions are not implemented.
@@ -135,6 +252,10 @@ impl Worktree {
             symlinks: config.get_bool_or("core", "symlinks", true),
             // Without an executable bit, the index keeps the recorded mode.
             filemode: cfg!(unix) && config.get_bool_or("core", "filemode", true),
+            stat_check: StatCheck::from_config(config),
+            index_mtime: fs::metadata(git_dir.join("index"))
+                .ok()
+                .map(|m| timestamp(m.modified().ok())),
         })
     }
 
@@ -331,6 +452,28 @@ impl Worktree {
         path: &Path,
         tracked: Option<&IndexEntry>,
     ) -> Result<Option<(Oid, FileMode)>> {
+        // A file whose stat data still matches its entry is not read, as in
+        // Git; its mode still comes from the file, so a changed executable
+        // bit or file type is noticed.
+        if let Some(entry) = tracked {
+            if let Some(metadata) = self.metadata(path)? {
+                if stat_unchanged(
+                    entry,
+                    &Stat::of(&metadata),
+                    self.stat_check,
+                    self.index_mtime,
+                ) {
+                    let file_type = metadata.file_type();
+                    if file_type.is_symlink() {
+                        return Ok(Some((*entry.oid(), FileMode::Symlink)));
+                    }
+                    if file_type.is_file() {
+                        let mode = self.file_mode(&metadata, Some(entry.mode()));
+                        return Ok(Some((*entry.oid(), mode)));
+                    }
+                }
+            }
+        }
         match self.read(path, tracked) {
             Ok(file) => Ok(file.map(|file| (file.oid(), file.mode))),
             Err(Error::UnsupportedAttribute { .. }) | Err(Error::IrreversibleLineEndings(_)) => {
@@ -346,6 +489,19 @@ impl Worktree {
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Whether the file at `path` has the stat data recorded in `entry` (and
+    /// is not racily clean), so its content need not be read.
+    pub(crate) fn is_stat_clean(&self, path: &Path, entry: &IndexEntry) -> Result<bool> {
+        Ok(self.metadata(path)?.is_some_and(|metadata| {
+            stat_unchanged(
+                entry,
+                &Stat::of(&metadata),
+                self.stat_check,
+                self.index_mtime,
+            )
+        }))
     }
 
     /// Builds a stage 0 index entry with the stat data of the file at `path`
@@ -713,5 +869,155 @@ mod tests {
         .unwrap();
         let scan = files_of(&temp, None, false);
         assert_eq!(names(&scan.files), [".gitignore", "logs/keep.log"]);
+    }
+
+    fn stat_entry(size: u32, mtime: (u64, u32), ctime: (u64, u32), oid: Oid) -> IndexEntry {
+        IndexEntry::new(
+            ctime.0,
+            mtime.0,
+            7,
+            42,
+            FileMode::Regular,
+            1000,
+            1000,
+            size,
+            oid,
+            PathBuf::from("a.txt"),
+            0,
+        )
+        .with_nanos(ctime.1, mtime.1)
+    }
+
+    fn stat(size: u32, mtime: (u64, u32), ctime: (u64, u32)) -> Stat {
+        Stat {
+            ctime,
+            mtime,
+            dev: 9, // never compared
+            ino: 42,
+            uid: 1000,
+            gid: 1000,
+            size,
+        }
+    }
+
+    const DEFAULT: StatCheck = StatCheck {
+        trust_ctime: true,
+        minimal: false,
+    };
+
+    #[test]
+    fn stat_match_skips_reading_only_when_safe() {
+        let oid = Oid::from_bytes([1; 20]);
+        let entry = stat_entry(5, (100, 7), (90, 3), oid);
+        let index = Some((200, 0));
+        assert!(stat_unchanged(
+            &entry,
+            &stat(5, (100, 7), (90, 3)),
+            DEFAULT,
+            index
+        ));
+        // Without an index file there is nothing to trust.
+        assert!(!stat_unchanged(
+            &entry,
+            &stat(5, (100, 7), (90, 3)),
+            DEFAULT,
+            None
+        ));
+        // Any compared field differing means "read the file".
+        assert!(!stat_unchanged(
+            &entry,
+            &stat(6, (100, 7), (90, 3)),
+            DEFAULT,
+            index
+        ));
+        assert!(!stat_unchanged(
+            &entry,
+            &stat(5, (101, 7), (90, 3)),
+            DEFAULT,
+            index
+        ));
+        assert!(!stat_unchanged(
+            &entry,
+            &stat(5, (100, 8), (90, 3)),
+            DEFAULT,
+            index
+        ));
+        assert!(!stat_unchanged(
+            &entry,
+            &stat(5, (100, 7), (91, 3)),
+            DEFAULT,
+            index
+        ));
+        let mut moved = stat(5, (100, 7), (90, 3));
+        moved.ino = 43;
+        assert!(!stat_unchanged(&entry, &moved, DEFAULT, index));
+    }
+
+    #[test]
+    fn racily_clean_entries_are_read() {
+        let entry = stat_entry(5, (100, 7), (90, 3), Oid::from_bytes([1; 20]));
+        let same = stat(5, (100, 7), (90, 3));
+        // Written in the same second as the index (or after): racy.
+        assert!(!stat_unchanged(&entry, &same, DEFAULT, Some((100, 999))));
+        assert!(!stat_unchanged(&entry, &same, DEFAULT, Some((99, 0))));
+        assert!(stat_unchanged(&entry, &same, DEFAULT, Some((101, 0))));
+    }
+
+    #[test]
+    fn smudged_entries_are_read_unless_the_blob_is_empty() {
+        let same = stat(0, (100, 7), (90, 3));
+        let smudged = stat_entry(0, (100, 7), (90, 3), Oid::from_bytes([1; 20]));
+        assert!(!stat_unchanged(&smudged, &same, DEFAULT, Some((200, 0))));
+        let empty = Oid::from_hex(EMPTY_BLOB_HEX).unwrap();
+        let empty_file = stat_entry(0, (100, 7), (90, 3), empty);
+        assert!(stat_unchanged(&empty_file, &same, DEFAULT, Some((200, 0))));
+    }
+
+    #[test]
+    fn check_stat_and_trust_ctime_limit_the_comparison() {
+        let entry = stat_entry(5, (100, 7), (90, 3), Oid::from_bytes([1; 20]));
+        let mut other = stat(5, (100, 8), (91, 4));
+        other.ino = 1;
+        other.uid = 1;
+        let minimal = StatCheck {
+            trust_ctime: true,
+            minimal: true,
+        };
+        assert!(stat_unchanged(&entry, &other, minimal, Some((200, 0))));
+        let no_ctime = StatCheck {
+            trust_ctime: false,
+            minimal: false,
+        };
+        assert!(stat_unchanged(
+            &entry,
+            &stat(5, (100, 7), (91, 4)),
+            no_ctime,
+            Some((200, 0))
+        ));
+        assert!(!stat_unchanged(&entry, &other, no_ctime, Some((200, 0))));
+    }
+
+    #[test]
+    fn writing_an_index_smudges_entries_modified_this_second() {
+        let mut index = Index::empty(2);
+        index.add(stat_entry(5, (100, 0), (90, 0), Oid::from_bytes([1; 20])));
+        // Modified in the second the index is written.
+        let recent = IndexEntry::new(
+            90,
+            200,
+            0,
+            0,
+            FileMode::Regular,
+            0,
+            0,
+            5,
+            Oid::from_bytes([2; 20]),
+            PathBuf::from("b.txt"),
+            0,
+        );
+        index.add(recent);
+        index.smudge_racy_entries(200);
+        let sizes: Vec<u32> = index.entries().iter().map(IndexEntry::size).collect();
+        assert_eq!(sizes, [5, 0]);
     }
 }

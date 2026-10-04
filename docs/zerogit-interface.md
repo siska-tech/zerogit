@@ -455,7 +455,7 @@ pub fn delete_tag(&self, name: &str) -> Result<()>
 | エラー | `Error::InvalidRefName` - `git check-ref-format`で不正、または`-`で始まる |
 | エラー | `Error::RefAlreadyExists` - 同名のタグ、または`a`と`a/b`のように衝突するタグがある（上書きはしない） |
 | エラー | `Error::ObjectNotFound` - 対象が存在しない。エラー時は何も書き込まない |
-| エラー | `Error::RefNotFound` / `Error::PackedRefDeletionUnsupported` - 削除時、タグがない／packed-refsにある |
+| エラー | `Error::RefNotFound` / `Error::Locked` - 削除時、タグがない／タグか`packed-refs`がロックされている（packed-refsにあるタグも削除できる） |
 
 ##### `Repository::merge` / `abort_merge` / `merge_head` / `merge_base` / `merge_bases`
 
@@ -1933,7 +1933,7 @@ pub enum Error {
     /// packed-refsの不正な行（Phase 3）
     InvalidPackedRefs { line: usize, reason: String },
 
-    /// packed参照の削除は未対応（Phase 3）
+    /// packed参照の削除は未対応（Phase 3）。現在は返さない（packed参照も削除できる）
     PackedRefDeletionUnsupported(String),
 
     /// 不正・破損したpack index（Phase 3）

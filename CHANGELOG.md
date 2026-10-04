@@ -8,9 +8,14 @@
 ### Added
 - cherry-pick・revert: `Repository::cherry_pick(&commits, &CherryPickOptions, ...)`・`Repository::revert(&commits, ...)`と、それぞれの`*_continue`・`*_skip`・`*_abort`。`git cherry-pick`・`git revert --no-edit`と同じく、コミットを指定順に（重複は1回だけ）3-way merge（リネームの追従を含む）で適用する。cherry-pickはauthor・メッセージを元のまま保ち、`CherryPickOptions::record_origin`で`(cherry picked from commit <oid>)`を追記する（`-x`。trailerの後には空行を入れない）。revertのメッセージはGitと同じ`Revert "<subject>"`（revertのrevertは`Reapply "..."`）と`This reverts commit <oid>.`。結果は`PickOutcome`（`Completed`・`Conflicts`・`Empty`）で、コンフリクトと、変更が空になるコミット（すでに入っている変更）はGitと同じく止まる。状態は`CHERRY_PICK_HEAD`・`REVERT_HEAD`・`MERGE_MSG`と、複数コミットでは`.git/sequencer/`（`todo`・`head`・`abort-safety`・`opts`）にGitの形式で書き、zerogitとGitのどちらからでも続行・スキップ・中止できる。中止はGitと同じく`reset --merge`で戻し、無関係なローカルの変更は残す。マージコミット（`-m <parent>`）は`Error::UnsupportedCherryPick`で対象外 (#62)
 - `Error::CherryPickInProgress`・`Error::NoCherryPickInProgress`・`Error::RevertInProgress`・`Error::NoRevertInProgress`・`Error::UnsupportedCherryPick` (#62)
+- `Repository::pack_refs()`: `git pack-refs --all`と同じく、looseの参照を`packed-refs`にまとめ（ソート済み、注釈付きタグには`^`の行。ヘッダもGitと同じ）、looseのファイルと空になったディレクトリを消す。シンボリック参照、作業ツリーごとの参照（`refs/bisect/`など）、存在しないオブジェクトを指す参照はlooseのまま残す。途中で変わった・ロックされているlooseの参照は消さない (#63)
 
 ### Changed
 - 止まったcherry-pick・revertの間の`create_commit_with()`は、`git commit`と同じくそのコミットを確定する（`CHERRY_PICK_HEAD`・`REVERT_HEAD`・`MERGE_MSG`を消す。cherry-pickでは元のauthorを使い、reflogは`commit (cherry-pick):`）。`amend_commit()`・`merge()`は止まったcherry-pickの間はGitと同じく`Error::CherryPickInProgress`で拒否する。mixed・hardの`reset_to()`はcherry-pick・revertの停止状態も終える (#62)
+- `delete_branch()`・`delete_tag()`が`packed-refs`にある参照も削除する（looseとpackedの両方にあれば両方）。これまでは`Error::PackedRefDeletionUnsupported`で拒否していた（このエラーはもう返さない）(#63)
+
+### Fixed
+- `stash_drop()`で最後のstashを消したとき、`packed-refs`にある`refs/stash`が残り、消したはずのstashが見えていた (#63)
 
 ## [0.8.0] - 2026-10-05
 

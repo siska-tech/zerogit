@@ -156,32 +156,34 @@ fn malformed_packed_refs_and_io_failures_are_not_empty_lists() {
 }
 
 #[test]
-fn create_and_delete_do_not_modify_packed_branches() {
+fn create_refuses_and_delete_removes_packed_branches() {
     let (_temp, repo, oid) = repository();
-    let packed = format!("{oid} refs/heads/feature\n");
+    let packed = format!("{oid} refs/heads/feature\n{oid} refs/heads/other\n");
     write_ref(&repo, "packed-refs", &packed);
     assert!(matches!(
         repo.create_branch("feature", Some(oid)),
         Err(Error::RefAlreadyExists(_))
     ));
-    assert!(matches!(
-        repo.delete_branch("feature"),
-        Err(Error::PackedRefDeletionUnsupported(_))
-    ));
+    // Packed only.
+    repo.delete_branch("feature").unwrap();
     assert!(!repo.git_dir().join("refs/heads/feature").exists());
-    write_ref(&repo, "refs/heads/feature", &oid.to_hex());
-    assert!(matches!(
-        repo.delete_branch("feature"),
-        Err(Error::PackedRefDeletionUnsupported(_))
-    ));
-    assert_eq!(
-        fs::read_to_string(repo.git_dir().join("refs/heads/feature")).unwrap(),
-        oid.to_hex()
-    );
     assert_eq!(
         fs::read_to_string(repo.git_dir().join("packed-refs")).unwrap(),
-        packed
+        format!("{oid} refs/heads/other\n")
     );
+    assert!(matches!(
+        repo.delete_branch("feature"),
+        Err(Error::RefNotFound(_))
+    ));
+    // Loose and packed: both go, so no older value reappears.
+    write_ref(&repo, "refs/heads/other", &oid.to_hex());
+    repo.delete_branch("other").unwrap();
+    assert!(!repo.git_dir().join("refs/heads/other").exists());
+    assert_eq!(
+        fs::read_to_string(repo.git_dir().join("packed-refs")).unwrap(),
+        ""
+    );
+    assert!(repo.branches().unwrap().iter().all(|b| b.name() == "main"));
     assert!(matches!(
         repo.delete_branch("main"),
         Err(Error::CannotDeleteCurrentBranch)

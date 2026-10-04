@@ -55,6 +55,7 @@ pub mod config;
 pub mod diff;
 pub(crate) mod eol;
 pub mod error;
+pub mod gc;
 pub(crate) mod ignore;
 pub mod index;
 pub mod log;

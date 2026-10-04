@@ -184,9 +184,11 @@ fn delete_tag_removes_ref_and_empty_directories() {
 
     git(dir, &["tag", "packed"]);
     git(dir, &["pack-refs", "--all"]);
+    repo.delete_tag("packed").unwrap();
+    assert_eq!(git(dir, &["tag", "-l"]), "");
     assert!(matches!(
         repo.delete_tag("packed"),
-        Err(Error::PackedRefDeletionUnsupported(_))
+        Err(Error::RefNotFound(_))
     ));
 }
 

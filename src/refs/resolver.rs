@@ -72,7 +72,7 @@ impl RefStore {
         }
     }
 
-    fn read_loose_ref(&self, name: &str) -> Result<RefValue> {
+    pub(crate) fn read_loose_ref(&self, name: &str) -> Result<RefValue> {
         packed::validate_name(name)?;
         let ref_path = self.git_dir.join(name);
 
@@ -99,7 +99,7 @@ impl RefStore {
         }
     }
 
-    fn packed_refs(&self) -> Result<BTreeMap<String, Oid>> {
+    pub(crate) fn packed_refs(&self) -> Result<BTreeMap<String, Oid>> {
         match fs::read_to_string(self.git_dir.join("packed-refs")) {
             Ok(content) => packed::parse(&content),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
@@ -235,7 +235,11 @@ impl RefStore {
     }
 
     /// Recursively collects reference names from a directory.
-    fn collect_refs_recursive(dir: &Path, prefix: &str, refs: &mut Vec<String>) -> Result<()> {
+    pub(crate) fn collect_refs_recursive(
+        dir: &Path,
+        prefix: &str,
+        refs: &mut Vec<String>,
+    ) -> Result<()> {
         let entries = match fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),

@@ -35,7 +35,8 @@ pub enum Error {
         reason: String,
     },
 
-    /// Deleting a packed reference is not supported yet.
+    /// Deleting a packed reference is not supported. No longer returned:
+    /// packed references are deleted like loose ones.
     PackedRefDeletionUnsupported(String),
 
     /// A pack index file is malformed or its checksum does not match.

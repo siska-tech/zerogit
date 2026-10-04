@@ -219,6 +219,9 @@ repo.create_commit(msg, author, email)?;  // コミット作成
 repo.create_branch(name, target)?;        // ブランチ作成
 repo.delete_branch(name)?;                // ブランチ削除
 repo.checkout(target)?;                   // ブランチ切り替え
+repo.create_tag(name, target)?;           // 軽量タグ作成
+repo.create_annotated_tag(name, target, msg, tagger, email)?; // 注釈付きタグ作成
+repo.delete_tag(name)?;                   // タグ削除
 ```
 
 詳細は [APIドキュメント](https://docs.rs/zerogit) を参照してください。

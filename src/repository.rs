@@ -1509,67 +1509,8 @@ impl Repository {
     }
 
     /// Validates a branch name according to Git rules.
-    ///
-    /// A valid branch name:
-    /// - Cannot be empty
-    /// - Cannot start or end with `/`
-    /// - Cannot contain `..`, `~`, `^`, `:`, `?`, `*`, `[`, `\`, or control characters
-    /// - Cannot start with `-`
-    /// - Cannot end with `.lock`
     fn validate_branch_name(name: &str) -> Result<()> {
-        if name.is_empty() {
-            return Err(Error::InvalidRefName(
-                "branch name cannot be empty".to_string(),
-            ));
-        }
-
-        if name.starts_with('-') {
-            return Err(Error::InvalidRefName(format!(
-                "branch name cannot start with '-': {}",
-                name
-            )));
-        }
-
-        if name.starts_with('/') || name.ends_with('/') {
-            return Err(Error::InvalidRefName(format!(
-                "branch name cannot start or end with '/': {}",
-                name
-            )));
-        }
-
-        if name.ends_with(".lock") {
-            return Err(Error::InvalidRefName(format!(
-                "branch name cannot end with '.lock': {}",
-                name
-            )));
-        }
-
-        let invalid_chars = ['~', '^', ':', '?', '*', '[', '\\'];
-        for c in invalid_chars {
-            if name.contains(c) {
-                return Err(Error::InvalidRefName(format!(
-                    "branch name contains invalid character '{}': {}",
-                    c, name
-                )));
-            }
-        }
-
-        if name.contains("..") {
-            return Err(Error::InvalidRefName(format!(
-                "branch name cannot contain '..': {}",
-                name
-            )));
-        }
-
-        // Check for control characters
-        if name.chars().any(|c| c.is_control()) {
-            return Err(Error::InvalidRefName(format!(
-                "branch name cannot contain control characters: {}",
-                name
-            )));
-        }
-
-        Ok(())
+        validate_ref_name("branch", name)
     }
 
     /// Creates a new branch pointing to the specified commit.
@@ -1614,14 +1555,9 @@ impl Repository {
             None => *self.head()?.oid(),
         };
 
-        // Check if branch already exists
+        // Check if branch already exists (or conflicts as a directory)
         let branch_path = self.git_dir.join("refs/heads").join(name);
-        let ref_name = format!("refs/heads/{}", name);
-        match self.ref_store().read_ref_file(&ref_name) {
-            Ok(_) => return Err(Error::RefAlreadyExists(ref_name)),
-            Err(Error::RefNotFound(_)) => {}
-            Err(e) => return Err(e),
-        }
+        let ref_name = self.check_new_ref("heads", name)?;
 
         // Ensure parent directories exist (for nested branch names like feature/foo)
         if let Some(parent) = branch_path.parent() {
@@ -1684,34 +1620,7 @@ impl Repository {
             return Err(Error::CannotDeleteCurrentBranch);
         }
 
-        // Check if branch exists
-        let branch_path = self.git_dir.join("refs/heads").join(name);
-        let ref_name = format!("refs/heads/{}", name);
-        if store.is_packed(&ref_name)? {
-            return Err(Error::PackedRefDeletionUnsupported(ref_name));
-        }
-        store.read_ref_file(&ref_name)?;
-
-        // Delete the branch ref file and its reflog
-        fs::remove_file(&branch_path)?;
-        self.reflog_writer()?.delete(&ref_name)?;
-
-        // Clean up empty parent directories (for nested branch names)
-        let mut parent = branch_path.parent();
-        let refs_heads = self.git_dir.join("refs/heads");
-        while let Some(dir) = parent {
-            if dir == refs_heads {
-                break;
-            }
-            if dir.read_dir()?.next().is_none() {
-                fs::remove_dir(dir)?;
-            } else {
-                break;
-            }
-            parent = dir.parent();
-        }
-
-        Ok(())
+        self.delete_loose_ref(&format!("refs/heads/{}", name), "refs/heads")
     }
 
     /// Checks if the working tree has uncommitted changes.
@@ -1975,6 +1884,192 @@ impl Repository {
         Ok(result)
     }
 
+    /// Checks that `refs/<namespace>/<name>` can be created: neither it nor a
+    /// reference that would conflict with it as a directory or file exists
+    /// (`a` and `a/b` cannot both exist).
+    fn check_new_ref(&self, namespace: &str, name: &str) -> Result<String> {
+        let ref_name = format!("refs/{}/{}", namespace, name);
+        let prefix = format!("refs/{}/", namespace);
+        for existing in self.ref_store().resolved_refs(&prefix)? {
+            let other = &existing.name;
+            if *other == ref_name
+                || other.starts_with(&format!("{}/", ref_name))
+                || ref_name.starts_with(&format!("{}/", other))
+            {
+                return Err(Error::RefAlreadyExists(other.clone()));
+            }
+        }
+        match self.ref_store().read_ref_file(&ref_name) {
+            Ok(_) => Err(Error::RefAlreadyExists(ref_name)),
+            Err(Error::RefNotFound(_)) => Ok(ref_name),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Creates a lightweight tag: `refs/tags/<name>` pointing directly at an
+    /// object.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The tag name (without `refs/tags/` prefix).
+    /// * `target` - The object to tag (any type). If `None`, the HEAD commit.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::InvalidRefName` if the name is not a valid tag name.
+    /// - `Error::RefAlreadyExists` if the tag (or a conflicting `a`/`a/b`
+    ///   tag) exists. Existing tags are never overwritten; delete first.
+    /// - `Error::ObjectNotFound` if the target does not exist.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// repo.create_tag("v1.0.0", None).unwrap();
+    /// ```
+    pub fn create_tag(&self, name: &str, target: Option<Oid>) -> Result<Tag> {
+        let (ref_name, target_oid, _) = self.prepare_tag(name, target)?;
+        self.write_ref(&ref_name, &target_oid)?;
+        Ok(Tag::lightweight(name, target_oid))
+    }
+
+    /// Creates an annotated tag: a tag object recording the target, the
+    /// tagger and a message, and `refs/tags/<name>` pointing to it.
+    ///
+    /// The tagger is given like the author of [`Repository::create_commit`],
+    /// with the current time. The message is cleaned up as `git tag -m`
+    /// does (trailing whitespace and surrounding blank lines removed, ending
+    /// with a newline).
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The tag name (without `refs/tags/` prefix).
+    /// * `target` - The object to tag (any type; the tag object records its
+    ///   actual type). If `None`, the HEAD commit.
+    /// * `message` - The tag message.
+    /// * `tagger_name` - The tagger's name.
+    /// * `tagger_email` - The tagger's email.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Repository::create_tag`]. Nothing is written on error.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// let tag = repo
+    ///     .create_annotated_tag("v1.0.0", None, "Release 1.0.0", "John Doe", "john@example.com")
+    ///     .unwrap();
+    /// assert!(tag.is_annotated());
+    /// ```
+    pub fn create_annotated_tag(
+        &self,
+        name: &str,
+        target: Option<Oid>,
+        message: &str,
+        tagger_name: &str,
+        tagger_email: &str,
+    ) -> Result<Tag> {
+        let (ref_name, target_oid, target_type) = self.prepare_tag(name, target)?;
+        let tagger = Signature::new(tagger_name, tagger_email, now(), 0);
+        let message = cleanup_message(message);
+        let content = format!(
+            "object {}\ntype {}\ntag {}\ntagger {}\n\n{}",
+            target_oid.to_hex(),
+            target_type.as_str(),
+            name,
+            tagger.to_git_string(),
+            message
+        );
+        let tag_oid = self
+            .object_store()
+            .write(ObjectType::Tag, content.as_bytes())?;
+        self.write_ref(&ref_name, &tag_oid)?;
+        let tag_obj = TagObject::parse(self.object_store().read(&tag_oid)?)?;
+        Ok(Tag::annotated(
+            name,
+            *tag_obj.object(),
+            tag_obj.message().to_string(),
+            tag_obj.tagger().clone(),
+        ))
+    }
+
+    /// Validates a new tag and resolves its target and the target's type.
+    fn prepare_tag(&self, name: &str, target: Option<Oid>) -> Result<(String, Oid, ObjectType)> {
+        validate_ref_name("tag", name)?;
+        let target_oid = match target {
+            Some(oid) => oid,
+            None => *self.head()?.oid(),
+        };
+        let target_type = self.object_store().read(&target_oid)?.object_type;
+        let ref_name = self.check_new_ref("tags", name)?;
+        Ok((ref_name, target_oid, target_type))
+    }
+
+    /// Writes a loose reference file.
+    fn write_ref(&self, ref_name: &str, oid: &Oid) -> Result<()> {
+        let path = self.git_dir.join(ref_name);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        write_file_atomic(&path, format!("{}\n", oid.to_hex()).as_bytes())
+    }
+
+    /// Deletes a tag (lightweight or annotated). A tag object is left in the
+    /// object database, as Git leaves it.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::RefNotFound` if the tag does not exist.
+    /// - `Error::PackedRefDeletionUnsupported` if the tag is in `packed-refs`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// repo.delete_tag("v1.0.0").unwrap();
+    /// ```
+    pub fn delete_tag(&self, name: &str) -> Result<()> {
+        validate_ref_name("tag", name)?;
+        let ref_name = format!("refs/tags/{}", name);
+        self.delete_loose_ref(&ref_name, "refs/tags")
+    }
+
+    /// Deletes a loose reference, its reflog and the directories under
+    /// `root` it leaves empty.
+    fn delete_loose_ref(&self, ref_name: &str, root: &str) -> Result<()> {
+        let store = self.ref_store();
+        if store.is_packed(ref_name)? {
+            return Err(Error::PackedRefDeletionUnsupported(ref_name.to_owned()));
+        }
+        store.read_ref_file(ref_name)?;
+        let path = self.git_dir.join(ref_name);
+        fs::remove_file(&path)?;
+        self.reflog_writer()?.delete(ref_name)?;
+
+        let root = self.git_dir.join(root);
+        let mut parent = path.parent();
+        while let Some(dir) = parent {
+            if dir == root {
+                break;
+            }
+            if dir.read_dir()?.next().is_none() {
+                fs::remove_dir(dir)?;
+            } else {
+                break;
+            }
+            parent = dir.parent();
+        }
+        Ok(())
+    }
+
     /// Lists all tags in the repository.
     ///
     /// Returns a vector of `Tag` objects representing all tags in `refs/tags/`.
@@ -2018,6 +2113,84 @@ impl Repository {
         }
         Ok(result)
     }
+}
+
+/// Validates a branch or tag name (the part after `refs/heads/` or
+/// `refs/tags/`) with the rules of `git check-ref-format`, plus Git's
+/// refusal of names starting with `-`.
+///
+/// A name is rejected when it is empty, starts with `-` or `/`, ends with
+/// `/` or `.`, contains `//`, `..`, `@{`, a space, a control character or
+/// one of `~ ^ : ? * [ \`, is `@`, or has a component that starts with `.`
+/// or ends with `.lock`.
+fn validate_ref_name(kind: &str, name: &str) -> Result<()> {
+    let invalid = |reason: &str| {
+        Err(Error::InvalidRefName(format!(
+            "{} name {}: {}",
+            kind, reason, name
+        )))
+    };
+    if name.is_empty() {
+        return invalid("cannot be empty");
+    }
+    if name.starts_with('-') {
+        return invalid("cannot start with '-'");
+    }
+    if name.starts_with('/') || name.ends_with('/') {
+        return invalid("cannot start or end with '/'");
+    }
+    if name.ends_with('.') {
+        return invalid("cannot end with '.'");
+    }
+    // `git branch` reads "@" as HEAD and refuses a branch named HEAD.
+    if kind == "branch" && (name == "@" || name == "HEAD") {
+        return invalid("is reserved");
+    }
+    for sequence in ["//", "..", "@{"] {
+        if name.contains(sequence) {
+            return invalid(&format!("cannot contain '{}'", sequence));
+        }
+    }
+    for c in ['~', '^', ':', '?', '*', '[', '\\', ' '] {
+        if name.contains(c) {
+            return invalid(&format!("contains invalid character '{}'", c));
+        }
+    }
+    if name.chars().any(|c| c.is_ascii_control()) {
+        return invalid("cannot contain control characters");
+    }
+    for component in name.split('/') {
+        if component.starts_with('.') {
+            return invalid("has a component starting with '.'");
+        }
+        if component.ends_with(".lock") {
+            return invalid("has a component ending with '.lock'");
+        }
+    }
+    Ok(())
+}
+
+/// Cleans up a tag message the way `git tag -m` does: trailing whitespace
+/// is removed from each line, runs of blank lines are collapsed, leading and
+/// trailing blank lines are dropped, and a non-empty message ends with a
+/// newline.
+fn cleanup_message(message: &str) -> String {
+    let mut out = String::new();
+    let mut pending_blank = false;
+    for line in message.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            pending_blank = !out.is_empty();
+            continue;
+        }
+        if pending_blank {
+            out.push('\n');
+            pending_blank = false;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 /// The current time in seconds since the Unix epoch.

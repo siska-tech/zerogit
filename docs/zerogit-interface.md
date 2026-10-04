@@ -438,6 +438,25 @@ pub fn create_commit(
 
 `create_commit`・`create_branch`・`checkout`はHEADとブランチのreflog（`.git/logs/`）にGitと同じ形式・メッセージで追記し、`delete_branch`はブランチのreflogを削除する（`core.logAllRefUpdates`に従う）。
 
+##### `Repository::create_tag` / `create_annotated_tag` / `delete_tag`
+
+```rust
+pub fn create_tag(&self, name: &str, target: Option<Oid>) -> Result<Tag>
+pub fn create_annotated_tag(&self, name: &str, target: Option<Oid>, message: &str,
+                            tagger_name: &str, tagger_email: &str) -> Result<Tag>
+pub fn delete_tag(&self, name: &str) -> Result<()>
+```
+
+| 項目   | 説明 |
+| ------ | ---- |
+| 概要   | 軽量タグ（`refs/tags/<name>`が対象を直接指す）、注釈付きタグ（tagオブジェクト`object`/`type`/`tag`/`tagger`/本文を書き込む）の作成と削除 |
+| 引数   | `target` - 任意のオブジェクト（Noneの場合はHEADのコミット）。注釈付きタグの`type`は対象の実際の型 |
+| 引数   | `tagger_name`/`tagger_email` - `create_commit`の作者と同じく指定し、時刻は現在時刻。メッセージは`git tag -m`と同じく整形する |
+| エラー | `Error::InvalidRefName` - `git check-ref-format`で不正、または`-`で始まる |
+| エラー | `Error::RefAlreadyExists` - 同名のタグ、または`a`と`a/b`のように衝突するタグがある（上書きはしない） |
+| エラー | `Error::ObjectNotFound` - 対象が存在しない。エラー時は何も書き込まない |
+| エラー | `Error::RefNotFound` / `Error::PackedRefDeletionUnsupported` - 削除時、タグがない／packed-refsにある |
+
 ##### `Repository::reflog`
 
 ```rust

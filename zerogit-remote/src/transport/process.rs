@@ -8,7 +8,6 @@
 //! `plink` and `tortoiseplink` get their own port option, as in Git.
 
 use std::io::{Read, Write};
-use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::thread::JoinHandle;
 
@@ -85,11 +84,11 @@ fn variant(client: &SshClient) -> Variant {
         SshClient::Program(program) => program.as_str(),
         SshClient::Shell(command) => command.split_whitespace().next().unwrap_or(""),
     };
-    let name = Path::new(program)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default();
-    match name.as_str() {
+    // The base name, with either separator (a Windows path may be configured
+    // on any platform) and without ".exe", as Git compares it.
+    let base = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let lower = base.to_ascii_lowercase();
+    match lower.strip_suffix(".exe").unwrap_or(&lower) {
         "plink" => Variant::Plink,
         "tortoiseplink" => Variant::TortoisePlink,
         _ => Variant::OpenSsh,

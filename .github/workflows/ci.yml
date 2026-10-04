@@ -85,6 +85,10 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q openssh-server
           sudo mkdir -p /run/sshd
+          # The runner account has a locked password, which sshd treats as a
+          # locked account (without PAM) even for key logins. "*" means "no
+          # password" instead.
+          sudo usermod -p '*' "$USER"
           dir="$HOME/sshd"
           mkdir -p "$dir" ~/.ssh
           chmod 700 ~/.ssh
@@ -127,7 +131,7 @@ jobs:
         run: cargo test --test ssh_test -- --ignored
       - name: Show the sshd log
         if: failure()
-        run: cat "$HOME/sshd/sshd.log"
+        run: sudo cat "$HOME/sshd/sshd.log"
 
   lint:
     runs-on: ubuntu-latest

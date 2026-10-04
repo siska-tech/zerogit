@@ -229,6 +229,9 @@ repo.add_all()?;              // 全変更をステージ
 repo.reset(path)?;            // ステージを解除
 repo.reset_to("HEAD~1", ResetMode::Soft)?; // git reset --soft/--mixed/--hard
 repo.reset_paths("HEAD~2", &["src"])?;     // git reset <rev> -- <paths>
+repo.restore(&["src"], &RestoreOptions::new())?;   // git restore（--source・--staged も）
+repo.remove(&["old.txt"], &RemoveOptions::new())?; // git rm（--cached・-f・-r も）
+repo.move_path("a.rs", "src/a.rs")?;      // git mv
 repo.create_commit(msg, author, email)?;  // コミット作成
 repo.create_commit_with(msg, &CommitOptions::new())?; // 作者・コミッター・日時を指定（既定はGitと同じ解決）
 repo.amend_commit(None, &CommitOptions::new())?;     // git commit --amend --no-edit

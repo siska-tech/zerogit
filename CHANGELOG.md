@@ -10,6 +10,11 @@
 - `Error::InvalidRevision`: 解決できないリビジョン。理由に問題の部分を含む (#44)
 - `Repository::reset_to(revision, ResetMode)`と`ResetMode`（`Soft`・`Mixed`・`Hard`）: `git reset --soft/--mixed/--hard <rev>`と同じくHEAD（ブランチ）を動かす。`ORIG_HEAD`と`reset: moving to <rev>`のreflogを記録し、mixed・hardはマージ中の状態を終える。mixedは内容の変わらないエントリのstat情報を保ち、ほかは作業ツリーから更新する。softはマージ中・コンフリクト中にはGitと同じく拒否する。ロック中などの失敗時は何も変えない (#45)
 - `Repository::reset_paths(revision, paths)`: `git reset <rev> -- <paths>`と同じく、ファイルまたはディレクトリ配下のindexのエントリを指定したコミットの内容にする (#45)
+- `Repository::restore(paths, &RestoreOptions)`: `git restore [--source=<rev>] [--staged] [--worktree]`。作業ツリー（既定はindexから）・index（既定はHEADから）・両方を復元する。作業ツリーへの書き出しは`checkout`と同じく改行変換・symlink・実行ビットを扱い、indexに新しいstat情報を記録するので、直後の`status()`はファイルを読まずに空になる。コンフリクト中のパスを作業ツリーに戻す指定はGitと同じく拒否する (#46)
+- `Repository::remove(paths, &RemoveOptions)`: `git rm [--cached] [-f] [-r]`。Gitと同じく、コミットしていない変更（ステージ済み・作業ツリー）を失う削除は`force`なしでは拒否し、ディレクトリには`recursive`が必要。コンフリクト中のパスは削除で解消できる (#46)
+- `Repository::move_path(source, destination)`: `git mv`。ファイル・ディレクトリを作業ツリーとindexで移動し、エントリのstat情報を保つ。移動先が既にある・ディレクトリ自身の中・親ディレクトリがない・移動元が未追跡やコンフリクト中・移動元のファイルがない場合は、Gitと同じく拒否する (#46)
+- pathspec: 上記はパス・ディレクトリ（配下すべて）・glob（`*`・`?`・`[...]`。Gitの既定と同じく`/`にもマッチする）・`.`（すべて）を受け付ける。どのファイルにも一致しないpathspecは`Error::PathspecNotMatched` (#46)
+- `RestoreOptions`、`RemoveOptions`、`Error::PathspecNotMatched`、`Error::InvalidPathOperation`、`Error::UncommittedChanges` (#46)
 - `Repository::amend_commit(message, &CommitOptions)`: `git commit --amend`と同じく、元のコミットの親・author（指定すれば変更可）と、新しいcommitterでコミットを置き換える。メッセージを省略すると元のメッセージをそのまま使う（`--no-edit`）。reflogは`commit (amend):`。Gitと同じく、親と同じtreeになる場合（マージコミットを除く）とマージ中は拒否する (#45)
 
 ### Changed

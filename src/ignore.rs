@@ -439,7 +439,12 @@ fn dowild(pattern: &[u8], text: &[u8], icase: bool) -> Wild {
 /// Matches one character against the bracket expression starting at
 /// `pattern[start] == b'['`. Returns whether it matched and the index of the
 /// closing `]`, or `None` if the bracket is not terminated.
-fn match_bracket(pattern: &[u8], start: usize, t_ch: u8, icase: bool) -> Option<(bool, usize)> {
+pub(crate) fn match_bracket(
+    pattern: &[u8],
+    start: usize,
+    t_ch: u8,
+    icase: bool,
+) -> Option<(bool, usize)> {
     let mut p = start + 1;
     let negated = matches!(pattern.get(p), Some(b'!') | Some(b'^'));
     if negated {

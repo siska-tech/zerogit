@@ -5,6 +5,10 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-04
+
+Gitと並行して安全に使えるようにし（ロックファイル、正しいタイムゾーンとメッセージ）、大きな作業ツリーでのstatusを速くした。`zerogit-remote`は0.2.0として、zerogit 0.6に追従する。
+
 ### Added
 - `Error::Locked`: 書き込み先のロックファイル（`<path>.lock`）が既にある場合のエラー。メッセージにロックファイルのパスを含む (#39)
 - `Repository::create_commit_with()`と`CommitOptions`: 作者・コミッター（日時とタイムゾーンを含む）を別々に指定してコミットする。`allow_empty`（`--allow-empty`）と`allow_empty_message`（`--allow-empty-message`）も指定できる。既定ではGitと同じく、親と同じtreeのコミットと空のメッセージを拒否する (#40)
@@ -27,7 +31,7 @@
 - indexを書き戻すと、Gitが作ったcache tree（`TREE`）とresolve-undo（`REUC`）の拡張が失われていた。どちらも読み込んで保持し、エントリの変更に合わせて更新して書き戻す。cache treeは変更したパスのディレクトリだけを無効にし、`create_commit`は有効な部分のtreeを使い回したうえで、作ったtreeでcache treeを埋めて書き戻す。コンフリクトを`add`（または削除）で解消するとresolve-undoに記録し、`git checkout -m <path>`でコンフリクトを作り直せる。コミット・mergeの中止・`reset_hard`で記録を消す（Gitと同じ）。untracked cache（`UNTR`）など内容を検証できない任意の拡張は、書き込み時に落とす（Gitが作り直す）(#42)
 - indexからtreeを作る処理の計算量を、ディレクトリ数の2乗から線形にした (#42)
 - `update_reference()`の期待値付き更新が、ロックを取ってから現在値を比べるようになり、compare-and-swapとして正しく働く。同時に更新すると1つだけが成功し、残りは`StaleReference`か`Locked`になる。`create_commit`・merge・rebaseによるHEADの更新も、読んだときから動いていれば`StaleReference`で拒否する。reflogは参照のロックを持っている間に追記する (#39)
-- `write_file_atomic`の一時ファイル名を、プロセスと呼び出しごとに一意にした。同じファイル（同じオブジェクトなど）を同時に書いても壊れない (#39)
+- looseオブジェクト・pack・作業ツリーのファイルを書くときの一時ファイル名を、プロセスと呼び出しごとに一意にした。同じファイル（同じオブジェクトなど）を同時に書いても壊れない (#39)
 
 ### Development
 - テスト用fixtureを、テストが初回に使うときにGitで自動生成するようにした。クリーンなクローンで`cargo test`だけを実行して通る。`create_fixtures.sh`・`create_fixtures.ps1`は削除した (#47)
@@ -312,6 +316,7 @@ Phase 1: Repository Layer（読み取り操作）の完全実装。
 - 対応プラットフォーム: Linux, macOS, Windows
 - テストカバレッジ: 94%以上
 
+[0.6.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.6.0
 [0.5.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.5.0
 [0.4.0]: https://github.com/siska-tech/zerogit/releases/tag/v0.4.0
 [0.3.7]: https://github.com/siska-tech/zerogit/releases/tag/v0.3.7

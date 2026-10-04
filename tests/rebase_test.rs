@@ -230,6 +230,8 @@ fn git_continues_and_aborts_a_zerogit_rebase() {
         .args(["rebase", "--continue"])
         .env("GIT_EDITOR", "true")
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
         .output()
         .unwrap();
     assert!(

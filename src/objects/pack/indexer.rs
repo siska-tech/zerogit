@@ -52,7 +52,7 @@ struct Entry {
     data: Vec<u8>,
 }
 
-fn type_code(object_type: ObjectType) -> u8 {
+pub(crate) fn type_code(object_type: ObjectType) -> u8 {
     match object_type {
         ObjectType::Commit => 1,
         ObjectType::Tree => 2,

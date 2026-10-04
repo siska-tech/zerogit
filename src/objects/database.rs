@@ -121,6 +121,16 @@ impl ObjectStore {
         Ok((packs, changed))
     }
 
+    /// The packs in the pack directory now (rescanned).
+    pub(crate) fn pack_files(&self) -> Result<Vec<Arc<PackFile>>> {
+        Ok(self.packs(true)?.0)
+    }
+
+    /// The loose objects.
+    pub(crate) fn loose(&self) -> &LooseObjectStore {
+        &self.inner.loose
+    }
+
     pub(crate) fn read(&self, oid: &Oid) -> Result<RawObject> {
         self.find(oid, PackLimits::default().max_delta_depth, 0)?
             .ok_or_else(|| Error::ObjectNotFound(oid.to_hex()))

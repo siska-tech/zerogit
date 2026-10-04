@@ -19,6 +19,11 @@ Thumbs.db
 tests/fixtures/simple/
 tests/fixtures/empty/
 tests/fixtures/branches/
+tests/fixtures/remotes/
+tests/fixtures/tags/
+tests/fixtures/diff/
+tests/fixtures/rename/
+tests/fixtures/merge/
 
 # Claude Code
 .claude/

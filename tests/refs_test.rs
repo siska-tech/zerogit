@@ -51,10 +51,7 @@ fn test_rb003_nested_branch_name() {
     assert_eq!(nested.remote(), "origin");
     assert_eq!(nested.name(), "feature/xyz");
     assert_eq!(nested.full_name(), "origin/feature/xyz");
-    assert_eq!(
-        nested.reference_name(),
-        "refs/remotes/origin/feature/xyz"
-    );
+    assert_eq!(nested.reference_name(), "refs/remotes/origin/feature/xyz");
 }
 
 // RB-004: リモートなし - refs/remotes が空の場合、空のVecを返す

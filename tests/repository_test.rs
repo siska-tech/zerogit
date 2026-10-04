@@ -283,7 +283,10 @@ fn test_rp010_init_bare_creates_bare_repository() {
         repo_path.join("refs/tags").is_dir(),
         "refs/tags directory should exist"
     );
-    assert!(repo_path.join("config").is_file(), "config file should exist");
+    assert!(
+        repo_path.join("config").is_file(),
+        "config file should exist"
+    );
 
     // Verify there's no .git subdirectory
     assert!(
@@ -330,7 +333,10 @@ fn test_rp012_init_then_open() {
 
     // Open the same repository
     let open_repo = Repository::open(&repo_path);
-    assert!(open_repo.is_ok(), "Should be able to open initialized repository");
+    assert!(
+        open_repo.is_ok(),
+        "Should be able to open initialized repository"
+    );
 
     let open_repo = open_repo.unwrap();
     assert_eq!(

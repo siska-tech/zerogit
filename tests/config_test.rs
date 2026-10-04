@@ -109,10 +109,7 @@ fn test_cf004_get_int() {
         config.get_int("core", "packedGitLimit").unwrap(),
         256 * 1024 * 1024
     );
-    assert_eq!(
-        config.get_int("core", "packedGitWindowSize").unwrap(),
-        1024
-    );
+    assert_eq!(config.get_int("core", "packedGitWindowSize").unwrap(), 1024);
     assert_eq!(
         config.get_int("core", "bigFileThreshold").unwrap(),
         1024 * 1024 * 1024
@@ -388,7 +385,10 @@ fn test_cf018_value_with_equals() {
     let config = Config::from_str(content).unwrap();
 
     assert_eq!(config.get("alias", "st"), Some("status --short"));
-    assert_eq!(config.get("alias", "lg"), Some("log --oneline --graph --all"));
+    assert_eq!(
+        config.get("alias", "lg"),
+        Some("log --oneline --graph --all")
+    );
     assert_eq!(
         config.get_subsection("filter", "lfs", "clean"),
         Some("git-lfs clean -- %f")

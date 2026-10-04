@@ -44,7 +44,11 @@ fn create_repo_with_commit() -> TempDir {
         "tree {}\nauthor Test <test@test.com> 1700000000 +0000\ncommitter Test <test@test.com> 1700000000 +0000\n\nInitial commit\n",
         tree_oid
     );
-    let commit_oid = create_object(&git_dir.join("objects"), commit_content.as_bytes(), "commit");
+    let commit_oid = create_object(
+        &git_dir.join("objects"),
+        commit_content.as_bytes(),
+        "commit",
+    );
 
     // Set HEAD
     fs::write(git_dir.join("refs/heads/main"), format!("{}\n", commit_oid)).unwrap();
@@ -203,7 +207,9 @@ fn test_w002_add_all_handles_deletions() {
     // Should now be staged deletion
     let status = repo.status().unwrap();
     assert!(
-        status.iter().any(|e| e.status() == FileStatus::StagedDeleted),
+        status
+            .iter()
+            .any(|e| e.status() == FileStatus::StagedDeleted),
         "Should stage deletion, got: {:?}",
         status
     );
@@ -232,7 +238,9 @@ fn test_w003_reset_unstages_all() {
 
     // File should now be untracked (not in HEAD, so removed from index)
     let status = repo.status().unwrap();
-    let new_file_status = status.iter().find(|e| e.path() == Path::new("new_file.txt"));
+    let new_file_status = status
+        .iter()
+        .find(|e| e.path() == Path::new("new_file.txt"));
     assert!(
         new_file_status.is_some(),
         "new_file.txt should still exist in working tree"

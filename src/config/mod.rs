@@ -133,6 +133,7 @@ impl Config {
     /// # Returns
     ///
     /// A `Config` instance, or an error if parsing fails.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(content: &str) -> Result<Self> {
         parser::parse(content)
     }
@@ -216,12 +217,7 @@ impl Config {
     }
 
     /// Gets a configuration value as a boolean from a section with a subsection.
-    pub fn get_bool_subsection(
-        &self,
-        section: &str,
-        subsection: &str,
-        key: &str,
-    ) -> Result<bool> {
+    pub fn get_bool_subsection(&self, section: &str, subsection: &str, key: &str) -> Result<bool> {
         match self.get_subsection(section, subsection, key) {
             None => Ok(false),
             Some(value) => parse_bool(value),
@@ -250,12 +246,7 @@ impl Config {
     }
 
     /// Gets a configuration value as an integer from a section with a subsection.
-    pub fn get_int_subsection(
-        &self,
-        section: &str,
-        subsection: &str,
-        key: &str,
-    ) -> Result<i64> {
+    pub fn get_int_subsection(&self, section: &str, subsection: &str, key: &str) -> Result<i64> {
         match self.get_subsection(section, subsection, key) {
             None => Ok(0),
             Some(value) => parse_int(value),
@@ -387,9 +378,9 @@ fn expand_path(path: &str, base_dir: &Path) -> PathBuf {
     let path = path.trim();
 
     // Handle home directory expansion
-    if path.starts_with("~/") {
+    if let Some(rest) = path.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
-            return home.join(&path[2..]);
+            return home.join(rest);
         }
     }
 
@@ -435,9 +426,7 @@ impl ConfigLevel {
                     None
                 }
             }
-            ConfigLevel::Global => {
-                dirs::home_dir().map(|home| home.join(".gitconfig"))
-            }
+            ConfigLevel::Global => dirs::home_dir().map(|home| home.join(".gitconfig")),
             ConfigLevel::Local => None, // Requires repository context
         }
     }
@@ -514,9 +503,7 @@ mod dirs {
             std::env::var("USERPROFILE")
                 .ok()
                 .map(PathBuf::from)
-                .or_else(|| {
-                    std::env::var("HOME").ok().map(PathBuf::from)
-                })
+                .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
         }
         #[cfg(not(windows))]
         {
@@ -561,7 +548,12 @@ mod tests {
     fn test_config_subsection() {
         let mut config = Config::new();
         config.set("remote", "origin", "url", "https://github.com/test/repo");
-        config.set("remote", "upstream", "url", "https://github.com/upstream/repo");
+        config.set(
+            "remote",
+            "upstream",
+            "url",
+            "https://github.com/upstream/repo",
+        );
 
         assert_eq!(
             config.get_subsection("remote", "origin", "url"),
@@ -629,7 +621,10 @@ mod tests {
         let mut config = Config::new();
         config.set("http", "", "postBuffer", "100m");
 
-        assert_eq!(config.get_int("http", "postBuffer").unwrap(), 100 * 1024 * 1024);
+        assert_eq!(
+            config.get_int("http", "postBuffer").unwrap(),
+            100 * 1024 * 1024
+        );
         // Non-existent key returns 0
         assert_eq!(config.get_int("http", "nonexistent").unwrap(), 0);
     }

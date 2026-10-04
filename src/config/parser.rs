@@ -121,14 +121,14 @@ fn parse_value(s: &str) -> String {
     let s = remove_inline_comment(s);
 
     // Handle quoted values
-    if s.starts_with('"') {
-        if let Some(end) = s[1..].find('"') {
-            return unescape_value(&s[1..1 + end]);
+    if let Some(quoted) = s.strip_prefix('"') {
+        if let Some(end) = quoted.find('"') {
+            return unescape_value(&quoted[..end]);
         }
     }
 
     // Plain value
-    unescape_value(&s)
+    unescape_value(s)
 }
 
 /// Removes inline comments from a value.

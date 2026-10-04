@@ -16,6 +16,8 @@
 - `filter`（driverが設定されている場合）・`ident`・`working-tree-encoding`属性は未対応として扱い、`add`/`checkout`は`Error::UnsupportedAttribute`を返す。statusと作業ツリーとの差分は、サイズと更新時刻がindexと一致すれば変更なしとし、一致しなければ変更ありとする。driverが設定されていない`filter`はGitと同じく無視する
 - `Repository::detailed_status()`: `git status --porcelain=v2`と同じく、index側（HEAD→index）と作業ツリー側（index→作業ツリー）の状態をパスごとに別々に返す。コンフリクトの種類（`UU`・`AA`・`DU`など）、intent-to-add（`.A`）、型の変更（`T`）、ステージ済みの追加後の削除（`AD`）を区別する (#24)
 - `DetailedStatus`、`DetailedStatusEntry`、`ChangeState`、`ConflictKind`
+- reflogの書き込み: `create_commit`（`commit:`・`commit (initial):`）、`create_branch`（`branch: Created from ...`）、`checkout`（`checkout: moving from ... to ...`）でHEADとブランチのreflogをGitと同じ形式で追記し、`delete_branch`でブランチのreflogを削除する。`core.logAllRefUpdates`に従う。記録する名前とメールは、コミットではコミッター、それ以外では`GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL`、`user.name`/`user.email`の順 (#25)
+- `Repository::reflog()`、`ReflogEntry`: reflogの読み取り（新しい順）
 - 設定の読み込みで`GIT_CONFIG_NOSYSTEM`・`GIT_CONFIG_SYSTEM`・`GIT_CONFIG_GLOBAL`に従う
 - symlinkをGitと同じくmode `120000`・リンク先パスを内容とするBlobとして扱う。`add`/`add_all`・status・作業ツリーとの差分・`checkout`に対応。リンク切れも`add`できる。`core.symlinks=false`や作成できない環境では、リンク先パスを内容とする通常ファイルとして書き出す (#22)
 

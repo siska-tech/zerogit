@@ -74,7 +74,7 @@ pub use repository::Repository;
 pub use objects::{Blob, Commit, FileMode, Object, Oid, Signature, Tree, TreeEntry};
 
 // Re-export reference types
-pub use refs::{Branch, Head, RemoteBranch, Tag};
+pub use refs::{Branch, Head, ReflogEntry, RemoteBranch, Tag};
 
 // Re-export status types
 pub use status::{

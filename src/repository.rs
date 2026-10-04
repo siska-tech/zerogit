@@ -7,8 +7,10 @@ use crate::index::{self, Index, IndexEntry};
 use crate::infra::{read_file, write_file_atomic};
 use crate::log::{LogIterator, LogOptions};
 use crate::objects::tree::FileMode;
+use crate::objects::Signature;
 use crate::objects::{Blob, Commit, Object, ObjectStore, ObjectType, Oid, TagObject, Tree};
-use crate::refs::{Branch, Head, RefStore, RemoteBranch, Tag};
+use crate::refs::reflog::{zero_oid, Reflog};
+use crate::refs::{Branch, Head, RefStore, ReflogEntry, RemoteBranch, Tag};
 use crate::status::{
     compute_status_with_store as compute_status, flatten_tree_with_store as flatten_tree,
     DetailedStatusEntry, StatusEntry,
@@ -1339,18 +1341,22 @@ impl Repository {
         content.into_bytes()
     }
 
-    /// Updates HEAD to point to a new commit.
+    /// Updates HEAD to point to a new commit, recording the update in the
+    /// reflogs of HEAD and of the branch it points to.
     ///
     /// If HEAD points to a branch, updates the branch reference.
     /// If HEAD is detached, updates HEAD directly.
-    fn update_head(&self, new_oid: &Oid) -> Result<()> {
+    fn update_head(&self, new_oid: &Oid, committer: &Signature, message: &str) -> Result<()> {
         let store = self.ref_store();
+        let reflog = self.reflog_writer()?;
+        let old_oid = self.optional_head_oid()?.unwrap_or_else(zero_oid);
 
         match store.read_ref_file("HEAD")? {
             crate::refs::RefValue::Symbolic(target) => {
                 // HEAD points to a branch, update the branch
                 let branch_path = self.git_dir.join(&target);
                 write_file_atomic(&branch_path, format!("{}\n", new_oid.to_hex()).as_bytes())?;
+                reflog.append(&target, &old_oid, new_oid, committer, message)?;
             }
             crate::refs::RefValue::Direct(_) => {
                 // HEAD is detached, update HEAD directly
@@ -1358,8 +1364,57 @@ impl Repository {
                 write_file_atomic(&head_path, format!("{}\n", new_oid.to_hex()).as_bytes())?;
             }
         }
+        reflog.append("HEAD", &old_oid, new_oid, committer, message)
+    }
 
-        Ok(())
+    /// The reflog writer, configured by `core.logAllRefUpdates`.
+    pub(crate) fn reflog_writer(&self) -> Result<Reflog> {
+        Ok(Reflog::new(
+            &self.git_dir,
+            &self.config()?,
+            self.work_dir == self.git_dir,
+        ))
+    }
+
+    /// The identity recorded in reflogs for operations that do not create a
+    /// commit: `GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL`, then `user.name`/
+    /// `user.email`, with the current time.
+    pub(crate) fn reflog_identity(&self) -> Result<Signature> {
+        let config = self.config()?;
+        let name = std::env::var("GIT_COMMITTER_NAME")
+            .ok()
+            .or_else(|| config.get("user", "name").map(str::to_owned))
+            .unwrap_or_else(|| "unknown".to_owned());
+        let email = std::env::var("GIT_COMMITTER_EMAIL")
+            .ok()
+            .or_else(|| config.get("user", "email").map(str::to_owned))
+            .unwrap_or_default();
+        Ok(Signature::new(name, email, now(), 0))
+    }
+
+    /// Returns the reflog of a reference, newest entry first, as
+    /// `git reflog show <name>` lists it.
+    ///
+    /// `name` is `HEAD`, a full reference name such as `refs/heads/main`, or
+    /// a branch name. A reference without a reflog has no entries.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// for (i, entry) in repo.reflog("HEAD").unwrap().iter().enumerate() {
+    ///     println!("HEAD@{{{}}}: {}", i, entry.message());
+    /// }
+    /// ```
+    pub fn reflog(&self, name: &str) -> Result<Vec<ReflogEntry>> {
+        let refname = if name == "HEAD" || name.starts_with("refs/") {
+            name.to_owned()
+        } else {
+            format!("refs/heads/{}", name)
+        };
+        self.reflog_writer()?.read(&refname)
     }
 
     /// Creates a new commit from the staged changes.
@@ -1424,14 +1479,9 @@ impl Repository {
         // Get parent commit (current HEAD, if exists)
         let parent_oid = self.optional_head_oid()?;
 
-        // Create timestamp
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-
         // Format signature (using +0000 timezone for simplicity)
-        let signature = format!("{} <{}> {} +0000", author_name, author_email, timestamp);
+        let committer = Signature::new(author_name, author_email, now(), 0);
+        let signature = committer.to_git_string();
 
         // Format commit content
         let commit_content = Self::format_commit(
@@ -1446,8 +1496,14 @@ impl Repository {
         let store = self.object_store();
         let commit_oid = store.write(ObjectType::Commit, &commit_content)?;
 
-        // Update HEAD
-        self.update_head(&commit_oid)?;
+        // Update HEAD, logging "commit: <subject>" as Git does.
+        let subject = message.lines().next().unwrap_or("");
+        let reflog_message = if parent_oid.is_some() {
+            format!("commit: {}", subject)
+        } else {
+            format!("commit (initial): {}", subject)
+        };
+        self.update_head(&commit_oid, &committer, &reflog_message)?;
 
         Ok(commit_oid)
     }
@@ -1577,6 +1633,21 @@ impl Repository {
             &branch_path,
             format!("{}\n", target_oid.to_hex()).as_bytes(),
         )?;
+        // Git names the start point as given, or the current branch.
+        let start = match target {
+            Some(oid) => oid.to_hex(),
+            None => self
+                .ref_store()
+                .current_branch()?
+                .unwrap_or_else(|| "HEAD".to_owned()),
+        };
+        self.reflog_writer()?.append(
+            &ref_name,
+            &zero_oid(),
+            &target_oid,
+            &self.reflog_identity()?,
+            &format!("branch: Created from {}", start),
+        )?;
 
         Ok(Branch::new(name, target_oid))
     }
@@ -1621,8 +1692,9 @@ impl Repository {
         }
         store.read_ref_file(&ref_name)?;
 
-        // Delete the branch ref file
+        // Delete the branch ref file and its reflog
         fs::remove_file(&branch_path)?;
+        self.reflog_writer()?.delete(&ref_name)?;
 
         // Clean up empty parent directories (for nested branch names)
         let mut parent = branch_path.parent();
@@ -1722,12 +1794,26 @@ impl Repository {
         let commit = self.commit(&target_oid.to_hex())?;
         let tree_oid = *commit.tree();
 
+        // Where HEAD was, for the reflog: the branch name, or the commit.
+        let old_oid = self.optional_head_oid()?;
+        let from = match store.current_branch()? {
+            Some(branch) => branch,
+            None => old_oid.map(|oid| oid.to_hex()).unwrap_or_default(),
+        };
+
         // Update working tree and index
         self.checkout_tree(&tree_oid)?;
 
         // Update HEAD
         let head_path = self.git_dir.join("HEAD");
         write_file_atomic(&head_path, new_head_content.as_bytes())?;
+        self.reflog_writer()?.append(
+            "HEAD",
+            &old_oid.unwrap_or_else(zero_oid),
+            &target_oid,
+            &self.reflog_identity()?,
+            &format!("checkout: moving from {} to {}", from, target),
+        )?;
 
         Ok(())
     }
@@ -1932,6 +2018,14 @@ impl Repository {
         }
         Ok(result)
     }
+}
+
+/// The current time in seconds since the Unix epoch.
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// The key Git sorts tree entries by: the name, with `/` appended for a

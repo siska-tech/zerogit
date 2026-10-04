@@ -436,6 +436,16 @@ pub fn create_commit(
 | エラー | `Error::ConfigNotFound` - author未指定でgit config未設定 |
 | エラー | `Error::UnmergedPaths` - indexにコンフリクト（stage 1〜3）が残っている。何も書き込まない |
 
+`create_commit`・`create_branch`・`checkout`はHEADとブランチのreflog（`.git/logs/`）にGitと同じ形式・メッセージで追記し、`delete_branch`はブランチのreflogを削除する（`core.logAllRefUpdates`に従う）。
+
+##### `Repository::reflog`
+
+```rust
+pub fn reflog(&self, name: &str) -> Result<Vec<ReflogEntry>>
+```
+
+`HEAD`、`refs/...`の完全名、またはブランチ名のreflogを新しい順に返す（`ReflogEntry`: `old_oid()`、`new_oid()`、`committer()`、`message()`）。reflogがなければ空。
+
 ##### `Repository::create_branch`
 
 ```rust

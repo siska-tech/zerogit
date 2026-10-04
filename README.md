@@ -190,6 +190,7 @@ repo.branches()?;             // ローカルブランチ一覧
 repo.remote_branches()?;      // リモートブランチ一覧
 repo.tags()?;                 // タグ一覧
 repo.log()?;                  // コミット履歴（Iterator）
+repo.reflog("HEAD")?;         // reflog（新しい順）
 repo.log_with_options(opts)?; // フィルタリング付きログ
 repo.status()?;               // ワーキングツリー状態（パスごとに1つの状態）
 repo.detailed_status()?;      // index側・作業ツリー側を別々に（porcelain v2相当）

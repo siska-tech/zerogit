@@ -62,11 +62,27 @@ impl Signature {
         self.tz_offset
     }
 
+    /// Formats the signature as Git writes it:
+    /// `Name <email> timestamp +hhmm`.
+    pub(crate) fn to_git_string(&self) -> String {
+        let sign = if self.tz_offset < 0 { '-' } else { '+' };
+        let offset = self.tz_offset.abs();
+        format!(
+            "{} <{}> {} {}{:02}{:02}",
+            self.name,
+            self.email,
+            self.timestamp,
+            sign,
+            offset / 60,
+            offset % 60
+        )
+    }
+
     /// Parses a signature from a Git signature line.
     ///
     /// Format: `Name <email> timestamp timezone`
     /// Example: `John Doe <john@example.com> 1234567890 +0900`
-    fn parse(s: &str) -> Result<Self> {
+    pub(crate) fn parse(s: &str) -> Result<Self> {
         // Find the email part enclosed in < >
         let email_start = s.find('<').ok_or(Error::InvalidUtf8)?;
         let email_end = s.find('>').ok_or(Error::InvalidUtf8)?;

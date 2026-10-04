@@ -379,19 +379,6 @@ fn line_ops(old: &[&str], new: &[&str], max_cost: u64) -> Option<Vec<Op>> {
     byte_line_ops(&old, &new, max_cost)
 }
 
-/// Returns the pairs of matching lines `(old index, new index)` of a
-/// minimal line diff, in order.
-pub(crate) fn matching_lines(old: &[&[u8]], new: &[&[u8]]) -> Vec<(usize, usize)> {
-    byte_line_ops(old, new, u64::MAX)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|op| match op {
-            Op::Equal(i, j) => Some((i, j)),
-            _ => None,
-        })
-        .collect()
-}
-
 fn byte_line_ops<'a>(old: &[&'a [u8]], new: &[&'a [u8]], max_cost: u64) -> Option<Vec<Op>> {
     // Intern lines so comparisons are integer comparisons.
     let mut ids: HashMap<&'a [u8], u32> = HashMap::new();

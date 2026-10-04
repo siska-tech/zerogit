@@ -54,13 +54,18 @@ impl CloneOptions {
 }
 
 /// The URL to record for the remote: local paths are made absolute, as Git
-/// does.
+/// does, without resolving symbolic links or short names.
 fn recorded_url(url: &str) -> String {
     match crate::url::parse(url) {
-        Ok(crate::url::Location::Local(path)) if !url.starts_with("file://") => path
-            .canonicalize()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| url.to_owned()),
+        Ok(crate::url::Location::Local(path)) if !url.starts_with("file://") => {
+            if path.is_absolute() {
+                url.to_owned()
+            } else {
+                std::env::current_dir()
+                    .map(|dir| dir.join(&path).to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| url.to_owned())
+            }
+        }
         _ => url.to_owned(),
     }
 }

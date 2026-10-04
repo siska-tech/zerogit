@@ -12,15 +12,17 @@
 //! Renames are followed as Git's `ort` strategy follows them (unless
 //! `merge.renames` is false): a file renamed on one side, exactly or with
 //! changes (at least 50% similar), gets the other side's changes at its new
-//! path, and conflict markers name both paths. Files renamed differently on
-//! the two sides, renamed on one side and deleted on the other, and renames
-//! onto a path the other side added are still treated as deletions and
-//! additions. Similarity is measured on lines, close to but not exactly as
-//! Git measures it, so files near the threshold may be paired differently.
+//! path, and conflict markers name both paths. Rename conflicts are
+//! recorded as Git records them: renamed on one side and deleted on the
+//! other (rename/delete), renamed to different paths (rename/rename, with
+//! the merged content at both paths), and renames onto the same path
+//! (add/add). Directory renames are not detected. Similarity is measured
+//! on lines, close to but not exactly as Git measures it, so files near the
+//! threshold may be paired differently.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::file::{is_binary, merge_lines, ConflictStyle, Labels};
+use super::file::{is_binary, merge_lines_sized, ConflictStyle, Labels};
 use crate::error::{Error, Result};
 use crate::objects::{tree::FileMode, ObjectStore, ObjectType, Oid};
 
@@ -105,10 +107,10 @@ pub(crate) fn merge_trees(
     renames: bool,
 ) -> Result<TreeMerge> {
     let (mut base, mut ours, mut theirs) = (base.clone(), ours.clone(), theirs.clone());
-    let moved = if renames {
-        follow_renames(store, &mut base, &mut ours, &mut theirs)?
+    let Followed { moved, conflicts } = if renames {
+        follow_renames(store, &mut base, &mut ours, &mut theirs, labels, style)?
     } else {
-        BTreeMap::new()
+        Followed::default()
     };
 
     let mut all: BTreeSet<&String> = BTreeSet::new();
@@ -137,9 +139,9 @@ pub(crate) fn merge_trees(
                         base: &base_label,
                         theirs: &theirs_label,
                     };
-                    merge_path(store, b, o, t, labels, style)?
+                    merge_path(store, b, o, t, labels, style, 7)?
                 }
-                None => merge_path(store, b, o, t, labels, style)?,
+                None => merge_path(store, b, o, t, labels, style, 7)?,
             }
         };
         result.paths.insert(path.clone(), resolution);
@@ -152,6 +154,8 @@ pub(crate) fn merge_trees(
             .entry(path.clone())
             .or_insert(Resolution::Clean(None));
     }
+    // Rename conflicts replace what the path-wise merge decided.
+    result.paths.extend(conflicts);
     check_directory_file_conflicts(&result)?;
     Ok(result)
 }
@@ -164,26 +168,45 @@ struct RenamedPaths {
     theirs: String,
 }
 
-/// Detects the files renamed on each side and moves the other versions of
-/// a renamed file (the base's, and the other side's when it kept the old
-/// path) to the new path, so that the path-wise merge combines a rename on
-/// one side with changes on the other, as Git's `ort` strategy does.
-/// Returns the merged paths that came from a rename, with each side's path.
+/// What [`follow_renames`] decided.
+#[derive(Debug, Default)]
+struct Followed {
+    /// Merged paths that came from a rename on one side, with each side's
+    /// path (for the conflict marker labels).
+    moved: BTreeMap<String, RenamedPaths>,
+    /// Paths whose resolution is decided by a rename conflict, overriding
+    /// the path-wise merge.
+    conflicts: BTreeMap<String, Resolution>,
+}
+
+/// Detects the files renamed on each side, as Git's `ort` strategy does.
 ///
-/// Followed: a rename on one side while the other side kept the file (with
-/// or without changes) and has nothing at the new path; and the same rename
-/// on both sides. Other cases (renamed differently on each side, renamed
-/// on one side and deleted on the other, or a new file at the target) are
-/// left as deletions and additions.
+/// - Renamed on one side, kept (with or without changes) on the other, with
+///   nothing at the new path: the base's and the other side's versions move
+///   to the new path, so the path-wise merge combines the rename with the
+///   other side's changes. Renamed the same way on both sides: the base's
+///   version moves.
+/// - Renamed on one side and deleted on the other (rename/delete): a
+///   conflict at the new path with the base's version (stage 1) and the
+///   renamed one.
+/// - Renamed to different paths (rename/rename): the contents are merged
+///   (markers one character longer, as in Git) and the result is recorded
+///   as a conflict at both new paths, with the base's version at the old
+///   path.
+///
+/// A rename onto a path the other side also has is left to the path-wise
+/// merge, which makes it an add/add conflict there, as in Git.
 fn follow_renames(
     store: &ObjectStore,
     base: &mut Flat,
     ours: &mut Flat,
     theirs: &mut Flat,
-) -> Result<BTreeMap<String, RenamedPaths>> {
+    labels: Labels<'_>,
+    style: ConflictStyle,
+) -> Result<Followed> {
     let ours_renames = detect_renames(store, base, ours)?;
     let theirs_renames = detect_renames(store, base, theirs)?;
-    let mut moved = BTreeMap::new();
+    let mut followed = Followed::default();
 
     for (old, new) in &ours_renames {
         match theirs_renames.get(old) {
@@ -193,15 +216,71 @@ fn follow_renames(
                     base.insert(new.clone(), entry);
                 }
             }
-            Some(_) => {}
+            Some(theirs_new) => {
+                let free = !theirs.contains_key(new)
+                    && !ours.contains_key(theirs_new)
+                    && !base.contains_key(new)
+                    && !base.contains_key(theirs_new);
+                let (Some(&b), Some(&o), Some(&t)) =
+                    (base.get(old), ours.get(new), theirs.get(theirs_new))
+                else {
+                    continue;
+                };
+                if !free {
+                    continue;
+                }
+                let ours_label = format!("{}:{}", labels.ours, new);
+                let base_label = format!("{}:{}", labels.base, old);
+                let theirs_label = format!("{}:{}", labels.theirs, theirs_new);
+                let renamed_labels = Labels {
+                    ours: &ours_label,
+                    base: &base_label,
+                    theirs: &theirs_label,
+                };
+                let merged = if o == t {
+                    o
+                } else {
+                    match merge_path(store, Some(b), Some(o), Some(t), renamed_labels, style, 8)? {
+                        Resolution::Clean(Some(entry)) => entry,
+                        Resolution::Conflict {
+                            worktree: Some(entry),
+                            ..
+                        } => entry,
+                        _ => o,
+                    }
+                };
+                followed.conflicts.insert(
+                    old.clone(),
+                    Resolution::Conflict {
+                        stages: [Some(b), None, None],
+                        worktree: None,
+                    },
+                );
+                followed.conflicts.insert(
+                    new.clone(),
+                    Resolution::Conflict {
+                        stages: [None, Some(merged), None],
+                        worktree: Some(merged),
+                    },
+                );
+                followed.conflicts.insert(
+                    theirs_new.clone(),
+                    Resolution::Conflict {
+                        stages: [None, None, Some(merged)],
+                        worktree: Some(merged),
+                    },
+                );
+            }
             None => {
-                if theirs.contains_key(old) && !theirs.contains_key(new) && !base.contains_key(new)
-                {
+                if base.contains_key(new) || theirs.contains_key(new) {
+                    continue;
+                }
+                if theirs.contains_key(old) {
                     let entry = base.remove(old).expect("a rename source is in the base");
                     base.insert(new.clone(), entry);
                     let entry = theirs.remove(old).expect("checked above");
                     theirs.insert(new.clone(), entry);
-                    moved.insert(
+                    followed.moved.insert(
                         new.clone(),
                         RenamedPaths {
                             base: old.clone(),
@@ -209,24 +288,29 @@ fn follow_renames(
                             theirs: old.clone(),
                         },
                     );
+                } else if let (Some(&b), Some(&o)) = (base.get(old), ours.get(new)) {
+                    // Renamed here, deleted there.
+                    followed.conflicts.insert(
+                        new.clone(),
+                        Resolution::Conflict {
+                            stages: [Some(b), Some(o), None],
+                            worktree: Some(o),
+                        },
+                    );
                 }
             }
         }
     }
     for (old, new) in &theirs_renames {
-        if ours_renames.contains_key(old) {
+        if ours_renames.contains_key(old) || base.contains_key(new) || ours.contains_key(new) {
             continue;
         }
-        if ours.contains_key(old)
-            && !ours.contains_key(new)
-            && base.contains_key(old)
-            && !base.contains_key(new)
-        {
+        if ours.contains_key(old) && base.contains_key(old) {
             let entry = base.remove(old).expect("checked above");
             base.insert(new.clone(), entry);
             let entry = ours.remove(old).expect("checked above");
             ours.insert(new.clone(), entry);
-            moved.insert(
+            followed.moved.insert(
                 new.clone(),
                 RenamedPaths {
                     base: old.clone(),
@@ -234,9 +318,18 @@ fn follow_renames(
                     theirs: new.clone(),
                 },
             );
+        } else if let (Some(&b), Some(&t)) = (base.get(old), theirs.get(new)) {
+            // Deleted here, renamed there.
+            followed.conflicts.insert(
+                new.clone(),
+                Resolution::Conflict {
+                    stages: [Some(b), None, Some(t)],
+                    worktree: Some(t),
+                },
+            );
         }
     }
-    Ok(moved)
+    Ok(followed)
 }
 
 /// The files renamed from `base` to `side`: base path to new path. Exact
@@ -314,6 +407,7 @@ fn merge_path(
     t: Option<Entry>,
     labels: Labels<'_>,
     style: ConflictStyle,
+    marker_size: usize,
 ) -> Result<Resolution> {
     let conflict = |worktree: Option<Entry>| Resolution::Conflict {
         stages: [b, o, t],
@@ -355,7 +449,14 @@ fn merge_path(
     if is_binary(&base_content) || is_binary(&ours_content) || is_binary(&theirs_content) {
         return Ok(conflict(Some(ours)));
     }
-    let merged = merge_lines(&base_content, &ours_content, &theirs_content, labels, style);
+    let merged = merge_lines_sized(
+        &base_content,
+        &ours_content,
+        &theirs_content,
+        labels,
+        style,
+        marker_size,
+    );
     let oid = store.write(ObjectType::Blob, &merged.content)?;
     Ok(if merged.conflicts > 0 || mode_conflict {
         conflict(Some((oid, mode)))

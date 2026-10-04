@@ -224,12 +224,26 @@ fn join_close_conflicts(changes: Vec<Change>) -> Vec<Change> {
 }
 
 /// Merges `ours` and `theirs`, both derived from `base`.
+#[cfg(test)]
 pub(crate) fn merge_lines(
     base: &[u8],
     ours: &[u8],
     theirs: &[u8],
     labels: Labels<'_>,
     style: ConflictStyle,
+) -> FileMerge {
+    merge_lines_sized(base, ours, theirs, labels, style, 7)
+}
+
+/// Merges like [`merge_lines`] with conflict markers of `marker_size`
+/// characters (Git uses 8 for files renamed differently on each side).
+pub(crate) fn merge_lines_sized(
+    base: &[u8],
+    ours: &[u8],
+    theirs: &[u8],
+    labels: Labels<'_>,
+    style: ConflictStyle,
+    marker_size: usize,
 ) -> FileMerge {
     let base_lines = split_lines(base);
     let our_lines = split_lines(ours);
@@ -265,15 +279,15 @@ pub(crate) fn merge_lines(
                     } else {
                         b"\n"
                     };
-                marker(&mut content, b'<', labels.ours, eol);
+                marker(&mut content, b'<', labels.ours, eol, marker_size);
                 side(&mut content, ours_part, eol);
                 if style == ConflictStyle::Diff3 {
-                    marker(&mut content, b'|', labels.base, eol);
+                    marker(&mut content, b'|', labels.base, eol, marker_size);
                     side(&mut content, &base_lines[change.base.clone()], eol);
                 }
-                marker(&mut content, b'=', "", eol);
+                marker(&mut content, b'=', "", eol, marker_size);
                 side(&mut content, theirs_part, eol);
-                marker(&mut content, b'>', labels.theirs, eol);
+                marker(&mut content, b'>', labels.theirs, eol, marker_size);
             }
         }
         pos = change.ours.end;
@@ -286,8 +300,8 @@ fn uses_crlf(lines: &[&[u8]]) -> bool {
     lines.first().is_some_and(|l| l.ends_with(b"\r\n"))
 }
 
-fn marker(out: &mut Vec<u8>, c: u8, label: &str, eol: &[u8]) {
-    out.extend(std::iter::repeat(c).take(7));
+fn marker(out: &mut Vec<u8>, c: u8, label: &str, eol: &[u8], size: usize) {
+    out.extend(std::iter::repeat(c).take(size));
     if !label.is_empty() {
         out.push(b' ');
         out.extend_from_slice(label.as_bytes());

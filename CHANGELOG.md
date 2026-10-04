@@ -24,6 +24,8 @@
 - indexに記録するstat情報をGitと同じにした（Unixではctime・dev・inode・uid・gid、WindowsではGit for Windowsと同じく作成時刻をctimeとする）。indexを書くとき、その秒に変更されたエントリはGitと同じくサイズを0にして、次の読み手に内容を比較させる (#41)
 
 ### Fixed
+- indexを書き戻すと、Gitが作ったcache tree（`TREE`）とresolve-undo（`REUC`）の拡張が失われていた。どちらも読み込んで保持し、エントリの変更に合わせて更新して書き戻す。cache treeは変更したパスのディレクトリだけを無効にし、`create_commit`は有効な部分のtreeを使い回したうえで、作ったtreeでcache treeを埋めて書き戻す。コンフリクトを`add`（または削除）で解消するとresolve-undoに記録し、`git checkout -m <path>`でコンフリクトを作り直せる。コミット・mergeの中止・`reset_hard`で記録を消す（Gitと同じ）。untracked cache（`UNTR`）など内容を検証できない任意の拡張は、書き込み時に落とす（Gitが作り直す）(#42)
+- indexからtreeを作る処理の計算量を、ディレクトリ数の2乗から線形にした (#42)
 - `update_reference()`の期待値付き更新が、ロックを取ってから現在値を比べるようになり、compare-and-swapとして正しく働く。同時に更新すると1つだけが成功し、残りは`StaleReference`か`Locked`になる。`create_commit`・merge・rebaseによるHEADの更新も、読んだときから動いていれば`StaleReference`で拒否する。reflogは参照のロックを持っている間に追記する (#39)
 - `write_file_atomic`の一時ファイル名を、プロセスと呼び出しごとに一意にした。同じファイル（同じオブジェクトなど）を同時に書いても壊れない (#39)
 

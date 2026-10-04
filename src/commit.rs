@@ -240,7 +240,7 @@ impl Repository {
         check: EmptyCheck,
     ) -> Result<Oid> {
         // Hold the index lock until HEAD is updated, as `git commit` does.
-        let (_index_lock, idx) = self.lock_index()?;
+        let (index_lock, mut idx) = self.lock_index()?;
 
         // A tree built from conflict stages would contain duplicate names.
         if idx.has_conflicts() {
@@ -250,7 +250,7 @@ impl Repository {
             return Err(Error::EmptyCommit);
         }
 
-        let tree_oid = self.build_tree_from_index(&idx)?;
+        let (tree_oid, cache_tree) = self.build_cache_tree(&idx)?;
 
         // Parents: the current HEAD (if any), then MERGE_HEAD when
         // concluding a merge.
@@ -294,6 +294,13 @@ impl Repository {
         if !merge_heads.is_empty() {
             self.clear_merge_state()?;
         }
+
+        // Save the trees just built as the cache tree, so the next commit
+        // (by Git or zerogit) reuses them, and forget the resolved
+        // conflicts, now committed, as `git commit` does.
+        idx.set_cache_tree(Some(cache_tree));
+        idx.clear_resolve_undo();
+        index_lock.write(&idx)?;
 
         Ok(commit_oid)
     }

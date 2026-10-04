@@ -3,10 +3,16 @@
 //! The index file (`.git/index`) is a binary file that acts as a staging
 //! area between the working tree and the repository.
 
+pub(crate) mod cache_tree;
 mod reader;
+pub(crate) mod resolve_undo;
 mod writer;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+use cache_tree::CacheTree;
+use resolve_undo::Stages;
 
 use crate::objects::tree::FileMode;
 use crate::objects::Oid;
@@ -24,6 +30,10 @@ pub struct Index {
     version: u32,
     /// The entries in the index.
     entries: Vec<IndexEntry>,
+    /// The cache tree (`TREE` extension), if the index has one.
+    cache_tree: Option<CacheTree>,
+    /// Resolved conflicts (`REUC` extension), by `/`-separated path.
+    resolve_undo: BTreeMap<Vec<u8>, Stages>,
 }
 
 impl Index {
@@ -32,12 +42,19 @@ impl Index {
         Self {
             version,
             entries: Vec::new(),
+            cache_tree: None,
+            resolve_undo: BTreeMap::new(),
         }
     }
 
     /// Creates a new Index from parsed data.
     pub(crate) fn new(version: u32, entries: Vec<IndexEntry>) -> Self {
-        Self { version, entries }
+        Self {
+            version,
+            entries,
+            cache_tree: None,
+            resolve_undo: BTreeMap::new(),
+        }
     }
 
     /// Returns the index format version.
@@ -118,10 +135,15 @@ impl Index {
     ///
     /// * `entry` - The entry to add or update.
     pub fn add(&mut self, entry: IndexEntry) {
+        self.invalidate(&entry.path);
         let range = self.path_range(&entry.path);
         let start = range.start;
         let stage = entry.stage;
         let mut end = range.end;
+        if stage == 0 {
+            // Staging a conflicted path resolves it; remember the stages.
+            self.record_resolve_undo(start..end);
+        }
         let mut i = start;
         while i < end {
             let existing = self.entries[i].stage;
@@ -148,8 +170,70 @@ impl Index {
     pub fn remove(&mut self, path: &Path) -> bool {
         let range = self.path_range(path);
         let removed = !range.is_empty();
+        if removed {
+            self.invalidate(path);
+            // Removing a conflicted path resolves it by deletion.
+            self.record_resolve_undo(range.clone());
+        }
         self.entries.drain(range);
         removed
+    }
+
+    /// Marks the cached trees of the directories leading to `path` as
+    /// changed.
+    fn invalidate(&mut self, path: &Path) {
+        if let Some(tree) = &mut self.cache_tree {
+            tree.invalidate(&path_key(path));
+        }
+    }
+
+    /// Records the conflict stages among `range` (the entries of one path)
+    /// in the resolve-undo data, as Git does when a conflict is resolved.
+    fn record_resolve_undo(&mut self, range: std::ops::Range<usize>) {
+        let mut stages: Stages = [None; 3];
+        let mut path = None;
+        for entry in &self.entries[range] {
+            if (1..=3).contains(&entry.stage) {
+                let mode = u32::from_str_radix(entry.mode.as_octal(), 8).unwrap_or(0o100644);
+                stages[usize::from(entry.stage) - 1] = Some((mode, entry.oid));
+                path = Some(path_key(&entry.path));
+            }
+        }
+        if let Some(path) = path {
+            self.resolve_undo.insert(path, stages);
+        }
+    }
+
+    /// The cache tree (`TREE` extension), if any.
+    pub(crate) fn cache_tree(&self) -> Option<&CacheTree> {
+        self.cache_tree.as_ref()
+    }
+
+    /// Replaces the cache tree.
+    pub(crate) fn set_cache_tree(&mut self, tree: Option<CacheTree>) {
+        self.cache_tree = tree;
+    }
+
+    /// The resolved conflicts (`REUC` extension), by `/`-separated path.
+    pub(crate) fn resolve_undo(&self) -> &BTreeMap<Vec<u8>, Stages> {
+        &self.resolve_undo
+    }
+
+    /// Forgets the resolved conflicts, as Git does once they are committed
+    /// or reset.
+    pub(crate) fn clear_resolve_undo(&mut self) {
+        self.resolve_undo.clear();
+    }
+
+    /// Sets the extensions read from an index file.
+    pub(crate) fn with_extensions(
+        mut self,
+        cache_tree: Option<CacheTree>,
+        resolve_undo: BTreeMap<Vec<u8>, Stages>,
+    ) -> Self {
+        self.cache_tree = cache_tree;
+        self.resolve_undo = resolve_undo;
+        self
     }
 
     /// The range of entries for a path, located by binary search in Git's
@@ -177,6 +261,8 @@ impl Index {
     /// Clears all entries from the index.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.cache_tree = None;
+        self.resolve_undo.clear();
     }
 
     /// Smudges the entries of files modified at or after `now` (seconds

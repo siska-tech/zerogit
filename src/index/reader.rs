@@ -17,6 +17,8 @@ use crate::objects::oid::OID_BYTES;
 use crate::objects::tree::FileMode;
 use crate::objects::Oid;
 
+use super::cache_tree::CacheTree;
+use super::resolve_undo::ResolveUndo;
 use super::{Index, IndexEntry};
 
 /// The magic signature at the start of an index file: "DIRC"
@@ -79,12 +81,12 @@ pub fn parse(data: &[u8]) -> Result<Index> {
     }
     // Checked first: a split index legitimately has nameless entries that
     // refer to its shared index, so it must be reported as unsupported.
-    reader.extensions()?;
+    let (cache_tree, resolve_undo) = reader.extensions()?;
     if entries.iter().any(|e| e.path().as_os_str().is_empty()) {
         return Err(invalid("entry with an empty name"));
     }
 
-    Ok(Index::new(version, entries))
+    Ok(Index::new(version, entries).with_extensions(cache_tree, resolve_undo))
 }
 
 /// Parses the index header and returns `(version, entry count)`.
@@ -275,7 +277,15 @@ impl<'a> Reader<'a> {
     ///
     /// Git requires readers to understand extensions whose signature does
     /// not start with an uppercase letter; the others are optional caches.
-    fn extensions(&mut self) -> Result<()> {
+    /// Reads the extensions, keeping the cache tree (`TREE`) and the
+    /// resolve-undo data (`REUC`). Other optional extensions (such as the
+    /// untracked cache `UNTR` or the fsmonitor data `FSMN`) are dropped: they
+    /// describe the work tree or the file layout, which zerogit cannot keep
+    /// up to date, and Git rebuilds them. A malformed `TREE` or `REUC` is
+    /// dropped the same way.
+    fn extensions(&mut self) -> Result<(Option<CacheTree>, ResolveUndo)> {
+        let mut cache_tree = None;
+        let mut resolve_undo = ResolveUndo::new();
         while self.pos < self.data.len() {
             let signature = self.bytes(4, "extension signature")?;
             let size = self.u32("extension size")? as usize;
@@ -291,9 +301,18 @@ impl<'a> Reader<'a> {
                     reason: format!("{} (extension '{}')", feature, name),
                 });
             }
-            self.bytes(size, "extension data")?;
+            let data = self.bytes(size, "extension data")?;
+            match signature {
+                b"TREE" => cache_tree = CacheTree::parse(data),
+                b"REUC" => {
+                    resolve_undo = super::resolve_undo::parse(data)
+                        .map(|records| records.into_iter().collect())
+                        .unwrap_or_default();
+                }
+                _ => {}
+            }
         }
-        Ok(())
+        Ok((cache_tree, resolve_undo))
     }
 }
 

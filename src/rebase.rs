@@ -787,6 +787,8 @@ impl Repository {
             }
         }
         self.restore_paths(&mut idx, &mut worktree, target, &changed)?;
+        // Back at the target, there is no resolved conflict left to recreate.
+        idx.clear_resolve_undo();
         index_lock.write(&idx)
     }
 

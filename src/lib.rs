@@ -77,7 +77,9 @@ pub use objects::{Blob, Commit, FileMode, Object, Oid, Signature, Tree, TreeEntr
 pub use refs::{Branch, Head, RemoteBranch, Tag};
 
 // Re-export status types
-pub use status::{FileStatus, StatusEntry};
+pub use status::{
+    ChangeState, ConflictKind, DetailedStatus, DetailedStatusEntry, FileStatus, StatusEntry,
+};
 
 // Re-export index types
 pub use index::{Index, IndexEntry};

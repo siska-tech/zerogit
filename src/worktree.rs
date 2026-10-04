@@ -262,6 +262,36 @@ impl Worktree {
         Ok(Some(WorkFile { content, ..file }))
     }
 
+    /// The mode Git would record for the file at `path`, from its metadata
+    /// only, or `None` if it does not exist or is a directory.
+    pub(crate) fn mode(
+        &self,
+        path: &Path,
+        tracked_mode: Option<FileMode>,
+    ) -> Result<Option<FileMode>> {
+        let Some(metadata) = self.metadata(path)? else {
+            return Ok(None);
+        };
+        let file_type = metadata.file_type();
+        Ok(if file_type.is_symlink() {
+            Some(FileMode::Symlink)
+        } else if file_type.is_file() {
+            Some(self.file_mode(&metadata, tracked_mode))
+        } else {
+            None
+        })
+    }
+
+    fn file_mode(&self, metadata: &fs::Metadata, tracked_mode: Option<FileMode>) -> FileMode {
+        match tracked_mode {
+            // A link checked out as a file keeps its mode.
+            Some(FileMode::Symlink) if !self.symlinks => FileMode::Symlink,
+            _ if self.filemode => executable_mode(metadata),
+            Some(FileMode::Executable) => FileMode::Executable,
+            _ => FileMode::Regular,
+        }
+    }
+
     /// Reads a file without converting its content.
     fn read_raw(&self, path: &Path, tracked_mode: Option<FileMode>) -> Result<Option<WorkFile>> {
         let Some(metadata) = self.metadata(path)? else {
@@ -281,13 +311,7 @@ impl Worktree {
             return Ok(None);
         }
         let content = fs::read(&full)?;
-        let mode = match tracked_mode {
-            // A link checked out as a file keeps its mode.
-            Some(FileMode::Symlink) if !self.symlinks => FileMode::Symlink,
-            _ if self.filemode => executable_mode(&metadata),
-            Some(FileMode::Executable) => FileMode::Executable,
-            _ => FileMode::Regular,
-        };
+        let mode = self.file_mode(&metadata, tracked_mode);
         Ok(Some(WorkFile {
             content,
             mode,

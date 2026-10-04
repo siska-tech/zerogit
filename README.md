@@ -191,7 +191,8 @@ repo.remote_branches()?;      // リモートブランチ一覧
 repo.tags()?;                 // タグ一覧
 repo.log()?;                  // コミット履歴（Iterator）
 repo.log_with_options(opts)?; // フィルタリング付きログ
-repo.status()?;               // ワーキングツリー状態
+repo.status()?;               // ワーキングツリー状態（パスごとに1つの状態）
+repo.detailed_status()?;      // index側・作業ツリー側を別々に（porcelain v2相当）
 repo.commit("sha")?;          // コミット取得
 repo.tree("sha")?;            // ツリー取得
 repo.blob("sha")?;            // Blob取得

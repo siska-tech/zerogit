@@ -11,7 +11,7 @@ use crate::objects::{Blob, Commit, Object, ObjectStore, ObjectType, Oid, TagObje
 use crate::refs::{Branch, Head, RefStore, RemoteBranch, Tag};
 use crate::status::{
     compute_status_with_store as compute_status, flatten_tree_with_store as flatten_tree,
-    StatusEntry,
+    DetailedStatusEntry, StatusEntry,
 };
 use crate::worktree::Worktree;
 
@@ -763,6 +763,22 @@ impl Repository {
     /// - Deleted files (removed from working tree)
     /// - Staged changes (added/modified/deleted in index)
     ///
+    /// Each path gets a single [`FileStatus`](crate::FileStatus), so staged and unstaged
+    /// changes are merged by these rules:
+    ///
+    /// | Situation | Reported as |
+    /// | --- | --- |
+    /// | Staged and unstaged changes (`MM`) | `Modified` |
+    /// | Staged new file, then edited (`AM`) | `Added` |
+    /// | Staged new file, then deleted from the work tree (`AD`) | `Deleted` |
+    /// | Intent-to-add file (`git add -N`, `.A`) | `Added` |
+    /// | Removed from the index while the file still exists (`D.` + `??`) | `StagedDeleted` |
+    /// | Unresolved merge conflict (`UU`, `AA`, ...) | `Modified` |
+    /// | Type change between file and symlink (`T`) | `Modified` / `StagedModified` |
+    ///
+    /// Use [`Repository::detailed_status`] to get both sides separately, as
+    /// `git status --porcelain=v2` does.
+    ///
     /// # Returns
     ///
     /// A vector of `StatusEntry` representing all files with changes.
@@ -804,6 +820,46 @@ impl Repository {
             &store,
             head_tree_oid.as_ref(),
             parsed_index.as_ref(),
+            &mut self.worktree()?,
+        )
+    }
+
+    /// Returns the status of every changed path with the index side and the
+    /// work tree side reported separately, like `git status --porcelain=v2`.
+    ///
+    /// Unlike [`Repository::status`], nothing is merged into one value: a
+    /// file with staged and unstaged changes is `MM`, a staged new file
+    /// deleted from the work tree is `AD`, an intent-to-add file (`git add
+    /// -N`) is `.A`, a change between file and symlink is `T`, and conflicts
+    /// are reported by kind (`UU`, `AA`, `DU`, ...). Untracked files that are
+    /// not ignored are listed individually (as with `-uall`). Renames are not
+    /// detected (as with `--no-renames`).
+    ///
+    /// Entries are sorted by path; a path deleted from the index that still
+    /// exists in the work tree appears twice (`D.` and untracked).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::{DetailedStatus, Repository};
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// for entry in repo.detailed_status().unwrap() {
+    ///     println!("{} {}", entry.status().code(), entry.path().display());
+    /// }
+    /// ```
+    pub fn detailed_status(&self) -> Result<Vec<DetailedStatusEntry>> {
+        let head_tree_oid = self.head_tree_oid()?;
+        let index_path = self.git_dir.join("index");
+        let index = if index_path.exists() {
+            Some(index::parse(&read_file(&index_path)?)?)
+        } else {
+            None
+        };
+        crate::status::compute_detailed_status(
+            &self.object_store(),
+            head_tree_oid.as_ref(),
+            index.as_ref(),
             &mut self.worktree()?,
         )
     }

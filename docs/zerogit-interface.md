@@ -260,6 +260,21 @@ pub fn status(&self) -> Result<Vec<StatusEntry>>
 
 `checkout`は`core.symlinks`がtrue（既定）ならsymlinkを作成し、falseの場合や作成できない場合はリンク先パスを内容とする通常ファイルを書き出す（indexのmodeは`120000`のまま）。`core.ignoreCase`がtrueなら大文字・小文字を区別しない。
 
+`status()`はパスごとに1つの`FileStatus`に丸める。ステージ済みと未ステージの変更の両方（`MM`）は`Modified`、ステージ済みの追加後の編集（`AM`）とintent-to-add（`.A`）は`Added`、ステージ済みの追加後の削除（`AD`）は`Deleted`、indexから削除して作業ツリーに残る場合（`D.`と`??`）は`StagedDeleted`、コンフリクトは`Modified`になる。両側を区別するには`detailed_status()`を使う。
+
+##### `Repository::detailed_status`
+
+```rust
+pub fn detailed_status(&self) -> Result<Vec<DetailedStatusEntry>>
+```
+
+| 項目   | 説明 |
+| ------ | ---- |
+| 概要   | `git status --porcelain=v2 --untracked-files=all --no-renames`相当。パスごとにindex側（X）と作業ツリー側（Y）の状態を返す |
+| 戻り値 | `DetailedStatusEntry`（`path()`、`status()`、`head_mode()`、`index_mode()`、`worktree_mode()`）のパス順の一覧 |
+
+`DetailedStatus`は`Changed { index, worktree }`（`ChangeState`: `Unmodified`/`Modified`/`TypeChanged`/`Added`/`Deleted`）、`Unmerged(ConflictKind)`（`BothDeleted`/`AddedByUs`/`DeletedByThem`/`AddedByThem`/`DeletedByUs`/`BothAdded`/`BothModified`）、`Untracked`のいずれか。`code()`でporcelain v2のXY（`M.`、`UU`など）、未追跡は`?`を返す。リネームは検出しない。
+
 ##### `Repository::is_ignored` / `Repository::ignored_files`
 
 ```rust

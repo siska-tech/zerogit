@@ -77,7 +77,9 @@ impl RefStore {
         let ref_path = self.git_dir.join(name);
 
         let content = fs::read_to_string(&ref_path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
+            // A directory (`refs/remotes/origin` when looking up `origin`)
+            // or a path through a file is no reference either.
+            if e.kind() == std::io::ErrorKind::NotFound || ref_path.is_dir() || !ref_path.exists() {
                 Error::RefNotFound(name.to_string())
             } else {
                 Error::Io(e)

@@ -197,6 +197,14 @@ pub enum Error {
     /// running, the lock was left behind by one that crashed and can be
     /// removed.
     Locked(PathBuf),
+
+    /// A revision (as accepted by `git rev-parse`) cannot be resolved.
+    InvalidRevision {
+        /// The revision as given.
+        revision: String,
+        /// What is wrong, naming the part of the revision concerned.
+        reason: String,
+    },
 }
 
 impl fmt::Display for Error {
@@ -286,6 +294,9 @@ impl fmt::Display for Error {
             Error::RemoteNotFound(name) => write!(f, "remote not found: {}", name),
             Error::RemoteAlreadyExists(name) => write!(f, "remote already exists: {}", name),
             Error::StaleReference(name) => write!(f, "reference changed concurrently: {}", name),
+            Error::InvalidRevision { revision, reason } => {
+                write!(f, "invalid revision '{}': {}", revision, reason)
+            }
             Error::Locked(path) => write!(
                 f,
                 "unable to create '{}': File exists; another process may be using the repository",
@@ -412,6 +423,10 @@ mod tests {
             Error::RemoteAlreadyExists("origin".to_string()),
             Error::StaleReference("refs/heads/main".to_string()),
             Error::Locked(PathBuf::from(".git/index.lock")),
+            Error::InvalidRevision {
+                revision: "main~9".to_string(),
+                reason: "'main~8' has no parent".to_string(),
+            },
         ];
 
         // All variants should implement Display without panicking

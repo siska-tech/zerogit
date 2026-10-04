@@ -232,47 +232,14 @@ impl Repository {
         oid.to_hex()[..7].to_owned()
     }
 
-    /// Resolves a commit given as a branch, tag, remote-tracking branch,
-    /// full reference name or (abbreviated) commit ID.
+    /// Resolves a revision (see [`Repository::rev_parse`]) to a commit.
     fn resolve_commit(&self, name: &str) -> Result<Oid> {
-        let store = self.ref_store();
-        for candidate in [
-            format!("refs/heads/{}", name),
-            format!("refs/tags/{}", name),
-            format!("refs/remotes/{}", name),
-            name.to_owned(),
-        ] {
-            if !candidate.starts_with("refs/") && candidate != "HEAD" {
-                continue;
-            }
-            match store.resolve_recursive(&candidate) {
-                Ok(resolved) => return self.peel_to_commit(resolved.oid),
-                Err(Error::RefNotFound(_)) | Err(Error::InvalidRefName(_)) => {}
-                Err(e) => return Err(e),
-            }
-        }
-        match self.resolve_short_oid(name) {
-            Ok(oid) => self.peel_to_commit(oid),
-            Err(Error::ObjectNotFound(_) | Error::InvalidOid(_)) => {
-                Err(Error::RefNotFound(name.to_owned()))
-            }
+        match self.rev_parse(name) {
+            Ok(oid) => self.peel_to(oid, ObjectType::Commit),
+            Err(
+                Error::InvalidRevision { .. } | Error::ObjectNotFound(_) | Error::InvalidOid(_),
+            ) => Err(Error::RefNotFound(name.to_owned())),
             Err(e) => Err(e),
-        }
-    }
-
-    fn peel_to_commit(&self, mut oid: Oid) -> Result<Oid> {
-        loop {
-            let raw = self.object_store().read(&oid)?;
-            match raw.object_type {
-                ObjectType::Commit => return Ok(oid),
-                ObjectType::Tag => oid = *crate::objects::TagObject::parse(raw)?.object(),
-                other => {
-                    return Err(Error::TypeMismatch {
-                        expected: "commit",
-                        actual: other.as_str(),
-                    })
-                }
-            }
         }
     }
 

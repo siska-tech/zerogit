@@ -464,7 +464,8 @@ impl Repository {
     ///
     /// # Arguments
     ///
-    /// * `oid_str` - The full or abbreviated OID as a hexadecimal string.
+    /// * `oid_str` - A revision: a full or abbreviated OID, or anything
+    ///   [`Repository::rev_parse`] accepts (`HEAD`, `main~2`, `v1.0^{}`, ...).
     ///
     /// # Returns
     ///
@@ -474,6 +475,7 @@ impl Repository {
     ///
     /// - `Error::ObjectNotFound` if the object does not exist.
     /// - `Error::TypeMismatch` if the object is not a commit.
+    /// - `Error::InvalidRevision` if the revision cannot be resolved.
     ///
     /// # Examples
     ///
@@ -485,7 +487,7 @@ impl Repository {
     /// println!("Author: {}", commit.author().name());
     /// ```
     pub fn commit(&self, oid_str: &str) -> Result<Commit> {
-        let oid = self.resolve_short_oid(oid_str)?;
+        let oid = self.rev_parse(oid_str)?;
         let store = self.object_store();
         let raw = store.read(&oid)?;
 
@@ -503,7 +505,8 @@ impl Repository {
     ///
     /// # Arguments
     ///
-    /// * `oid_str` - The full or abbreviated OID as a hexadecimal string.
+    /// * `oid_str` - A revision: a full or abbreviated OID, or anything
+    ///   [`Repository::rev_parse`] accepts (`HEAD`, `main~2`, `v1.0^{}`, ...).
     ///
     /// # Returns
     ///
@@ -513,6 +516,7 @@ impl Repository {
     ///
     /// - `Error::ObjectNotFound` if the object does not exist.
     /// - `Error::TypeMismatch` if the object is not a tree.
+    /// - `Error::InvalidRevision` if the revision cannot be resolved.
     ///
     /// # Examples
     ///
@@ -526,7 +530,7 @@ impl Repository {
     /// }
     /// ```
     pub fn tree(&self, oid_str: &str) -> Result<Tree> {
-        let oid = self.resolve_short_oid(oid_str)?;
+        let oid = self.rev_parse(oid_str)?;
         let store = self.object_store();
         let raw = store.read(&oid)?;
 
@@ -544,7 +548,8 @@ impl Repository {
     ///
     /// # Arguments
     ///
-    /// * `oid_str` - The full or abbreviated OID as a hexadecimal string.
+    /// * `oid_str` - A revision: a full or abbreviated OID, or anything
+    ///   [`Repository::rev_parse`] accepts (`HEAD`, `main~2`, `v1.0^{}`, ...).
     ///
     /// # Returns
     ///
@@ -554,6 +559,7 @@ impl Repository {
     ///
     /// - `Error::ObjectNotFound` if the object does not exist.
     /// - `Error::TypeMismatch` if the object is not a blob.
+    /// - `Error::InvalidRevision` if the revision cannot be resolved.
     ///
     /// # Examples
     ///
@@ -565,7 +571,7 @@ impl Repository {
     /// println!("Size: {} bytes", blob.size());
     /// ```
     pub fn blob(&self, oid_str: &str) -> Result<Blob> {
-        let oid = self.resolve_short_oid(oid_str)?;
+        let oid = self.rev_parse(oid_str)?;
         let store = self.object_store();
         let raw = store.read(&oid)?;
 
@@ -586,7 +592,8 @@ impl Repository {
     ///
     /// # Arguments
     ///
-    /// * `oid_str` - The full or abbreviated OID as a hexadecimal string.
+    /// * `oid_str` - A revision: a full or abbreviated OID, or anything
+    ///   [`Repository::rev_parse`] accepts (`HEAD`, `main~2`, `v1.0^{}`, ...).
     ///
     /// # Returns
     ///
@@ -611,7 +618,7 @@ impl Repository {
     /// }
     /// ```
     pub fn object(&self, oid_str: &str) -> Result<Object> {
-        let oid = self.resolve_short_oid(oid_str)?;
+        let oid = self.rev_parse(oid_str)?;
         let store = self.object_store();
         let raw = store.read(&oid)?;
 
@@ -1637,7 +1644,10 @@ impl Repository {
     ///
     /// # Arguments
     ///
-    /// * `target` - The branch name or commit OID to checkout.
+    /// * `target` - A branch name, which HEAD is attached to (also `-` or
+    ///   `@{-<n>}` for an earlier branch), or any revision
+    ///   [`Repository::rev_parse`] accepts (`v1.0`, `HEAD~2`, an OID, ...),
+    ///   which detaches HEAD at that commit.
     ///
     /// # Returns
     ///
@@ -1681,25 +1691,42 @@ impl Repository {
 
         let store = self.ref_store();
 
-        // Try to resolve as a branch first
-        let branch_ref = format!("refs/heads/{}", target);
-        let (new_head_content, target_oid) = match store.resolve_recursive(&branch_ref) {
-            Ok(resolved) => (format!("ref: {}\n", branch_ref), resolved.oid),
-            Err(Error::RefNotFound(_)) => {
-                let oid = match store.resolve(target) {
-                    Ok(resolved) => resolved.oid,
-                    Err(Error::RefNotFound(_)) => match self.resolve_short_oid(target) {
-                        Ok(oid) => oid,
-                        Err(Error::ObjectNotFound(_) | Error::InvalidOid(_)) => {
-                            return Err(Error::RefNotFound(target.to_owned()));
-                        }
-                        Err(e) => return Err(e),
-                    },
+        // A branch name (also as `-` or `@{-<n>}` for an earlier branch)
+        // attaches HEAD to the branch, as `git checkout` does; any other
+        // revision detaches HEAD at its commit.
+        let previous = match target {
+            "-" => self.previous_checkout(1)?,
+            _ => match target
+                .strip_prefix("@{-")
+                .and_then(|rest| rest.strip_suffix('}'))
+                .and_then(|n| n.parse::<usize>().ok())
+            {
+                Some(n) => self.previous_checkout(n)?,
+                None => None,
+            },
+        };
+        let branch_name = previous.as_deref().unwrap_or(target);
+        let branch_ref = format!("refs/heads/{}", branch_name);
+        let branch = match store.resolve_recursive(&branch_ref) {
+            Ok(resolved) => Some(resolved.oid),
+            Err(Error::RefNotFound(_) | Error::InvalidRefName(_)) => None,
+            Err(e) => return Err(e),
+        };
+        let (new_head_content, target_oid, target) = match branch {
+            Some(oid) => (format!("ref: {}\n", branch_ref), oid, branch_name),
+            None => {
+                let revision = if target == "-" { "@{-1}" } else { target };
+                let oid = match self.rev_parse(revision) {
+                    Ok(oid) => self.peel_to(oid, ObjectType::Commit)?,
+                    Err(
+                        Error::InvalidRevision { .. }
+                        | Error::ObjectNotFound(_)
+                        | Error::InvalidOid(_),
+                    ) => return Err(Error::RefNotFound(target.to_owned())),
                     Err(e) => return Err(e),
                 };
-                (format!("{}\n", oid.to_hex()), oid)
+                (format!("{}\n", oid.to_hex()), oid, target)
             }
-            Err(e) => return Err(e),
         };
 
         // Get the tree for the target commit

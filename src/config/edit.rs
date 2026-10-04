@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use crate::error::{Error, Result};
-use crate::infra::write_file_atomic;
+use crate::infra::LockFile;
 
 /// A parsed section header line.
 fn header(line: &str) -> Option<(String, String)> {
@@ -95,12 +95,14 @@ impl ConfigFile {
         })
     }
 
-    pub(crate) fn save(&self, path: &Path) -> Result<()> {
+    /// Saves the file through the lock taken before it was opened.
+    pub(crate) fn save(&self, mut lock: LockFile) -> Result<()> {
         let mut text = self.lines.join("\n");
         if !text.is_empty() {
             text.push('\n');
         }
-        write_file_atomic(path, text.as_bytes())
+        lock.write_all(text.as_bytes())?;
+        lock.commit()
     }
 
     /// The line ranges (header line, end) of every matching section.

@@ -183,6 +183,13 @@ pub enum Error {
 
     /// A reference did not have the value an update expected.
     StaleReference(String),
+
+    /// The file is locked: its lock file (`<path>.lock`) exists because
+    /// another process, such as Git, is changing it. Nothing was changed;
+    /// retry once that process has finished. If no other process is
+    /// running, the lock was left behind by one that crashed and can be
+    /// removed.
+    Locked(PathBuf),
 }
 
 impl fmt::Display for Error {
@@ -270,6 +277,11 @@ impl fmt::Display for Error {
             Error::RemoteNotFound(name) => write!(f, "remote not found: {}", name),
             Error::RemoteAlreadyExists(name) => write!(f, "remote already exists: {}", name),
             Error::StaleReference(name) => write!(f, "reference changed concurrently: {}", name),
+            Error::Locked(path) => write!(
+                f,
+                "unable to create '{}': File exists; another process may be using the repository",
+                path.display()
+            ),
             Error::IrreversibleLineEndings(path) => write!(
                 f,
                 "line ending conversion would not round-trip: {}",
@@ -388,6 +400,7 @@ mod tests {
             Error::RemoteNotFound("origin".to_string()),
             Error::RemoteAlreadyExists("origin".to_string()),
             Error::StaleReference("refs/heads/main".to_string()),
+            Error::Locked(PathBuf::from(".git/index.lock")),
         ];
 
         // All variants should implement Display without panicking

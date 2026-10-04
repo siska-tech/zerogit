@@ -126,6 +126,10 @@ pub enum Error {
     /// The index has unresolved merge conflicts (entries at stages 1-3), so
     /// the operation cannot proceed until the listed paths are resolved.
     UnmergedPaths(Vec<PathBuf>),
+
+    /// The path is ignored by `.gitignore`, `.git/info/exclude` or
+    /// `core.excludesFile`, and is not tracked.
+    IgnoredPath(PathBuf),
 }
 
 impl fmt::Display for Error {
@@ -186,6 +190,9 @@ impl fmt::Display for Error {
                     write!(f, " {}", path.display())?;
                 }
                 Ok(())
+            }
+            Error::IgnoredPath(path) => {
+                write!(f, "path is ignored: {}", path.display())
             }
         }
     }
@@ -283,6 +290,7 @@ mod tests {
             Error::ConfigNotFound("user.name".to_string()),
             Error::AlreadyARepository(PathBuf::from("/test/repo")),
             Error::UnmergedPaths(vec![PathBuf::from("file.txt")]),
+            Error::IgnoredPath(PathBuf::from("debug.log")),
         ];
 
         // All variants should implement Display without panicking

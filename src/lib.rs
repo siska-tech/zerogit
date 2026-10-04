@@ -51,12 +51,14 @@
 pub mod config;
 pub mod diff;
 pub mod error;
+pub(crate) mod ignore;
 pub mod index;
 pub mod log;
 pub mod objects;
 pub mod refs;
 pub mod repository;
 pub mod status;
+pub(crate) mod worktree;
 
 // Internal modules (not part of public API)
 pub(crate) mod infra;

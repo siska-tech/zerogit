@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::Result;
 use crate::index::Index;
-use crate::infra::{hash_object, list_working_tree, read_file};
+use crate::infra::{hash_object, read_file};
 use crate::objects::{Blob, Commit, FileMode, Oid, Tree};
 
 pub mod blob;
@@ -668,7 +668,9 @@ impl Repository {
         let mut map = HashMap::new();
         let work_dir = self.path();
 
-        for file_path in list_working_tree(work_dir)? {
+        let mut rules = self.ignore_rules()?;
+        let files = crate::worktree::scan(work_dir, &mut rules, Some(index), false)?.files;
+        for file_path in files {
             let full_path = work_dir.join(&file_path);
             // Normalize path for cross-platform consistency
             let normalized_path = normalize_path(&file_path);

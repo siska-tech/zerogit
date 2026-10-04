@@ -196,6 +196,8 @@ repo.commit("sha")?;          // コミット取得
 repo.tree("sha")?;            // ツリー取得
 repo.blob("sha")?;            // Blob取得
 repo.index()?;                // インデックス取得
+repo.is_ignored(path)?;       // .gitignore等で無視されるか
+repo.ignored_files()?;        // 無視された未追跡ファイル一覧
 
 // 差分操作
 repo.diff_trees(old, new)?;       // Tree間の差分
@@ -207,7 +209,8 @@ repo.diff_blobs(old, new, &opts)?; // Blob間の行差分（旧新行番号付�
 repo.resolve_short_oid("abc1234")?; // 短縮OIDの解決（loose・pack横断）
 
 // 書き込み操作
-repo.add(path)?;              // ファイルをステージ
+repo.add(path)?;              // ファイルをステージ（無視対象の未追跡ファイルは拒否）
+repo.add_force(path)?;        // 無視対象でもステージ（git add -f）
 repo.add_all()?;              // 全変更をステージ
 repo.reset(path)?;            // ステージを解除
 repo.create_commit(msg, author, email)?;  // コミット作成

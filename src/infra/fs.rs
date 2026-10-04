@@ -74,76 +74,6 @@ pub fn write_file_atomic<P: AsRef<Path>>(path: P, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Lists all files in the working tree, excluding `.git` directory.
-///
-/// Returns paths relative to the given root directory.
-///
-/// # Arguments
-///
-/// * `root` - The root directory to traverse.
-///
-/// # Returns
-///
-/// A vector of relative paths to all files in the working tree.
-pub fn list_working_tree<P: AsRef<Path>>(root: P) -> Result<Vec<PathBuf>> {
-    let root = root.as_ref();
-    let mut files = Vec::new();
-
-    list_working_tree_recursive(root, root, &mut files)?;
-
-    // Sort for consistent ordering
-    files.sort();
-
-    Ok(files)
-}
-
-fn list_working_tree_recursive(
-    root: &Path,
-    current: &Path,
-    files: &mut Vec<PathBuf>,
-) -> Result<()> {
-    let entries = fs::read_dir(current).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            Error::PathNotFound(current.to_path_buf())
-        } else {
-            Error::Io(e)
-        }
-    })?;
-
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        let file_name = entry.file_name();
-
-        // Skip .git directory
-        if file_name == ".git" {
-            continue;
-        }
-
-        // Skip hidden files/directories (starting with .)
-        // except for specific files like .gitignore
-        let name_str = file_name.to_string_lossy();
-        if name_str.starts_with('.') && name_str != ".gitignore" && name_str != ".gitattributes" {
-            continue;
-        }
-
-        let file_type = entry.file_type()?;
-
-        if file_type.is_file() {
-            // Get relative path
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|_| Error::PathNotFound(path.clone()))?;
-            files.push(relative.to_path_buf());
-        } else if file_type.is_dir() {
-            list_working_tree_recursive(root, &path, files)?;
-        }
-        // Skip symlinks and other special files
-    }
-
-    Ok(())
-}
-
 /// Validates that a path does not escape its root directory (path traversal prevention).
 ///
 /// # Arguments
@@ -259,54 +189,6 @@ mod tests {
         assert_eq!(contents, b"New content");
     }
 
-    // FS-006: List working tree excludes .git
-    #[test]
-    fn test_list_working_tree_excludes_git() {
-        let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path();
-
-        // Create files and directories
-        fs::write(root.join("file1.txt"), b"content").unwrap();
-        fs::create_dir(root.join(".git")).unwrap();
-        fs::write(root.join(".git/config"), b"git config").unwrap();
-        fs::create_dir(root.join("src")).unwrap();
-        fs::write(root.join("src/main.rs"), b"fn main() {}").unwrap();
-
-        let files = list_working_tree(root).unwrap();
-
-        // Should contain file1.txt and src/main.rs but not .git/config
-        assert!(files.contains(&PathBuf::from("file1.txt")));
-        assert!(
-            files.contains(&PathBuf::from("src/main.rs"))
-                || files.contains(&PathBuf::from("src\\main.rs"))
-        );
-        assert!(!files.iter().any(|p| p.to_string_lossy().contains(".git")));
-    }
-
-    // FS-007: List working tree includes .gitignore
-    #[test]
-    fn test_list_working_tree_includes_gitignore() {
-        let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path();
-
-        fs::write(root.join(".gitignore"), b"*.log").unwrap();
-        fs::write(root.join("file.txt"), b"content").unwrap();
-
-        let files = list_working_tree(root).unwrap();
-
-        assert!(files.contains(&PathBuf::from(".gitignore")));
-        assert!(files.contains(&PathBuf::from("file.txt")));
-    }
-
-    // FS-008: List working tree empty directory
-    #[test]
-    fn test_list_working_tree_empty() {
-        let temp_dir = TempDir::new().unwrap();
-
-        let files = list_working_tree(temp_dir.path()).unwrap();
-        assert!(files.is_empty());
-    }
-
     // FS-009: Safe join prevents path traversal
     #[test]
     fn test_safe_join_prevents_traversal() {
@@ -348,23 +230,5 @@ mod tests {
 
         let result = safe_join(root, "a/b/c/file.txt");
         assert!(result.is_ok());
-    }
-
-    // FS-012: List working tree returns sorted results
-    #[test]
-    fn test_list_working_tree_sorted() {
-        let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path();
-
-        fs::write(root.join("z.txt"), b"").unwrap();
-        fs::write(root.join("a.txt"), b"").unwrap();
-        fs::write(root.join("m.txt"), b"").unwrap();
-
-        let files = list_working_tree(root).unwrap();
-
-        assert_eq!(files.len(), 3);
-        assert_eq!(files[0], PathBuf::from("a.txt"));
-        assert_eq!(files[1], PathBuf::from("m.txt"));
-        assert_eq!(files[2], PathBuf::from("z.txt"));
     }
 }

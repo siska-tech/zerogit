@@ -254,6 +254,20 @@ pub fn status(&self) -> Result<Vec<StatusEntry>>
 | エラー | `Error::Io` - ファイルシステムエラー               |
 | エラー | `Error::InvalidIndex` - インデックス読み取りエラー |
 
+作業ツリーの走査は`.git`だけを除外し、名前が`.`で始まるファイルも対象にする。未追跡ファイルには`.gitignore`（各ディレクトリ）・`.git/info/exclude`・`core.excludesFile`（既定は`$XDG_CONFIG_HOME/git/ignore`）をGitと同じ規則・優先順位で適用し、無視されたファイルは`Untracked`に含めない（`git ls-files --others --exclude-standard`と一致）。追跡中のファイルは無視指定に一致しても通常どおり比較する。`core.ignoreCase`がtrueなら大文字・小文字を区別しない。
+
+##### `Repository::is_ignored` / `Repository::ignored_files`
+
+```rust
+pub fn is_ignored<P: AsRef<Path>>(&self, path: P) -> Result<bool>
+pub fn ignored_files(&self) -> Result<Vec<PathBuf>>
+```
+
+| 項目   | 説明 |
+| ------ | ---- |
+| 概要   | `is_ignored`: パスまたはその親ディレクトリが無視指定に一致するか（`git check-ignore --no-index`相当）。追跡中かどうかは考慮しない |
+| 概要   | `ignored_files`: 無視された未追跡ファイルの一覧（`git ls-files --others --ignored --exclude-standard`相当） |
+
 ##### `Repository::object`
 
 ```rust
@@ -347,8 +361,11 @@ pub fn add<P: AsRef<Path>>(&self, path: P) -> Result<()>
 | 概要   | ファイルをステージングエリアに追加                                  |
 | 引数   | `path` - ステージするファイルパス（リポジトリルートからの相対パス） |
 | 戻り値 | `Ok(())` - 成功時                                                   |
-| エラー | `Error::PathNotFound` - ファイルが存在しない                        |
+| エラー | `Error::PathNotFound` - ファイルが存在しない（追跡中のファイルが削除されている場合は、削除をステージする） |
+| エラー | `Error::IgnoredPath` - 未追跡で無視指定に一致する（`git add`と同様）。`add_force`で追加できる |
 | エラー | `Error::Io` - ファイル読み取りエラー                                |
+
+`Repository::add_force`は無視指定を確認しない（`git add -f`相当）。
 
 ##### `Repository::add_all`
 
@@ -362,6 +379,8 @@ pub fn add_all(&self) -> Result<()>
 | 引数   | なし                                 |
 | 戻り値 | `Ok(())` - 成功時                    |
 | エラー | `Error::Io` - ファイルシステムエラー |
+
+`git add -A`相当。無視された未追跡ファイルは追加せず、作業ツリーにないindexのエントリは削除する。
 
 ##### `Repository::reset`
 
@@ -1834,6 +1853,9 @@ pub enum Error {
 
     /// indexに未解消のコンフリクトがある（commit・checkoutを拒否）
     UnmergedPaths(Vec<PathBuf>),
+
+    /// 未追跡で無視指定に一致するパス（addを拒否）
+    IgnoredPath(PathBuf),
 }
 ```
 

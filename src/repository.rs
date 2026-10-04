@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
+use crate::ignore::IgnoreRules;
 use crate::index::{self, Index, IndexEntry};
 use crate::infra::{read_file, write_file_atomic};
 use crate::log::{LogIterator, LogOptions};
@@ -804,7 +805,60 @@ impl Repository {
             &store,
             head_tree_oid.as_ref(),
             parsed_index.as_ref(),
+            &mut self.ignore_rules()?,
         )
+    }
+
+    /// Loads the ignore rules (`.gitignore` files, `.git/info/exclude` and
+    /// `core.excludesFile`) for this working tree.
+    pub(crate) fn ignore_rules(&self) -> Result<IgnoreRules> {
+        IgnoreRules::load(&self.work_dir, &self.git_dir, &self.config()?)
+    }
+
+    /// Returns whether a path is ignored by `.gitignore` files,
+    /// `.git/info/exclude` or `core.excludesFile`.
+    ///
+    /// The path is relative to the repository root. A path is ignored when it
+    /// or one of its parent directories matches an exclude pattern, as in
+    /// `git check-ignore --no-index`. Whether the path is tracked is not
+    /// considered: a tracked file stays tracked even if it is ignored. An
+    /// existing directory is checked as a directory, so patterns ending in
+    /// `/` apply to it.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// if repo.is_ignored("target/debug/app").unwrap() {
+    ///     println!("ignored");
+    /// }
+    /// ```
+    pub fn is_ignored<P: AsRef<Path>>(&self, path: P) -> Result<bool> {
+        let path = path.as_ref();
+        let is_dir = self.work_dir.join(path).is_dir();
+        self.ignore_rules()?.is_ignored(path, is_dir)
+    }
+
+    /// Lists the untracked files that are ignored, like
+    /// `git ls-files --others --ignored --exclude-standard`.
+    ///
+    /// Every file inside an ignored directory is listed individually.
+    /// Tracked files are never listed, even if they match an ignore pattern.
+    ///
+    /// # Returns
+    ///
+    /// The paths relative to the repository root, sorted.
+    pub fn ignored_files(&self) -> Result<Vec<PathBuf>> {
+        let index = self.read_index()?;
+        let scan = crate::worktree::scan(
+            &self.work_dir,
+            &mut self.ignore_rules()?,
+            Some(&index),
+            true,
+        )?;
+        Ok(scan.ignored.into_iter().collect())
     }
 
     /// Reads the current index, or creates an empty one if it doesn't exist.
@@ -841,6 +895,9 @@ impl Repository {
     /// # Errors
     ///
     /// - `Error::PathNotFound` if the file does not exist.
+    /// - `Error::IgnoredPath` if the file is not tracked and is ignored by
+    ///   `.gitignore` (as `git add` refuses it); use [`Repository::add_force`]
+    ///   to add it anyway. A tracked file is added even if it is ignored.
     ///
     /// # Examples
     ///
@@ -851,7 +908,18 @@ impl Repository {
     /// repo.add("src/main.rs").unwrap();
     /// ```
     pub fn add<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let path = path.as_ref();
+        self.add_impl(path.as_ref(), false)
+    }
+
+    /// Adds a file to the staging area even if it is ignored, like
+    /// `git add -f`.
+    ///
+    /// Otherwise the same as [`Repository::add`].
+    pub fn add_force<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        self.add_impl(path.as_ref(), true)
+    }
+
+    fn add_impl(&self, path: &Path, force: bool) -> Result<()> {
         let full_path = self.work_dir.join(path);
 
         // Check if file exists. A tracked file that was deleted has its
@@ -863,6 +931,13 @@ impl Repository {
                 return self.write_index(&idx);
             }
             return Err(Error::PathNotFound(path.to_path_buf()));
+        }
+
+        if !force {
+            let tracked = self.read_index()?.get(path).is_some();
+            if !tracked && self.ignore_rules()?.is_ignored(path, false)? {
+                return Err(Error::IgnoredPath(path.to_path_buf()));
+            }
         }
 
         // Read file content
@@ -948,8 +1023,11 @@ impl Repository {
         // Report a missing or corrupt HEAD commit before touching the index.
         self.head_tree_oid()?;
 
-        // Get working tree files
-        let working_files = crate::infra::list_working_tree(&self.work_dir)?;
+        // Get working tree files: tracked ones, and untracked ones that are
+        // not ignored.
+        let working_files =
+            crate::worktree::scan(&self.work_dir, &mut self.ignore_rules()?, Some(&idx), false)?
+                .files;
 
         // Add all working tree files
         for path in &working_files {

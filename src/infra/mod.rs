@@ -5,5 +5,5 @@ pub mod fs;
 pub mod hash;
 
 pub use compression::{compress, decompress, decompress_exact};
-pub use fs::{list_working_tree, read_file, write_file_atomic};
+pub use fs::{read_file, write_file_atomic};
 pub use hash::{crc32, hash_object};

@@ -7,8 +7,9 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
+use crate::ignore::IgnoreRules;
 use crate::index::{Index, IndexEntry};
-use crate::infra::{hash_object, list_working_tree, read_file};
+use crate::infra::{hash_object, read_file};
 use crate::objects::{LooseObjectStore, ObjectStore, ObjectType, Oid, Tree};
 
 /// The status of a file in the working tree.
@@ -160,11 +161,15 @@ pub fn compute_status(
     head_tree_oid: Option<&Oid>,
     index: Option<&Index>,
 ) -> Result<Vec<StatusEntry>> {
+    let git_dir = work_dir.join(".git");
+    let config = crate::config::load_config(&git_dir)?;
+    let mut rules = IgnoreRules::load(work_dir, &git_dir, &config)?;
     compute_status_with_store(
         work_dir,
         &ObjectStore::from_loose(store),
         head_tree_oid,
         index,
+        &mut rules,
     )
 }
 
@@ -173,6 +178,7 @@ pub(crate) fn compute_status_with_store(
     store: &ObjectStore,
     head_tree_oid: Option<&Oid>,
     index: Option<&Index>,
+    rules: &mut IgnoreRules,
 ) -> Result<Vec<StatusEntry>> {
     let mut entries = Vec::new();
 
@@ -197,7 +203,8 @@ pub(crate) fn compute_status_with_store(
         .unwrap_or_default();
 
     // Get working tree files
-    let working_files: HashSet<PathBuf> = list_working_tree(work_dir)?.into_iter().collect();
+    // Get working tree files: tracked ones, and untracked ones not ignored.
+    let working_files = crate::worktree::scan(work_dir, rules, index, false)?.files;
 
     // Collect all paths
     let mut all_paths: HashSet<PathBuf> = HashSet::new();

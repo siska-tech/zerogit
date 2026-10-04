@@ -493,6 +493,25 @@ fn xdg_config_path() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".config").join("git").join("config"))
 }
 
+/// The path of a file in Git's XDG configuration directory
+/// (`$XDG_CONFIG_HOME/git/<name>`, or `~/.config/git/<name>`).
+pub(crate) fn xdg_git_path(name: &str) -> Option<PathBuf> {
+    match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(xdg_home) if !xdg_home.is_empty() => {
+            Some(PathBuf::from(xdg_home).join("git").join(name))
+        }
+        _ => dirs::home_dir().map(|home| home.join(".config").join("git").join(name)),
+    }
+}
+
+/// Expands a leading `~/` in a path-valued setting to the home directory.
+pub(crate) fn expand_home(value: &str) -> Option<PathBuf> {
+    match value.strip_prefix("~/") {
+        Some(rest) => dirs::home_dir().map(|home| home.join(rest)),
+        None => Some(PathBuf::from(value)),
+    }
+}
+
 /// Loads the home directory path.
 mod dirs {
     use std::path::PathBuf;

@@ -8,10 +8,15 @@
 ### Added
 - `Error::UnmergedPaths`: indexにコンフリクト（stage 1〜3）が残っている場合のエラー
 - `Index::get_stage()`、`Index::has_conflicts()`、`Index::conflicted_paths()`
+- `.gitignore`・`.git/info/exclude`・`core.excludesFile`の解釈（否定、ディレクトリ指定、固定、`*`・`?`・`[...]`・`**`、エスケープ、`core.ignoreCase`）。status・`add_all`・作業ツリーとの差分に適用する (#20)
+- `Repository::is_ignored()`、`Repository::ignored_files()`、`Repository::add_force()`
+- `Error::IgnoredPath`: 無視された未追跡ファイルを`add`した場合のエラー
 
 ### Changed
 - crates.ioのパッケージから`issues/`・`docs/`・`tests/`を除外した
-- **破壊的変更**: `Error`に`UnmergedPaths`を追加した
+- **破壊的変更**: `Error`に`UnmergedPaths`・`IgnoredPath`を追加した
+- 作業ツリーの走査で、名前が`.`で始まるファイル・ディレクトリ（`.github/`、`.env.example`など）を除外しない。除外するのは`.git`だけ (#20)
+- `Repository::add`は、無視された未追跡ファイルを`IgnoredPath`で拒否する（`git add`と同じ）
 - `Index::add`はstage 0の追加で同じパスの全stageを置き換え、`Index::remove`は全stageを削除する。エントリはGitと同じ順（パスのバイト列、次にstage）に保つ
 - `Repository::add`は、作業ツリーから削除された追跡中のファイルの削除をステージする（`git add`と同じ）
 - `Repository::add_all`は、HEADにないファイルを含め、作業ツリーにないindexのエントリを削除する（`git add -A`と同じ）

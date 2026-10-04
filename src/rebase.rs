@@ -507,7 +507,7 @@ impl Repository {
         }
 
         let commits = self.commits_to_replay(&upstream_oid, &head)?;
-        let who = Signature::new(committer_name, committer_email, crate::repository::now(), 0);
+        let who = Signature::now(committer_name, committer_email);
         self.write_orig_head(&head)?;
         let mut state = State {
             dir: self.git_dir().join("rebase-merge"),
@@ -714,7 +714,7 @@ impl Repository {
         if idx.has_conflicts() {
             return Err(Error::UnmergedPaths(idx.conflicted_paths()));
         }
-        let who = Signature::new(committer_name, committer_email, crate::repository::now(), 0);
+        let who = Signature::now(committer_name, committer_email);
         if let Some(stopped) = state.stopped {
             let head = self
                 .optional_head_oid()?
@@ -740,7 +740,7 @@ impl Repository {
         let mut state = self.load_rebase()?;
         self.reset_to_head()?;
         state.clear_stop(self)?;
-        let who = Signature::new(committer_name, committer_email, crate::repository::now(), 0);
+        let who = Signature::now(committer_name, committer_email);
         self.run_rebase(&mut state, &who)
     }
 

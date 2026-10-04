@@ -114,6 +114,13 @@ pub enum Error {
     /// Attempted to create an empty commit.
     EmptyCommit,
 
+    /// The commit message is empty after clean-up.
+    EmptyCommitMessage,
+
+    /// A date (for example in `GIT_AUTHOR_DATE`) is not in a format Git
+    /// accepts.
+    InvalidDate(String),
+
     /// The working tree has uncommitted changes.
     DirtyWorkingTree,
 
@@ -239,6 +246,8 @@ impl fmt::Display for Error {
             Error::RefAlreadyExists(name) => write!(f, "reference already exists: {}", name),
             Error::CannotDeleteCurrentBranch => write!(f, "cannot delete the current branch"),
             Error::EmptyCommit => write!(f, "nothing to commit"),
+            Error::EmptyCommitMessage => write!(f, "empty commit message"),
+            Error::InvalidDate(date) => write!(f, "invalid date format: {}", date),
             Error::DirtyWorkingTree => write!(f, "working tree has uncommitted changes"),
             Error::ConfigNotFound(key) => write!(f, "configuration not found: {}", key),
             Error::AlreadyARepository(path) => {
@@ -379,6 +388,8 @@ mod tests {
             Error::RefAlreadyExists("refs/heads/main".to_string()),
             Error::CannotDeleteCurrentBranch,
             Error::EmptyCommit,
+            Error::EmptyCommitMessage,
+            Error::InvalidDate("soon".to_string()),
             Error::DirtyWorkingTree,
             Error::ConfigNotFound("user.name".to_string()),
             Error::AlreadyARepository(PathBuf::from("/test/repo")),

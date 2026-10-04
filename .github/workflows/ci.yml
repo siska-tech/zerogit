@@ -35,6 +35,13 @@ jobs:
         run: cargo +${{ matrix.rust }} build --verbose
       - name: Run tests
         run: cargo +${{ matrix.rust }} test --verbose
+      # Runners use UTC; check the local time zone handling (with daylight
+      # saving time) against Git as well.
+      - name: Run commit tests in another time zone
+        if: runner.os != 'Windows'
+        run: cargo +${{ matrix.rust }} test --test commit_test
+        env:
+          TZ: America/New_York
 
   remote:
     # zerogit-remote is a separate crate (its own workspace) with network

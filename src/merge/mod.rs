@@ -376,7 +376,7 @@ impl Repository {
         }
         let (theirs, kind) = self.resolve_merge_target(target)?;
         let head = self.optional_head_oid()?;
-        let committer = Signature::new(author_name, author_email, crate::repository::now(), 0);
+        let committer = Signature::now(author_name, author_email);
         let reflog_prefix = format!("merge {}", target);
 
         let bases = match head {
@@ -489,7 +489,7 @@ impl Repository {
             &[head, theirs],
             &signature,
             &signature,
-            &format!("{}\n", message.trim_end_matches('\n')),
+            &crate::commit::cleanup_message(&message),
         );
         let commit = self.object_store().write(ObjectType::Commit, &content)?;
         self.update_head(

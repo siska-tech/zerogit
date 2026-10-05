@@ -517,20 +517,28 @@ fn git_time(time: std::time::SystemTime) -> String {
 #[test]
 fn prune_removes_what_git_prune_removes() {
     let temp = packed_history();
-    let dir = temp.path();
-    // Old: one unreachable blob alone, another a recent tree refers to.
-    let old_alone = write_blob(dir, "old and alone\n");
-    let old_referenced = write_blob(dir, "old, but a recent tree has it\n");
-    // A temporary file left by an interrupted write, old by then.
-    write(dir, ".git/objects/pack/tmp_pack_leftover", "partial");
+    // Copying does not keep modification times everywhere (it does not on
+    // Linux), so copy first, for zerogit and Git with and without an
+    // expiry, and write the objects whose age matters into each copy.
+    let copies: Vec<tempfile::TempDir> = (0..4).map(|_| twin(temp.path())).collect();
+    let dirs: Vec<&Path> = copies.iter().map(|copy| copy.path()).collect();
+    let (mut old_alone, mut old_referenced) = (String::new(), String::new());
+    for dir in &dirs {
+        // Old: one unreachable blob alone, another a recent tree refers to.
+        old_alone = write_blob(dir, "old and alone\n");
+        old_referenced = write_blob(dir, "old, but a recent tree has it\n");
+        // A temporary file left by an interrupted write, old by then.
+        write(dir, ".git/objects/pack/tmp_pack_leftover", "partial");
+    }
     let boundary = time_boundary();
-    let recent_blob = write_blob(dir, "recent\n");
-    let recent_tree = write_tree(dir, "f", &old_referenced);
+    let (mut recent_blob, mut recent_tree) = (String::new(), String::new());
+    for dir in &dirs {
+        recent_blob = write_blob(dir, "recent\n");
+        recent_tree = write_tree(dir, "f", &old_referenced);
+    }
 
-    for expire in [Some(boundary), None] {
-        let ours = twin(dir);
-        let theirs = twin(dir);
-        let (o, t) = (ours.path(), theirs.path());
+    for (i, expire) in [Some(boundary), None].into_iter().enumerate() {
+        let (o, t) = (dirs[2 * i], dirs[2 * i + 1]);
         let removed = Repository::open(o).unwrap().prune(expire).unwrap();
         match expire {
             Some(boundary) => git(t, &["prune", "--expire", &git_time(boundary)]),

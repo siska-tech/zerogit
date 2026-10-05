@@ -10,6 +10,10 @@
 - `Error::CherryPickInProgress`・`Error::NoCherryPickInProgress`・`Error::RevertInProgress`・`Error::NoRevertInProgress`・`Error::UnsupportedCherryPick` (#62)
 - `Repository::pack_refs()`: `git pack-refs --all`と同じく、looseの参照を`packed-refs`にまとめ（ソート済み、注釈付きタグには`^`の行。ヘッダもGitと同じ）、looseのファイルと空になったディレクトリを消す。シンボリック参照、作業ツリーごとの参照（`refs/bisect/`など）、存在しないオブジェクトを指す参照はlooseのまま残す。途中で変わった・ロックされているlooseの参照は消さない (#63)
 - `Repository::repack()`と`RepackSummary`: `git repack -a -d`と同じく、到達可能なオブジェクトを1つのpack（v2、idx v2）にまとめ、古いpackと、packに入ったlooseオブジェクト（空になったファンアウトのディレクトリも）を消す。到達可能の範囲は参照・HEAD・reflog・index、止まったmerge・rebase・cherry-pick・fetchの状態ファイル（`ORIG_HEAD`・`MERGE_HEAD`・`FETCH_HEAD`など）。古いpackでdeltaだったオブジェクトは、baseも新しいpackに入るなら圧縮済みのdeltaをそのまま使う（新しいdeltaは計算しない。looseオブジェクトはそのまま格納する）。`.keep`のあるpackには触れない。到達できないオブジェクトが古いpackにあれば、`git repack -A`と同じくlooseとして書き出し、消さない。packは一時ファイルに書いてからrenameし、indexを最後に置くので、読み手は常にすべてのオブジェクトを読める。到達可能なオブジェクトが欠けている場合は何も消さずにエラーを返す (#63)
+- `Repository::prune(older_than)`: `git prune [--expire <time>]`と同じく、到達できないlooseオブジェクトを消す。期限を指定すると、それより新しいオブジェクトと、新しい到達できないオブジェクトが参照するオブジェクトは残す（書き込み中の操作のオブジェクトを消さない）。packに入っているlooseオブジェクトと、期限を過ぎた中断済みの一時ファイルも消す (#63)
+- `Repository::gc()`と`GcSummary`: `git gc`と同じく、`pack_refs()`・`repack()`・`prune()`を続けて行う。pruneの期限は`gc.pruneExpire`（既定`2.weeks.ago`、`now`・`never`、`<n>.<単位>.ago`、日時）。実行中は`gc.pid.lock`を持ち、`git gc`と同時に動かない。Gitと異なり、reflogは期限切れにせず、到達できないオブジェクトはcruft packではなくlooseで残す (#63)
+- `Repository::gc_auto()`: `git gc --auto`と同じ条件（looseオブジェクトが`gc.auto`（既定6700。`objects/17/`から推定）より多い、または`.keep`のないpackが`gc.autoPackLimit`（既定50）より多い）のときだけ`gc()`を行う。`gc.auto = 0`で無効。書き込み操作の中では自動実行しない (#63)
+- `examples/measure_gc.rs`: zerogitが書いた履歴でのgc前後のオブジェクト数・サイズ・`log()`・`status()`の計測。結果はREADMEに記載 (#63)
 
 ### Changed
 - 止まったcherry-pick・revertの間の`create_commit_with()`は、`git commit`と同じくそのコミットを確定する（`CHERRY_PICK_HEAD`・`REVERT_HEAD`・`MERGE_MSG`を消す。cherry-pickでは元のauthorを使い、reflogは`commit (cherry-pick):`）。`amend_commit()`・`merge()`は止まったcherry-pickの間はGitと同じく`Error::CherryPickInProgress`で拒否する。mixed・hardの`reset_to()`はcherry-pick・revertの停止状態も終える (#62)

@@ -113,7 +113,7 @@ pub use remote::{Refspec, Remote};
 pub use transfer::StoredPack;
 
 // Re-export housekeeping types
-pub use gc::RepackSummary;
+pub use gc::{GcSummary, RepackSummary};
 
 // Re-export rebase types
 pub use rebase::{RebaseOutcome, RebaseStep};

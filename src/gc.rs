@@ -1,17 +1,22 @@
 //! Housekeeping: packing references (`git pack-refs`) and objects
-//! (`git repack`).
+//! (`git repack`), pruning unreachable objects (`git prune`) and all of
+//! them together (`git gc`).
 //!
 //! [`Repository::pack_refs`] moves loose references into `packed-refs` as
 //! `git pack-refs --all` does, so a repository with many branches and tags
 //! keeps few files under `.git/refs/`. [`Repository::repack`] puts every
 //! reachable object into one pack, as `git repack -a -d` does, so objects
-//! written loose one by one do not pile up.
+//! written loose one by one do not pile up. [`Repository::prune`] removes
+//! unreachable loose objects once they expire. [`Repository::gc`] runs the
+//! three, and [`Repository::gc_auto`] runs it only when there are many
+//! loose objects or packs, as `git gc --auto` does.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use crate::error::{Error, Result};
 use crate::infra::fs::remove_file;
@@ -443,26 +448,42 @@ impl Repository {
     /// Every object reachable from the roots, commits and tags before the
     /// trees and blobs they lead to. Blobs are checked to exist, not read.
     fn reachable_for_repack(&self) -> Result<Vec<Oid>> {
+        let mut seen = HashSet::new();
+        self.walk_objects(self.repack_roots()?, &mut seen, false)
+    }
+
+    /// The objects reachable from `starts` that are not in `seen` yet
+    /// (which collects them). A missing object is an error, or with
+    /// `tolerant` (for objects nothing refers to) skipped.
+    fn walk_objects(
+        &self,
+        starts: Vec<Oid>,
+        seen: &mut HashSet<Oid>,
+        tolerant: bool,
+    ) -> Result<Vec<Oid>> {
         let store = self.object_store();
-        let mut seen: HashSet<Oid> = HashSet::new();
         let mut order = Vec::new();
-        let mut queue: VecDeque<(Oid, Option<ObjectType>)> = self
-            .repack_roots()?
-            .into_iter()
-            .map(|oid| (oid, None))
-            .collect();
+        let mut queue: VecDeque<(Oid, Option<ObjectType>)> =
+            starts.into_iter().map(|oid| (oid, None)).collect();
         while let Some((oid, known)) = queue.pop_front() {
             if !seen.insert(oid) {
                 continue;
             }
             if known == Some(ObjectType::Blob) {
                 if !store.exists(&oid)? {
+                    if tolerant {
+                        continue;
+                    }
                     return Err(Error::ObjectNotFound(oid.to_hex()));
                 }
                 order.push(oid);
                 continue;
             }
-            let raw = store.read(&oid)?;
+            let raw = match store.read(&oid) {
+                Ok(raw) => raw,
+                Err(Error::ObjectNotFound(_)) if tolerant => continue,
+                Err(e) => return Err(e),
+            };
             order.push(oid);
             match raw.object_type {
                 ObjectType::Commit => {
@@ -647,5 +668,299 @@ impl Repository {
             }
         }
         Ok(removed)
+    }
+}
+
+/// What [`Repository::gc`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GcSummary {
+    repack: RepackSummary,
+    pruned: usize,
+}
+
+impl GcSummary {
+    /// What the repack did.
+    pub fn repack(&self) -> &RepackSummary {
+        &self.repack
+    }
+
+    /// The number of unreachable loose objects removed.
+    pub fn pruned(&self) -> usize {
+        self.pruned
+    }
+}
+
+/// How long unreachable objects are kept (`gc.pruneExpire`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Expire {
+    /// Never prune.
+    Never,
+    /// Prune objects last written before this time.
+    Before(SystemTime),
+}
+
+/// Parses an expiry date as Git's `gc.pruneExpire` takes it: `now`,
+/// `never`, a relative date such as `2.weeks.ago` or `3 days ago`, or an
+/// absolute date (see `infra::time::parse_git_date`).
+fn parse_expire(value: &str, now: SystemTime) -> Result<Expire> {
+    let text = value.trim().to_ascii_lowercase();
+    match text.as_str() {
+        "never" | "false" => return Ok(Expire::Never),
+        "now" | "all" => return Ok(Expire::Before(now)),
+        _ => {}
+    }
+    let words: Vec<&str> = text
+        .split(|c: char| c == '.' || c.is_whitespace())
+        .filter(|w| !w.is_empty())
+        .collect();
+    if let [count, unit, "ago"] = words[..] {
+        if let Ok(count) = count.parse::<u64>() {
+            let seconds = match unit.trim_end_matches('s') {
+                "second" | "sec" => Some(1),
+                "minute" | "min" => Some(60),
+                "hour" => Some(3600),
+                "day" => Some(86_400),
+                "week" => Some(7 * 86_400),
+                "month" => Some(30 * 86_400),
+                "year" => Some(365 * 86_400),
+                _ => None,
+            };
+            if let Some(seconds) = seconds {
+                let ago = Duration::from_secs(count.saturating_mul(seconds));
+                return Ok(Expire::Before(
+                    now.checked_sub(ago).unwrap_or(SystemTime::UNIX_EPOCH),
+                ));
+            }
+        }
+    }
+    match crate::infra::time::parse_git_date(value) {
+        Some((seconds, _)) => {
+            let at = Duration::from_secs(u64::try_from(seconds).unwrap_or(0));
+            Ok(Expire::Before(SystemTime::UNIX_EPOCH + at))
+        }
+        None => Err(Error::InvalidDate(value.to_owned())),
+    }
+}
+
+/// Whether a file in `objects/` is a temporary one left by an
+/// interrupted writer (Git's `tmp_*` / `.tmp-*`, zerogit's `.<name>.tmp-*`).
+fn is_temporary(name: &str) -> bool {
+    name.starts_with("tmp_") || name.starts_with(".tmp-") || name.contains(".tmp-")
+}
+
+impl Repository {
+    /// Removes unreachable loose objects, like `git prune`, and returns how
+    /// many were removed.
+    ///
+    /// With `older_than`, only objects last written before it are removed
+    /// (`git prune --expire <time>`), and objects that newer unreachable
+    /// objects refer to are kept as well, so an object being written by a
+    /// concurrent operation (not yet referenced) survives. Without it,
+    /// every unreachable loose object goes. Reachable means what
+    /// [`Repository::repack`] packs. Loose objects that a pack holds are
+    /// removed too (`git prune-packed`), and so are temporary files of
+    /// interrupted writes older than `older_than`. Packed objects are not
+    /// pruned; [`Repository::repack`] writes the unreachable ones out as
+    /// loose objects first.
+    ///
+    /// # Errors
+    ///
+    /// `Error::ObjectNotFound` if a reachable object is missing (the
+    /// repository is corrupt); nothing is removed then.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::time::{Duration, SystemTime};
+    /// use zerogit::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// // Unreachable objects older than two weeks, as `git gc` prunes.
+    /// let two_weeks = Duration::from_secs(14 * 24 * 3600);
+    /// repo.prune(Some(SystemTime::now() - two_weeks)).unwrap();
+    /// ```
+    pub fn prune(&self, older_than: Option<SystemTime>) -> Result<usize> {
+        let mut keep: HashSet<Oid> = HashSet::new();
+        self.walk_objects(self.repack_roots()?, &mut keep, false)?;
+        let expired = |modified: SystemTime| older_than.map_or(true, |limit| modified < limit);
+
+        let objects = self.git_dir().join("objects");
+        let mut loose: Vec<(Oid, PathBuf, SystemTime)> = Vec::new();
+        let mut temporary: Vec<PathBuf> = Vec::new();
+        for fanout in 0..=255u8 {
+            let dir = objects.join(format!("{:02x}", fanout));
+            let entries = match fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
+            for entry in entries {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let modified = entry.metadata()?.modified()?;
+                match Oid::from_hex(&format!("{:02x}{}", fanout, name)) {
+                    Ok(oid) if name.len() == 38 => loose.push((oid, entry.path(), modified)),
+                    _ if is_temporary(&name) && expired(modified) => temporary.push(entry.path()),
+                    _ => {}
+                }
+            }
+        }
+        if let Ok(entries) = fs::read_dir(objects.join("pack")) {
+            for entry in entries {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if is_temporary(&name) && expired(entry.metadata()?.modified()?) {
+                    temporary.push(entry.path());
+                }
+            }
+        }
+
+        // Recent unreachable objects keep what they refer to.
+        let recent: Vec<Oid> = loose
+            .iter()
+            .filter(|(oid, _, modified)| !keep.contains(oid) && !expired(*modified))
+            .map(|(oid, _, _)| *oid)
+            .collect();
+        self.walk_objects(recent, &mut keep, true)?;
+
+        let mut removed = 0;
+        for (oid, path, modified) in &loose {
+            if !keep.contains(oid) && expired(*modified) && remove_file(path)? {
+                removed += 1;
+            }
+        }
+        for path in temporary {
+            remove_file(&path)?;
+        }
+        let packs = self.object_store().pack_files()?;
+        self.prune_packed(&packs)?;
+        Ok(removed)
+    }
+
+    /// Cleans up the repository like `git gc`: packs the references
+    /// ([`Repository::pack_refs`]), repacks the objects
+    /// ([`Repository::repack`]) and prunes unreachable loose objects older
+    /// than `gc.pruneExpire` ([`Repository::prune`]; by default two weeks,
+    /// `now` for all, `never` to keep them).
+    ///
+    /// Unlike `git gc`, reflogs are not expired, so objects reachable only
+    /// from old reflog entries are kept, and unreachable objects are kept
+    /// as loose objects rather than in a cruft pack. A `gc.pid.lock` file
+    /// is held meanwhile, so `git gc` does not start at the same time.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::Locked` if `gc.pid` or `packed-refs` is locked (another gc
+    ///   is starting).
+    /// - `Error::InvalidDate` if `gc.pruneExpire` cannot be parsed.
+    /// - The errors of [`Repository::repack`] and [`Repository::prune`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// let summary = repo.gc().unwrap();
+    /// println!("{} objects packed, {} pruned", summary.repack().objects(), summary.pruned());
+    /// ```
+    pub fn gc(&self) -> Result<GcSummary> {
+        let expire = match self.config()?.get("gc", "pruneexpire") {
+            Some(value) => parse_expire(value, SystemTime::now())?,
+            None => parse_expire("2.weeks.ago", SystemTime::now())?,
+        };
+        let _lock = LockFile::acquire(self.git_dir().join("gc.pid"))?;
+        self.pack_refs()?;
+        let repack = self.repack()?;
+        let pruned = match expire {
+            Expire::Never => 0,
+            Expire::Before(limit) => self.prune(Some(limit))?,
+        };
+        Ok(GcSummary { repack, pruned })
+    }
+
+    /// Runs [`Repository::gc`] only when the repository needs it, like
+    /// `git gc --auto`, and returns its summary, or `None` if it was not
+    /// needed. Calling it after operations that write objects keeps a
+    /// repository tidy without Git.
+    ///
+    /// As in Git, it is needed when there are more than about `gc.auto`
+    /// loose objects (default 6700; estimated from `objects/17/`) or more
+    /// than `gc.autoPackLimit` packs without a `.keep` file (default 50).
+    /// `gc.auto = 0` turns it off.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Repository::gc`].
+    pub fn gc_auto(&self) -> Result<Option<GcSummary>> {
+        let config = self.config()?;
+        let setting = |key: &str, default: i64| -> Result<i64> {
+            match config.get("gc", key) {
+                Some(_) => config.get_int("gc", key),
+                None => Ok(default),
+            }
+        };
+        let auto = setting("auto", 6700)?;
+        if auto <= 0 {
+            return Ok(None);
+        }
+        // Loose objects are spread evenly over the 256 directories.
+        let threshold = (auto + 255) / 256;
+        let sample = match fs::read_dir(self.git_dir().join("objects").join("17")) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let name = e.file_name();
+                    let name = name.to_string_lossy();
+                    name.len() == 38 && name.bytes().all(|b| b.is_ascii_hexdigit())
+                })
+                .count() as i64,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(e) => return Err(e.into()),
+        };
+        let pack_limit = setting("autopacklimit", 50)?;
+        let packs = self
+            .object_store()
+            .pack_files()?
+            .iter()
+            .filter(|pack| !pack.path().with_extension("keep").exists())
+            .count() as i64;
+        if sample > threshold || (pack_limit > 0 && packs > pack_limit) {
+            self.gc().map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expiry_dates_like_git() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000);
+        let ago = |s: u64| Expire::Before(now - Duration::from_secs(s));
+        assert_eq!(parse_expire("2.weeks.ago", now).unwrap(), ago(14 * 86_400));
+        assert_eq!(parse_expire("3 days ago", now).unwrap(), ago(3 * 86_400));
+        assert_eq!(parse_expire("1.hour.ago", now).unwrap(), ago(3600));
+        assert_eq!(parse_expire("now", now).unwrap(), Expire::Before(now));
+        assert_eq!(parse_expire("never", now).unwrap(), Expire::Never);
+        assert_eq!(
+            parse_expire("2005-04-07T22:13:13Z", now).unwrap(),
+            Expire::Before(SystemTime::UNIX_EPOCH + Duration::from_secs(1_112_911_993))
+        );
+        assert!(matches!(
+            parse_expire("someday", now),
+            Err(Error::InvalidDate(_))
+        ));
+    }
+
+    #[test]
+    fn temporary_files() {
+        assert!(is_temporary("tmp_obj_abc"));
+        assert!(is_temporary(".tmp-1234-pack"));
+        assert!(is_temporary(".0123456789.tmp-77-0"));
+        assert!(!is_temporary("0123456789abcdef0123456789abcdef012345"));
     }
 }

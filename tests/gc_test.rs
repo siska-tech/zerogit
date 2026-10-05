@@ -1,5 +1,6 @@
-//! Housekeeping compared with Git: `Repository::pack_refs` with
-//! `git pack-refs --all`, `Repository::repack` with `git repack` (#63).
+//! Housekeeping compared with Git: `Repository::pack_refs`, `repack`,
+//! `prune` and `gc` with `git pack-refs --all`, `git repack`, `git prune`
+//! and `git gc` (#63).
 
 mod common;
 
@@ -460,4 +461,176 @@ fn repack_of_a_corrupt_repository_removes_nothing() {
     let summary = Repository::open(empty.path()).unwrap().repack().unwrap();
     assert_eq!(summary.pack(), None);
     assert_eq!(summary.objects(), 0);
+}
+
+/// Writes `content` as a loose blob and returns its ID.
+fn write_blob(dir: &Path, content: &str) -> String {
+    write(dir, "blob.tmp", content);
+    let oid = git(dir, &["hash-object", "-w", "blob.tmp"])
+        .trim()
+        .to_owned();
+    fs::remove_file(dir.join("blob.tmp")).unwrap();
+    oid
+}
+
+/// Writes a tree holding `blob` as `name`, without referring to it from
+/// anywhere, and returns its ID.
+fn write_tree(dir: &Path, name: &str, blob: &str) -> String {
+    use std::io::Write;
+    let mut child = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .arg("mktree")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("100644 blob {}\t{}\n", blob, name).as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// Waits until the file system's clock has moved past now, and returns a
+/// time between what was written before and what is written after.
+fn time_boundary() -> std::time::SystemTime {
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let boundary = std::time::SystemTime::now();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    boundary
+}
+
+/// Git's form of a time for `--expire`.
+fn git_time(time: std::time::SystemTime) -> String {
+    let seconds = time
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    format!("@{}", seconds)
+}
+
+#[test]
+fn prune_removes_what_git_prune_removes() {
+    let temp = packed_history();
+    // Copying does not keep modification times everywhere (it does not on
+    // Linux), so copy first, for zerogit and Git with and without an
+    // expiry, and write the objects whose age matters into each copy.
+    let copies: Vec<tempfile::TempDir> = (0..4).map(|_| twin(temp.path())).collect();
+    let dirs: Vec<&Path> = copies.iter().map(|copy| copy.path()).collect();
+    let (mut old_alone, mut old_referenced) = (String::new(), String::new());
+    for dir in &dirs {
+        // Old: one unreachable blob alone, another a recent tree refers to.
+        old_alone = write_blob(dir, "old and alone\n");
+        old_referenced = write_blob(dir, "old, but a recent tree has it\n");
+        // A temporary file left by an interrupted write, old by then.
+        write(dir, ".git/objects/pack/tmp_pack_leftover", "partial");
+    }
+    let boundary = time_boundary();
+    let (mut recent_blob, mut recent_tree) = (String::new(), String::new());
+    for dir in &dirs {
+        recent_blob = write_blob(dir, "recent\n");
+        recent_tree = write_tree(dir, "f", &old_referenced);
+    }
+
+    for (i, expire) in [Some(boundary), None].into_iter().enumerate() {
+        let (o, t) = (dirs[2 * i], dirs[2 * i + 1]);
+        let removed = Repository::open(o).unwrap().prune(expire).unwrap();
+        match expire {
+            Some(boundary) => git(t, &["prune", "--expire", &git_time(boundary)]),
+            None => git(t, &["prune"]),
+        };
+        assert_eq!(object_files(o), object_files(t), "{:?}", expire);
+        let (loose, _) = object_files(o);
+        assert!(!loose.contains(&old_alone));
+        if expire.is_some() {
+            assert_eq!(removed, 1);
+            for kept in [&old_referenced, &recent_blob, &recent_tree] {
+                assert!(loose.contains(kept));
+            }
+        } else {
+            for gone in [&old_referenced, &recent_blob, &recent_tree] {
+                assert!(!loose.contains(gone));
+            }
+        }
+        assert!(!o.join(".git/objects/pack/tmp_pack_leftover").exists());
+        assert_fsck(o);
+    }
+}
+
+#[test]
+fn gc_matches_git_gc() {
+    let temp = packed_history();
+    let dir = temp.path();
+    write_blob(dir, "unreachable\n");
+    git(dir, &["config", "gc.pruneExpire", "now"]);
+    let ours = twin(dir);
+    let theirs = twin(dir);
+    let (o, t) = (ours.path(), theirs.path());
+    let summary = Repository::open(o).unwrap().gc().unwrap();
+    git(t, &["gc", "-q"]);
+    assert_eq!(summary.pruned(), 1);
+    assert!(!o.join(".git/gc.pid.lock").exists());
+
+    // The same references, packed the same way, and one pack with the
+    // same objects; nothing loose.
+    assert_eq!(ref_files(o), ref_files(t));
+    let (loose, packs) = object_files(o);
+    assert_eq!(loose, Vec::<String>::new());
+    assert_eq!(object_files(t).0, Vec::<String>::new());
+    let pack_of = |dir: &Path, packs: &[String]| {
+        let name = packs.iter().find(|p| p.ends_with(".pack")).unwrap().clone();
+        verify_pack(dir, &dir.join(".git/objects/pack").join(name)).0
+    };
+    assert_eq!(pack_of(o, &packs), pack_of(t, &object_files(t).1));
+    assert_fsck(o);
+
+    // Unreachable objects are kept while recent, by default.
+    let kept = twin(dir);
+    git(kept.path(), &["config", "--unset", "gc.pruneExpire"]);
+    assert_eq!(
+        Repository::open(kept.path())
+            .unwrap()
+            .gc()
+            .unwrap()
+            .pruned(),
+        0
+    );
+    assert_eq!(object_files(kept.path()).0.len(), 1);
+
+    // Another gc running: nothing happens.
+    let locked = twin(dir);
+    fs::write(locked.path().join(".git/gc.pid.lock"), "").unwrap();
+    let before = object_files(locked.path());
+    assert!(matches!(
+        Repository::open(locked.path()).unwrap().gc(),
+        Err(Error::Locked(_))
+    ));
+    assert_eq!(object_files(locked.path()), before);
+}
+
+#[test]
+fn gc_auto_runs_only_when_needed() {
+    let temp = packed_history();
+    let dir = temp.path();
+    // The fixture turns automatic gc off for Git; turn it back on.
+    git(dir, &["config", "--unset", "gc.auto"]);
+    let repo = Repository::open(dir).unwrap();
+    // A few loose objects and one pack: not needed.
+    assert_eq!(repo.gc_auto().unwrap(), None);
+    // More packs than gc.autoPackLimit.
+    git(dir, &["config", "gc.autoPackLimit", "1"]);
+    pack_objects(dir, &format!("{}\n", write_blob(dir, "another pack\n")));
+    let summary = repo.gc_auto().unwrap().expect("gc is needed");
+    assert_eq!(summary.repack().removed_packs(), 2);
+    assert_eq!(repo.gc_auto().unwrap(), None);
+    // gc.auto = 0 turns it off.
+    git(dir, &["config", "gc.auto", "0"]);
+    pack_objects(dir, &format!("{}\n", write_blob(dir, "yet another\n")));
+    pack_objects(dir, &format!("{}\n", write_blob(dir, "and one more\n")));
+    assert_eq!(repo.gc_auto().unwrap(), None);
 }

@@ -26,6 +26,33 @@ pub fn read_file<P: AsRef<Path>>(path: P) -> Result<Vec<u8>> {
     })
 }
 
+/// Removes a file, read-only or not, and returns whether it existed.
+///
+/// Git writes objects and packs read-only. On Windows, older Rust (before
+/// 1.75 or so) cannot remove a read-only file, so the attribute is cleared
+/// and the removal retried.
+pub(crate) fn remove_file(path: &Path) -> Result<bool> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            let mut permissions = match fs::metadata(path) {
+                Ok(metadata) => metadata.permissions(),
+                Err(_) => return Err(e.into()),
+            };
+            if !permissions.readonly() {
+                return Err(e.into());
+            }
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+            fs::set_permissions(path, permissions)?;
+            fs::remove_file(path)?;
+            Ok(true)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Writes data to a file atomically.
 ///
 /// This function writes to a temporary file first, then renames it to the

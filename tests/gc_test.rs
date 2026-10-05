@@ -184,6 +184,17 @@ fn locked_files_are_respected() {
     );
 }
 
+/// Deletes a loose object Git wrote. Git makes it read-only, which Rust
+/// before 1.75 or so cannot delete on Windows.
+fn remove_object(dir: &Path, oid: &str) {
+    let path = dir.join(format!(".git/objects/{}/{}", &oid[..2], &oid[2..]));
+    let mut permissions = fs::metadata(&path).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    fs::set_permissions(&path, permissions).unwrap();
+    fs::remove_file(&path).unwrap();
+}
+
 /// Loose object files (`objects/xx/...`) and pack files, by name.
 fn object_files(dir: &Path) -> (Vec<String>, Vec<String>) {
     let objects = dir.join(".git/objects");
@@ -393,12 +404,7 @@ fn unreachable_objects_and_kept_packs_survive() {
         format!(".git/objects/{}/{}", &oid[..2], &oid[2..])
     };
     fs::remove_file(dir.join("x.txt")).unwrap();
-    fs::remove_file(dir.join(format!(
-        ".git/objects/{}/{}",
-        &packed_blob[..2],
-        &packed_blob[2..]
-    )))
-    .unwrap();
+    remove_object(dir, &packed_blob);
     // A kept pack with the last commit's new objects.
     let kept = pack_objects(dir, &git(dir, &["rev-list", "--objects", "HEAD~1..HEAD"]));
     fs::write(kept.with_extension("keep"), "").unwrap();
@@ -441,7 +447,7 @@ fn repack_of_a_corrupt_repository_removes_nothing() {
     let dir = temp.path();
     // The blob of the commit after gc is lost.
     let blob = git(dir, &["rev-parse", "HEAD:new.txt"]).trim().to_owned();
-    fs::remove_file(dir.join(format!(".git/objects/{}/{}", &blob[..2], &blob[2..]))).unwrap();
+    remove_object(dir, &blob);
     let before = object_files(dir);
     assert!(matches!(
         Repository::open(dir).unwrap().repack(),

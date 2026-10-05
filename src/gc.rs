@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::error::{Error, Result};
+use crate::infra::fs::remove_file;
 use crate::infra::hash::Sha1State;
 use crate::infra::{compress, crc32, write_file_atomic, LockFile};
 use crate::objects::pack::indexer::{entry_header, type_code, write_index, IndexedObject};
@@ -176,14 +177,6 @@ fn oids_in(content: &str) -> Vec<Oid> {
         .filter(|word| word.len() == 40)
         .filter_map(|word| Oid::from_hex(word).ok())
         .collect()
-}
-
-fn remove_if_exists(path: &Path) -> Result<bool> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e.into()),
-    }
 }
 
 /// References Git keeps per work tree and never packs.
@@ -388,7 +381,7 @@ impl Repository {
         }
         for pack in old.iter().filter(|pack| !is_new(pack)) {
             for extension in PACK_FILES {
-                remove_if_exists(&pack.path().with_extension(extension))?;
+                remove_file(&pack.path().with_extension(extension))?;
             }
             summary.removed_packs += 1;
         }
@@ -645,7 +638,7 @@ impl Repository {
                     continue;
                 };
                 if packs.iter().any(|pack| pack.contains(&oid)) {
-                    fs::remove_file(entry.path())?;
+                    remove_file(&entry.path())?;
                     removed += 1;
                 }
             }

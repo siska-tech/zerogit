@@ -1,7 +1,11 @@
 //! Git commit log iteration.
 //!
-//! This module provides an iterator for traversing commit history
-//! in reverse chronological order (newest first).
+//! This module provides an iterator for traversing commit history in the
+//! orders of `git log` ([`LogOrder`]): by default newest committer date
+//! first, as Git walks it (returning commits as they are found), or with a
+//! parent never before its children (`--date-order`, `--topo-order`),
+//! optionally reversed. [`Graph`] lays out the columns of
+//! `git log --graph` for the commits it is given.
 //!
 //! # Filtering
 //!
@@ -25,41 +29,52 @@
 //! ```
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
 use crate::objects::{Commit, ObjectStore, ObjectType, Oid, Tree};
 
-/// A pending commit in the priority queue.
-///
-/// Commits are ordered by timestamp (descending) for traversal.
-#[derive(Debug, Clone)]
-struct PendingCommit {
-    /// The commit OID.
-    oid: Oid,
-    /// The author timestamp for ordering.
+/// The order in which [`LogIterator`] returns commits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogOrder {
+    /// Git's default: newest committer date first, as the history is
+    /// walked (a commit may come before one of its children when the
+    /// dates are skewed). Commits are returned as they are found, without
+    /// reading the whole history first.
+    #[default]
+    Default,
+    /// `--date-order`: no parent before all of its children, otherwise
+    /// newest committer date first. Reads the whole history first.
+    Date,
+    /// `--topo-order`: no parent before all of its children, and the
+    /// commits of one line of history together rather than interleaved by
+    /// date (the order of `git log --graph`). Reads the whole history
+    /// first.
+    Topo,
+}
+
+/// A commit waiting in the walk: newest committer date first, and among
+/// equal dates, the one queued first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Queued {
     timestamp: i64,
+    sequence: u64,
+    oid: Oid,
 }
 
-impl PartialEq for PendingCommit {
-    fn eq(&self, other: &Self) -> bool {
-        self.oid == other.oid
-    }
-}
-
-impl Eq for PendingCommit {}
-
-impl PartialOrd for PendingCommit {
+impl PartialOrd for Queued {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for PendingCommit {
+impl Ord for Queued {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Higher timestamp = more recent = higher priority
-        self.timestamp.cmp(&other.timestamp)
+        // A max-heap: a later date first, then an earlier sequence.
+        self.timestamp
+            .cmp(&other.timestamp)
+            .then_with(|| other.sequence.cmp(&self.sequence))
     }
 }
 
@@ -93,6 +108,10 @@ pub struct LogOptions {
     author: Option<String>,
     /// Starting commit OID (defaults to HEAD if not specified).
     from: Option<Oid>,
+    /// The order of the commits.
+    order: LogOrder,
+    /// Return the commits in reverse (oldest first).
+    reverse: bool,
 }
 
 impl LogOptions {
@@ -218,6 +237,21 @@ impl LogOptions {
         self
     }
 
+    /// Sets the order of the commits ([`LogOrder`]; by default Git's).
+    pub fn order(mut self, order: LogOrder) -> Self {
+        self.order = order;
+        self
+    }
+
+    /// Returns the commits oldest first (`--reverse`). As in Git, the
+    /// order, the filters and [`LogOptions::max_count`] select the commits
+    /// first, and then they are reversed, so the whole selection is read
+    /// before the first commit is returned.
+    pub fn reverse(mut self, reverse: bool) -> Self {
+        self.reverse = reverse;
+        self
+    }
+
     /// Returns true if path filtering is enabled.
     pub fn has_path_filter(&self) -> bool {
         !self.paths.is_empty()
@@ -284,9 +318,10 @@ fn parse_date(s: &str) -> i64 {
 
 /// An iterator over commits in the repository history.
 ///
-/// Commits are yielded in reverse chronological order (newest first),
-/// following parent links. Merge commits are handled by traversing
-/// all parent branches.
+/// Commits are yielded in the order of [`LogOptions::order`] (by default
+/// Git's: newest committer date first, as the history is walked),
+/// following all parents of merge commits (or only the first, with
+/// [`LogOptions::first_parent`]).
 ///
 /// # Example
 ///
@@ -306,10 +341,19 @@ fn parse_date(s: &str) -> i64 {
 pub struct LogIterator {
     /// The object store for reading commits.
     store: ObjectStore,
-    /// Priority queue of pending commits to visit.
-    pending: BinaryHeap<PendingCommit>,
-    /// Set of already visited commit OIDs to avoid duplicates.
-    visited: HashSet<Oid>,
+    /// Commits waiting in the walk, by committer date.
+    pending: BinaryHeap<Queued>,
+    /// The commits of `pending`, read when they were queued.
+    queued: HashMap<Oid, Commit>,
+    /// Commits queued so far: each is walked once, as Git marks them seen.
+    seen: HashSet<Oid>,
+    /// Counter keeping commits with equal dates in the order queued.
+    sequence: u64,
+    /// For the orders that need the whole history, or `reverse`: the
+    /// commits to return, in order.
+    sorted: Option<VecDeque<Commit>>,
+    /// Whether `sorted` is filtered (and limited) already.
+    selected: bool,
     /// Filtering options.
     options: LogOptions,
     /// Number of commits yielded so far.
@@ -344,25 +388,172 @@ impl LogIterator {
         start_oid: Oid,
         options: LogOptions,
     ) -> Result<Self> {
-        let mut pending = BinaryHeap::new();
-        let visited = HashSet::new();
-
-        // Read the initial commit to get its timestamp
-        let raw = store.read(&start_oid)?;
-        let commit = Commit::parse(start_oid, raw)?;
-
-        pending.push(PendingCommit {
-            oid: start_oid,
-            timestamp: commit.author().timestamp(),
-        });
-
-        Ok(LogIterator {
+        let mut log = LogIterator {
             store,
-            pending,
-            visited,
+            pending: BinaryHeap::new(),
+            queued: HashMap::new(),
+            seen: HashSet::new(),
+            sequence: 0,
+            sorted: None,
+            selected: false,
             options,
             count: 0,
-        })
+        };
+        log.enqueue(start_oid)?;
+        Ok(log)
+    }
+
+    /// Queues a commit for the walk, unless it was queued before.
+    fn enqueue(&mut self, oid: Oid) -> Result<()> {
+        if !self.seen.insert(oid) {
+            return Ok(());
+        }
+        let commit = self.read_commit(&oid)?;
+        self.pending.push(Queued {
+            timestamp: commit.committer().timestamp(),
+            sequence: self.sequence,
+            oid,
+        });
+        self.sequence += 1;
+        self.queued.insert(oid, commit);
+        Ok(())
+    }
+
+    /// The parents the walk follows: the first only with `first_parent`.
+    fn walked_parents<'a>(&self, commit: &'a Commit) -> &'a [Oid] {
+        let parents = commit.parents();
+        if self.options.first_parent {
+            &parents[..parents.len().min(1)]
+        } else {
+            parents
+        }
+    }
+
+    /// The next commit of Git's default walk: the newest queued, whose
+    /// parents are queued in turn.
+    fn walk_next(&mut self) -> Result<Option<Commit>> {
+        let Some(next) = self.pending.pop() else {
+            return Ok(None);
+        };
+        let commit = self
+            .queued
+            .remove(&next.oid)
+            .expect("queued commits are kept until walked");
+        for parent in self.walked_parents(&commit).to_vec() {
+            self.enqueue(parent)?;
+        }
+        Ok(Some(commit))
+    }
+
+    /// Sorts the walked commits as Git's `sort_in_topological_order`
+    /// does: a parent comes after all of its children; the commits ready
+    /// to come next are taken by date (`Date`) or last ready first
+    /// (`Topo`, which keeps a line of history together).
+    fn topological(&self, walked: Vec<Commit>) -> VecDeque<Commit> {
+        let index: HashMap<Oid, usize> = walked
+            .iter()
+            .enumerate()
+            .map(|(i, commit)| (*commit.oid(), i))
+            .collect();
+        // One plus the number of children among the walked commits; 0 once
+        // the commit is out.
+        let mut indegree = vec![1usize; walked.len()];
+        for commit in &walked {
+            for parent in self.walked_parents(commit) {
+                if let Some(&i) = index.get(parent) {
+                    indegree[i] += 1;
+                }
+            }
+        }
+        let by_date = self.options.order == LogOrder::Date;
+        let mut stack: Vec<usize> = Vec::new();
+        let mut heap: BinaryHeap<Queued> = BinaryHeap::new();
+        let mut sequence = 0;
+        let mut put = |i: usize, stack: &mut Vec<usize>, heap: &mut BinaryHeap<Queued>| {
+            if by_date {
+                heap.push(Queued {
+                    timestamp: walked[i].committer().timestamp(),
+                    sequence,
+                    oid: *walked[i].oid(),
+                });
+                sequence += 1;
+            } else {
+                stack.push(i);
+            }
+        };
+        // The tips, in walk order.
+        let tips: Vec<usize> = (0..walked.len()).filter(|&i| indegree[i] == 1).collect();
+        for i in tips {
+            put(i, &mut stack, &mut heap);
+        }
+        // The first tip is taken first.
+        stack.reverse();
+
+        let mut order = Vec::with_capacity(walked.len());
+        loop {
+            let i = if by_date {
+                match heap.pop() {
+                    Some(next) => index[&next.oid],
+                    None => break,
+                }
+            } else {
+                match stack.pop() {
+                    Some(i) => i,
+                    None => break,
+                }
+            };
+            for parent in self.walked_parents(&walked[i]) {
+                let Some(&p) = index.get(parent) else {
+                    continue;
+                };
+                if indegree[p] == 0 {
+                    continue;
+                }
+                indegree[p] -= 1;
+                // Ready once all its children are out.
+                if indegree[p] == 1 {
+                    put(p, &mut stack, &mut heap);
+                }
+            }
+            indegree[i] = 0;
+            order.push(i);
+        }
+        let mut slots: Vec<Option<Commit>> = walked.into_iter().map(Some).collect();
+        order
+            .into_iter()
+            .map(|i| slots[i].take().expect("each commit comes out once"))
+            .collect()
+    }
+
+    /// The next commit in the chosen order, before filtering.
+    fn next_ordered(&mut self) -> Result<Option<Commit>> {
+        if self.options.order == LogOrder::Default {
+            return self.walk_next();
+        }
+        if self.sorted.is_none() {
+            let mut walked = Vec::new();
+            while let Some(commit) = self.walk_next()? {
+                walked.push(commit);
+            }
+            self.sorted = Some(self.topological(walked));
+        }
+        Ok(self.sorted.as_mut().and_then(VecDeque::pop_front))
+    }
+
+    /// The next commit that passes the filters, within `max_count`.
+    fn next_selected(&mut self) -> Result<Option<Commit>> {
+        if let Some(max) = self.options.max_count {
+            if self.count >= max {
+                return Ok(None);
+            }
+        }
+        while let Some(commit) = self.next_ordered()? {
+            if self.passes_filters(&commit)? {
+                self.count += 1;
+                return Ok(Some(commit));
+            }
+        }
+        Ok(None)
     }
 
     /// Reads a commit by its OID.
@@ -536,76 +727,164 @@ impl Iterator for LogIterator {
     type Item = Result<Commit>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // Check max_count limit
-        if let Some(max) = self.options.max_count {
-            if self.count >= max {
-                return None;
+        if self.options.reverse && !self.selected {
+            // Select everything first, then return it oldest first.
+            let mut selection = VecDeque::new();
+            loop {
+                match self.next_selected() {
+                    Ok(Some(commit)) => selection.push_front(commit),
+                    Ok(None) => break,
+                    Err(e) => return Some(Err(e)),
+                }
             }
+            self.sorted = Some(selection);
+            self.selected = true;
         }
+        if self.selected {
+            return self.sorted.as_mut().and_then(VecDeque::pop_front).map(Ok);
+        }
+        self.next_selected().transpose()
+    }
+}
 
-        // Find the next unvisited commit that passes filters
-        while let Some(pending) = self.pending.pop() {
-            if self.visited.contains(&pending.oid) {
-                continue;
+/// One commit's row of a history graph (see [`Graph`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphRow {
+    commit: Oid,
+    column: usize,
+    before: Vec<Oid>,
+    after: Vec<Oid>,
+    parents: Vec<Oid>,
+}
+
+impl GraphRow {
+    /// The commit.
+    pub fn commit(&self) -> &Oid {
+        &self.commit
+    }
+
+    /// The column the commit is drawn in (`*` at character `2 * column` in
+    /// `git log --graph`).
+    pub fn column(&self) -> usize {
+        self.column
+    }
+
+    /// The lines of history on this row: the commit each column leads to,
+    /// left to right. The commit's own column is past the end when it
+    /// starts a new line (a branch tip).
+    pub fn columns_before(&self) -> &[Oid] {
+        &self.before
+    }
+
+    /// The lines of history below this row, for the next one: the commit's
+    /// column continues to its parents, and lines leading to the same
+    /// commit are joined into the leftmost.
+    pub fn columns_after(&self) -> &[Oid] {
+        &self.after
+    }
+
+    /// For each parent given for the commit, the column of
+    /// [`GraphRow::columns_after`] its line continues in.
+    pub fn parent_columns(&self) -> Vec<usize> {
+        self.parents
+            .iter()
+            .map(|parent| {
+                self.after
+                    .iter()
+                    .position(|oid| oid == parent)
+                    .expect("every parent has a column after its child")
+            })
+            .collect()
+    }
+
+    /// Where each column of [`GraphRow::columns_before`] (other than the
+    /// commit's) goes in [`GraphRow::columns_after`]: lines are drawn from
+    /// column `i` above to `mapping[i]` below.
+    pub fn column_mapping(&self) -> Vec<Option<usize>> {
+        self.before
+            .iter()
+            .map(|oid| {
+                if *oid == self.commit {
+                    None
+                } else {
+                    self.after.iter().position(|after| after == oid)
+                }
+            })
+            .collect()
+    }
+}
+
+/// Lays out a history graph as `git log --graph` does, without drawing
+/// it: for each commit, given in the order shown (use [`LogOrder::Topo`],
+/// as `--graph` does), the column it goes in and how the lines of history
+/// continue to its parents. Columns are assigned as Git's `graph.c` does,
+/// so a drawing built from the rows has the shape of Git's.
+///
+/// # Examples
+///
+/// ```no_run
+/// use zerogit::log::{Graph, LogOptions, LogOrder};
+/// use zerogit::Repository;
+///
+/// let repo = Repository::open("path/to/repo").unwrap();
+/// let mut graph = Graph::new();
+/// for commit in repo.log_with_options(LogOptions::new().order(LogOrder::Topo)).unwrap() {
+///     let commit = commit.unwrap();
+///     let row = graph.push(*commit.oid(), commit.parents());
+///     let lane: String = (0..row.columns_before().len().max(row.column() + 1))
+///         .map(|i| if i == row.column() { "* " } else { "| " })
+///         .collect();
+///     println!("{}{}", lane, commit.summary());
+/// }
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct Graph {
+    columns: Vec<Oid>,
+}
+
+impl Graph {
+    /// An empty graph.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds the next commit with the parents its lines lead to (all of
+    /// them, or only the first for a first-parent history), and returns
+    /// its row.
+    pub fn push(&mut self, commit: Oid, parents: &[Oid]) -> GraphRow {
+        let before = std::mem::take(&mut self.columns);
+        let mut after: Vec<Oid> = Vec::with_capacity(before.len() + parents.len());
+        let insert = |after: &mut Vec<Oid>, oid: Oid| {
+            if !after.contains(&oid) {
+                after.push(oid);
             }
-
-            // Mark as visited
-            self.visited.insert(pending.oid);
-
-            // Read the commit
-            let commit = match self.read_commit(&pending.oid) {
-                Ok(c) => c,
-                Err(e) => return Some(Err(e)),
+        };
+        let mut column = None;
+        // The existing lines in order; the commit's own line is replaced by
+        // its parents. A commit no line leads to starts one at the end.
+        for i in 0..=before.len() {
+            let line = match before.get(i) {
+                Some(oid) => *oid,
+                None if column.is_some() => break,
+                None => commit,
             };
-
-            // Add parents to the pending queue
-            if self.options.first_parent {
-                // Only add the first parent
-                if let Some(parent_oid) = commit.parents().first() {
-                    if !self.visited.contains(parent_oid) {
-                        match self.read_commit(parent_oid) {
-                            Ok(parent_commit) => {
-                                self.pending.push(PendingCommit {
-                                    oid: *parent_oid,
-                                    timestamp: parent_commit.author().timestamp(),
-                                });
-                            }
-                            Err(e) => return Some(Err(e)),
-                        }
-                    }
+            if line == commit {
+                column = Some(i);
+                for parent in parents {
+                    insert(&mut after, *parent);
                 }
             } else {
-                // Add all parents
-                for parent_oid in commit.parents() {
-                    if !self.visited.contains(parent_oid) {
-                        match self.read_commit(parent_oid) {
-                            Ok(parent_commit) => {
-                                self.pending.push(PendingCommit {
-                                    oid: *parent_oid,
-                                    timestamp: parent_commit.author().timestamp(),
-                                });
-                            }
-                            Err(e) => return Some(Err(e)),
-                        }
-                    }
-                }
-            }
-
-            // Check if commit passes all filters
-            match self.passes_filters(&commit) {
-                Ok(true) => {
-                    self.count += 1;
-                    return Some(Ok(commit));
-                }
-                Ok(false) => {
-                    // Commit doesn't pass filters, continue to next
-                    continue;
-                }
-                Err(e) => return Some(Err(e)),
+                insert(&mut after, line);
             }
         }
-
-        None
+        self.columns = after.clone();
+        GraphRow {
+            commit,
+            column: column.expect("the commit gets a column"),
+            before,
+            after,
+            parents: parents.to_vec(),
+        }
     }
 }
 

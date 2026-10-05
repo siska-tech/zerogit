@@ -15,10 +15,14 @@
 - `Repository::gc_auto()`: `git gc --auto`と同じ条件（looseオブジェクトが`gc.auto`（既定6700。`objects/17/`から推定）より多い、または`.keep`のないpackが`gc.autoPackLimit`（既定50）より多い）のときだけ`gc()`を行う。`gc.auto = 0`で無効。書き込み操作の中では自動実行しない (#63)
 - `examples/measure_gc.rs`: zerogitが書いた履歴でのgc前後のオブジェクト数・サイズ・`log()`・`status()`の計測。結果はREADMEに記載 (#63)
 - `Repository::clean(&CleanOptions)`、`CleanOptions`、`CleanIgnored`: `git clean -f`と同じく、作業ツリーから未追跡ファイルを消し、消したもの（`dry_run`では消すもの、`git clean -n`が示すパス）をパス順で返す。`directories`（`-d`）、`ignored`（`Keep`・`Include`=`-x`・`Only`=`-X`）、`paths`（pathspec）、`dry_run`（`-n`）。ディレクトリは、消すファイルだけなら丸ごと、残すファイルがあれば中身を個別に消す。pathspecがディレクトリを指せば`-d`なしでも対象になり、globはその固定部分が届くディレクトリの中まで照合する。`-X`ではignoreされたディレクトリの中を見ずに丸ごと消す（いずれもGitと同じ）。追跡中のファイル（ignoreのパターンに一致しても）、ネストしたリポジトリ（`.git`を持つディレクトリ）とその中身、`.git`は消さない。読み取り専用のファイルも消す。bareリポジトリでは`Error::InvalidPathOperation`で何も消さない (#64)
+- `LogOrder`と`LogOptions::order()`: `git log`の並び順。`Default`（Gitの既定）、`Date`（`--date-order`）、`Topo`（`--topo-order`）。`Date`・`Topo`はGitの`sort_in_topological_order`と同じく、親が子より先に出ない順で、履歴全体を読んでから返す。`LogOptions::reverse()`（`--reverse`。`max_count`・フィルタで選んだ後に逆順にする）。同じ日時・日時の逆転・criss-cross・octopusを含む履歴で、各順と`--first-parent`・`-n`の組み合わせが`git log`と一致する (#65)
+- `log::Graph`・`log::GraphRow`: 与えた順のコミットに`git log --graph`と同じ列を割り当てる（Gitの`graph.c`の列の更新と同じ）。各コミットの列、行の前後の線（`columns_before`・`columns_after`）、各親へ続く列、線の対応を返し、文字の描画は利用側に任せる。`*`の位置が`git log --graph`（`--first-parent`、無関係な履歴のマージを含む）と一致する (#65)
+- `examples/measure_log.rs`: 大きな履歴での並び順ごとの計測。結果はREADMEに記載 (#65)
 
 ### Changed
 - 止まったcherry-pick・revertの間の`create_commit_with()`は、`git commit`と同じくそのコミットを確定する（`CHERRY_PICK_HEAD`・`REVERT_HEAD`・`MERGE_MSG`を消す。cherry-pickでは元のauthorを使い、reflogは`commit (cherry-pick):`）。`amend_commit()`・`merge()`は止まったcherry-pickの間はGitと同じく`Error::CherryPickInProgress`で拒否する。mixed・hardの`reset_to()`はcherry-pick・revertの停止状態も終える (#62)
 - `delete_branch()`・`delete_tag()`が`packed-refs`にある参照も削除する（looseとpackedの両方にあれば両方）。これまでは`Error::PackedRefDeletionUnsupported`で拒否していた（このエラーはもう返さない）(#63)
+- `log()`・`log_with_options()`の既定の並びを、authorの日時からGitと同じcommitterの日時に変えた。あわせて、同じ日時のコミットは辿った順に返し、各コミットを最初に見つけた時点で一度だけキューに入れる（Gitの既定の`git log`と同じ順になる）(#65)
 
 ### Fixed
 - `stash_drop()`で最後のstashを消したとき、`packed-refs`にある`refs/stash`が残り、消したはずのstashが見えていた (#63)

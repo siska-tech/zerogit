@@ -4,7 +4,11 @@ use std::fmt;
 use std::path::PathBuf;
 
 /// The main error type for zerogit operations.
+///
+/// New kinds of errors are added as zerogit grows, so a `match` on it
+/// needs a wildcard arm (`_ => ...`).
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// An I/O error occurred.
     Io(std::io::Error),

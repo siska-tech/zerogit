@@ -23,9 +23,12 @@
 - 止まったcherry-pick・revertの間の`create_commit_with()`は、`git commit`と同じくそのコミットを確定する（`CHERRY_PICK_HEAD`・`REVERT_HEAD`・`MERGE_MSG`を消す。cherry-pickでは元のauthorを使い、reflogは`commit (cherry-pick):`）。`amend_commit()`・`merge()`は止まったcherry-pickの間はGitと同じく`Error::CherryPickInProgress`で拒否する。mixed・hardの`reset_to()`はcherry-pick・revertの停止状態も終える (#62)
 - `delete_branch()`・`delete_tag()`が`packed-refs`にある参照も削除する（looseとpackedの両方にあれば両方）。これまでは`Error::PackedRefDeletionUnsupported`で拒否していた（このエラーはもう返さない）(#63)
 - `log()`・`log_with_options()`の既定の並びを、authorの日時からGitと同じcommitterの日時に変えた。あわせて、同じ日時のコミットは辿った順に返し、各コミットを最初に見つけた時点で一度だけキューに入れる（Gitの既定の`git log`と同じ順になる）(#65)
+- `LogOptions::since()`・`until()`の判定を、authorの日時からGitと同じcommitterの日時に変えた。`since`より古いコミットからは先をたどらない（既定の順）。`Date`・`Topo`では、Gitと同じく`since`より古いコミットの祖先をすべて除き、日時の範囲外のコミットを除いてから並べる。`--since`・`--until`と各順の組み合わせが`git log`と一致する
+- `Error`に`#[non_exhaustive]`を付けた。今後エラーの種類を増やしても互換性を壊さないためで、`match`には`_`の腕が必要になる
 
 ### Fixed
 - `stash_drop()`で最後のstashを消したとき、`packed-refs`にある`refs/stash`が残り、消したはずのstashが見えていた (#63)
+- `LogOptions::since()`・`until()`の`YYYY-MM-DD`が、うるう年の1〜2月に1日ずれていた（閏日の数え方の近似）。UTCの0時として正しく計算する
 
 ## [0.8.0] - 2026-10-05
 

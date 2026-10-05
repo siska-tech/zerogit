@@ -160,21 +160,27 @@ impl LogOptions {
         self
     }
 
-    /// Only include commits after this date.
+    /// Only include commits committed at or after this date (`--since`),
+    /// by committer date as in Git. As in Git, the walk also stops at a
+    /// commit older than this, so its parents are not shown even if their
+    /// dates are skewed.
     ///
     /// # Arguments
     ///
-    /// * `date` - A date string in YYYY-MM-DD format or a Unix timestamp.
+    /// * `date` - A date string in YYYY-MM-DD format (midnight UTC) or a
+    ///   Unix timestamp.
     pub fn since(mut self, date: &str) -> Self {
         self.since = Some(parse_date(date));
         self
     }
 
-    /// Only include commits before this date.
+    /// Only include commits committed at or before this date (`--until`),
+    /// by committer date as in Git.
     ///
     /// # Arguments
     ///
-    /// * `date` - A date string in YYYY-MM-DD format or a Unix timestamp.
+    /// * `date` - A date string in YYYY-MM-DD format (midnight UTC) or a
+    ///   Unix timestamp.
     pub fn until(mut self, date: &str) -> Self {
         self.until = Some(parse_date(date));
         self
@@ -281,34 +287,13 @@ fn parse_date(s: &str) -> i64 {
 
     // Try parsing YYYY-MM-DD format
     let parts: Vec<&str> = s.split('-').collect();
-    if parts.len() == 3 {
-        if let (Ok(year), Ok(month), Ok(day)) = (
-            parts[0].parse::<i64>(),
-            parts[1].parse::<i64>(),
-            parts[2].parse::<i64>(),
+    if let [year, month, day] = parts[..] {
+        if let (Ok(year), Ok(month @ 1..=12), Ok(day @ 1..=31)) = (
+            year.parse::<i64>(),
+            month.parse::<u32>(),
+            day.parse::<u32>(),
         ) {
-            // Simple calculation for days since epoch
-            // This is a rough approximation; for precise dates, use a proper date library
-            let days_since_epoch = (year - 1970) * 365
-                + (year - 1969) / 4  // leap years
-                + match month {
-                    1 => 0,
-                    2 => 31,
-                    3 => 59,
-                    4 => 90,
-                    5 => 120,
-                    6 => 151,
-                    7 => 181,
-                    8 => 212,
-                    9 => 243,
-                    10 => 273,
-                    11 => 304,
-                    12 => 334,
-                    _ => 0,
-                }
-                + day
-                - 1;
-            return days_since_epoch * 86400; // seconds per day
+            return crate::infra::time::days_from_civil(year, month, day) * 86400;
         }
     }
 
@@ -439,8 +424,19 @@ impl LogIterator {
             .queued
             .remove(&next.oid)
             .expect("queued commits are kept until walked");
-        for parent in self.walked_parents(&commit).to_vec() {
-            self.enqueue(parent)?;
+        // As in Git's default walk, the walk does not go past a commit
+        // older than `since`: its history is older still (dates
+        // permitting). The sorted orders walk everything and leave that
+        // history out afterwards.
+        let too_old = self.options.order == LogOrder::Default
+            && self
+                .options
+                .since
+                .is_some_and(|since| next.timestamp < since);
+        if !too_old {
+            for parent in self.walked_parents(&commit).to_vec() {
+                self.enqueue(parent)?;
+            }
         }
         Ok(Some(commit))
     }
@@ -535,6 +531,29 @@ impl LogIterator {
             while let Some(commit) = self.walk_next()? {
                 walked.push(commit);
             }
+            // As Git's limited walk does, a commit older than `since`
+            // makes its whole history uninteresting, even commits within
+            // the dates that are also reached another way.
+            let mut excluded: HashSet<Oid> = HashSet::new();
+            if let Some(since) = self.options.since {
+                let parents: HashMap<Oid, Vec<Oid>> = walked
+                    .iter()
+                    .map(|c| (*c.oid(), self.walked_parents(c).to_vec()))
+                    .collect();
+                let mut stack: Vec<Oid> = walked
+                    .iter()
+                    .filter(|c| c.committer().timestamp() < since)
+                    .map(|c| *c.oid())
+                    .collect();
+                while let Some(oid) = stack.pop() {
+                    if excluded.insert(oid) {
+                        stack.extend(parents.get(&oid).into_iter().flatten().copied());
+                    }
+                }
+            }
+            // Commits outside the dates are left out before sorting, not
+            // after, as in Git.
+            walked.retain(|c| !excluded.contains(c.oid()) && self.within_dates(c));
             self.sorted = Some(self.topological(walked));
         }
         Ok(self.sorted.as_mut().and_then(VecDeque::pop_front))
@@ -690,21 +709,18 @@ impl LogIterator {
         Ok(false)
     }
 
+    /// Whether a commit's committer date is within `since` and `until`,
+    /// the dates Git compares.
+    fn within_dates(&self, commit: &Commit) -> bool {
+        let timestamp = commit.committer().timestamp();
+        self.options.since.map_or(true, |since| timestamp >= since)
+            && self.options.until.map_or(true, |until| timestamp <= until)
+    }
+
     /// Checks if a commit passes all configured filters.
     fn passes_filters(&self, commit: &Commit) -> Result<bool> {
-        // Check date filters
-        let timestamp = commit.author().timestamp();
-
-        if let Some(since) = self.options.since {
-            if timestamp < since {
-                return Ok(false);
-            }
-        }
-
-        if let Some(until) = self.options.until {
-            if timestamp > until {
-                return Ok(false);
-            }
+        if !self.within_dates(commit) {
+            return Ok(false);
         }
 
         // Check author filter
@@ -1220,6 +1236,17 @@ mod tests {
         assert_eq!(commits[0].summary(), "Commit 5");
         assert_eq!(commits[1].summary(), "Commit 4");
         assert_eq!(commits[2].summary(), "Commit 3");
+    }
+
+    #[test]
+    fn test_parse_date_is_midnight_utc() {
+        assert_eq!(parse_date("1970-01-01"), 0);
+        // Before and after a leap day.
+        assert_eq!(parse_date("2024-02-28"), 1_709_078_400);
+        assert_eq!(parse_date("2024-03-01"), 1_709_251_200);
+        assert_eq!(parse_date("2023-03-01"), 1_677_628_800);
+        assert_eq!(parse_date("1234567890"), 1_234_567_890);
+        assert_eq!(parse_date("2024-13-01"), 0);
     }
 
     // LO-004: since filter

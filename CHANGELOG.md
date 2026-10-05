@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-06
+
+日常の操作をさらにそろえた: cherry-pick・revert、gc・repack・prune・pack-refs、clean、logの並び順（`--date-order`・`--topo-order`・`--reverse`）と`git log --graph`の列の割り当て。`zerogit-remote`は0.5.0として、zerogit 0.9に追従する。
+
+互換性に影響する変更（下記「Changed」）: `log()`の既定の並びと`LogOptions::since()`・`until()`の判定が、Gitと同じcommitterの日時になった。`Error`が`#[non_exhaustive]`になり、`match`には`_`の腕が必要になった。`delete_branch()`・`delete_tag()`は`packed-refs`にある参照も削除する。
+
 ### Added
 - cherry-pick・revert: `Repository::cherry_pick(&commits, &CherryPickOptions, ...)`・`Repository::revert(&commits, ...)`と、それぞれの`*_continue`・`*_skip`・`*_abort`。`git cherry-pick`・`git revert --no-edit`と同じく、コミットを指定順に（重複は1回だけ）3-way merge（リネームの追従を含む）で適用する。cherry-pickはauthor・メッセージを元のまま保ち、`CherryPickOptions::record_origin`で`(cherry picked from commit <oid>)`を追記する（`-x`。trailerの後には空行を入れない）。revertのメッセージはGitと同じ`Revert "<subject>"`（revertのrevertは`Reapply "..."`）と`This reverts commit <oid>.`。結果は`PickOutcome`（`Completed`・`Conflicts`・`Empty`）で、コンフリクトと、変更が空になるコミット（すでに入っている変更）はGitと同じく止まる。状態は`CHERRY_PICK_HEAD`・`REVERT_HEAD`・`MERGE_MSG`と、複数コミットでは`.git/sequencer/`（`todo`・`head`・`abort-safety`・`opts`）にGitの形式で書き、zerogitとGitのどちらからでも続行・スキップ・中止できる。中止はGitと同じく`reset --merge`で戻し、無関係なローカルの変更は残す。マージコミット（`-m <parent>`）は`Error::UnsupportedCherryPick`で対象外 (#62)
 - `Error::CherryPickInProgress`・`Error::NoCherryPickInProgress`・`Error::RevertInProgress`・`Error::NoRevertInProgress`・`Error::UnsupportedCherryPick` (#62)

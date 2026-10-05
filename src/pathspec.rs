@@ -47,6 +47,31 @@ impl Pathspec {
         matches_one(pattern.as_bytes(), path)
     }
 
+    /// Whether there are no pathspecs (everything matches).
+    pub(crate) fn is_empty(&self) -> bool {
+        self.patterns.is_empty()
+    }
+
+    /// Whether a pathspec may match something inside `dir` without
+    /// matching `dir` itself, so a walk must enter it: `dir` leads to a
+    /// literal pathspec (`dir/sub/file`), or to the part of a glob before
+    /// its first wildcard (`*.txt`, `dir/*`, but not `other*`).
+    pub(crate) fn reaches_into(&self, dir: &[u8]) -> bool {
+        let mut dir = dir.to_vec();
+        dir.push(b'/');
+        self.patterns.iter().any(|p| {
+            let literal = match p.iter().position(|b| matches!(b, b'*' | b'?' | b'[')) {
+                Some(wildcard) => &p[..wildcard],
+                None => &p[..],
+            };
+            if has_glob(p) {
+                dir.starts_with(literal) || literal.starts_with(&dir)
+            } else {
+                literal.len() > dir.len() && literal.starts_with(&dir)
+            }
+        })
+    }
+
     /// Whether `pattern` names `path` only as a directory (not as the
     /// path itself or through a glob), which `git rm` refuses without
     /// `-r`.
@@ -148,5 +173,18 @@ mod tests {
         assert!(Pathspec::matches_as_directory("src", b"src/lib.rs"));
         assert!(!Pathspec::matches_as_directory("src/lib.rs", b"src/lib.rs"));
         assert!(!Pathspec::matches_as_directory("src/*", b"src/lib.rs"));
+    }
+
+    #[test]
+    fn walks_reach_into_directories_pathspecs_lead_to() {
+        assert!(spec(&["dir/sub/file"]).reaches_into(b"dir"));
+        assert!(spec(&["dir/sub/file"]).reaches_into(b"dir/sub"));
+        assert!(!spec(&["dir/sub/file"]).reaches_into(b"dir/sub/file"));
+        assert!(!spec(&["dir"]).reaches_into(b"dir"));
+        assert!(!spec(&["dirt/a"]).reaches_into(b"dir"));
+        assert!(spec(&["*.txt"]).reaches_into(b"any/dir"));
+        assert!(spec(&["src/*"]).reaches_into(b"src/target"));
+        assert!(spec(&["src/t*"]).reaches_into(b"src"));
+        assert!(!spec(&["b*"]).reaches_into(b"src/target"));
     }
 }

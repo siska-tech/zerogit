@@ -262,3 +262,59 @@ fn graph_rows_describe_the_lines() {
         }
     }
 }
+
+#[test]
+fn since_and_until_use_committer_dates_like_git() {
+    let temp = branchy();
+    let dir = temp.path();
+    for (since, until) in [
+        (Some(1290), None),
+        (None, Some(1500)),
+        (Some(1100), Some(1650)),
+    ] {
+        let mut args: Vec<String> = Vec::new();
+        let mut options = LogOptions::new();
+        if let Some(since) = since {
+            args.push(format!("--since={}", iso(since)));
+            options = options.since_timestamp(since);
+        }
+        if let Some(until) = until {
+            args.push(format!("--until={}", iso(until)));
+            options = options.until_timestamp(until);
+        }
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        assert_eq!(
+            our_log(dir, options.clone()),
+            git_log(dir, &args),
+            "{:?}",
+            args
+        );
+        let mut topo = args.clone();
+        topo.push("--topo-order");
+        assert_eq!(
+            our_log(dir, options.clone().order(LogOrder::Topo)),
+            git_log(dir, &topo),
+            "{:?}",
+            topo
+        );
+        let mut date = args.clone();
+        date.push("--date-order");
+        assert_eq!(
+            our_log(dir, options.order(LogOrder::Date)),
+            git_log(dir, &date),
+            "{:?}",
+            date
+        );
+    }
+}
+
+/// A time of the fixture (seconds into 1970) as an ISO date Git reads
+/// unambiguously.
+fn iso(seconds: i64) -> String {
+    format!(
+        "1970-01-01 {:02}:{:02}:{:02} +0000",
+        seconds / 3600,
+        seconds / 60 % 60,
+        seconds % 60
+    )
+}

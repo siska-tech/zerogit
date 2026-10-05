@@ -684,7 +684,8 @@ impl Repository {
 
     /// Returns an iterator over the commit history starting from HEAD.
     ///
-    /// Commits are returned in reverse chronological order (newest first).
+    /// Commits are returned as `git log` returns them: newest committer
+    /// date first, as the history is walked.
     ///
     /// # Returns
     ///
@@ -715,7 +716,8 @@ impl Repository {
 
     /// Returns an iterator over the commit history starting from a specific commit.
     ///
-    /// Commits are returned in reverse chronological order (newest first).
+    /// Commits are returned as `git log` returns them: newest committer
+    /// date first, as the history is walked.
     ///
     /// # Arguments
     ///

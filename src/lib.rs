@@ -103,7 +103,7 @@ pub use status::{
 pub use index::{Index, IndexEntry};
 
 // Re-export log types
-pub use log::LogOptions;
+pub use log::{Graph, GraphRow, LogOptions, LogOrder};
 
 // Re-export merge types
 pub use merge::{FastForward, MergeOptions, MergeOutcome};

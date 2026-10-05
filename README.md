@@ -199,7 +199,7 @@ repo.head()?;                 // HEAD取得
 repo.branches()?;             // ローカルブランチ一覧
 repo.remote_branches()?;      // リモートブランチ一覧
 repo.tags()?;                 // タグ一覧
-repo.log()?;                  // コミット履歴（Iterator）
+repo.log()?;                  // コミット履歴（Iterator。並び順は LogOptions::order、グラフは Graph）
 repo.reflog("HEAD")?;         // reflog（新しい順）
 repo.log_with_options(opts)?; // フィルタリング付きログ
 repo.status()?;               // ワーキングツリー状態（パスごとに1つの状態）
@@ -358,6 +358,37 @@ fn main() -> Result<()> {
     Ok(())
 }
 ```
+
+### 並び順とグラフ
+
+既定の並びは`git log`と同じく、履歴をたどる順でcommitterの日時が新しいものから返します（先頭から順に読むので、全体を読み込まずに返せます）。`LogOrder::Date`（`--date-order`）と`LogOrder::Topo`（`--topo-order`）は親が子より先に出ない順で、履歴全体を読んでから返します。`reverse(true)`で古い順になります。`Graph`は、与えた順のコミットに`git log --graph`と同じ列を割り当てます（文字の描画は利用側で行います）。
+
+```rust
+use zerogit::log::{Graph, LogOptions, LogOrder};
+use zerogit::{Repository, Result};
+
+fn main() -> Result<()> {
+    let repo = Repository::discover(".")?;
+    let mut graph = Graph::new();
+    for commit in repo.log_with_options(LogOptions::new().order(LogOrder::Topo))? {
+        let commit = commit?;
+        let row = graph.push(*commit.oid(), commit.parents());
+        // row.column(): コミットの列、row.columns_before()/columns_after(): 前後の線、
+        // row.parent_columns(): 各親へ続く列
+        println!("{:width$}* {}", "", commit.summary(), width = row.column() * 2);
+    }
+    Ok(())
+}
+```
+
+50,000コミット（50コミットごとに10コミットのブランチをマージ）の履歴での計測（Windows 11、release build、`cargo run --release --example measure_log`。commit-graphはどちらも使わない。Gitの時間はプロセスの起動を含む）:
+
+| | 先頭10件 | 全件 |
+|---|---|---|
+| zerogit 既定の順 | 0.2 ms | 666 ms |
+| `git log` | 23 ms | 371 ms |
+| zerogit `LogOrder::Topo` | 690 ms | 700 ms |
+| `git log --topo-order` | 202 ms | 293 ms |
 
 ### ワーキングツリーの差分
 
@@ -585,12 +616,12 @@ Gitと並行して日常的に使えるように、並行性・性能・基本�
 - [x] 対話的rebase（pick・reword・edit・squash・fixup・drop、#34）
 - [x] SSHトランスポートの実サーバーでの結合テスト（#36）
 
-### 日常の操作をさらにそろえる（v0.10）
+### 日常の操作をさらにそろえる（v0.10）✅
 
 - [x] cherry-pick・revert（`cherry_pick()`・`revert()`、#62）
 - [x] gc・repack・prune（`gc()`・`gc_auto()`・`repack()`・`prune()`・`pack_refs()`、#63。新しいdeltaの計算とreflogの期限切れは対象外）
 - [x] clean（`clean()`、#64。`-x`・`-X`・`-d`・pathspec・`-n`。ネストしたリポジトリは消さない）
-- [ ] logのトポロジカル順・グラフ（#65）
+- [x] logの並び順・グラフ（`LogOrder`・`reverse()`・`Graph`、#65）
 
 ### 将来の検討事項
 

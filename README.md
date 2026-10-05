@@ -232,6 +232,7 @@ repo.reset_paths("HEAD~2", &["src"])?;     // git reset <rev> -- <paths>
 repo.restore(&["src"], &RestoreOptions::new())?;   // git restore（--source・--staged も）
 repo.remove(&["old.txt"], &RemoveOptions::new())?; // git rm（--cached・-f・-r も）
 repo.move_path("a.rs", "src/a.rs")?;      // git mv
+repo.clean(&CleanOptions::new().directories(true))?; // git clean -f -d（-x・-X・pathspec・-n も）
 repo.create_commit(msg, author, email)?;  // コミット作成
 repo.create_commit_with(msg, &CommitOptions::new())?; // 作者・コミッター・日時を指定（既定はGitと同じ解決）
 repo.amend_commit(None, &CommitOptions::new())?;     // git commit --amend --no-edit
@@ -588,7 +589,7 @@ Gitと並行して日常的に使えるように、並行性・性能・基本�
 
 - [x] cherry-pick・revert（`cherry_pick()`・`revert()`、#62）
 - [x] gc・repack・prune（`gc()`・`gc_auto()`・`repack()`・`prune()`・`pack_refs()`、#63。新しいdeltaの計算とreflogの期限切れは対象外）
-- [ ] clean（#64）
+- [x] clean（`clean()`、#64。`-x`・`-X`・`-d`・pathspec・`-n`。ネストしたリポジトリは消さない）
 - [ ] logのトポロジカル順・グラフ（#65）
 
 ### 将来の検討事項

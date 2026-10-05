@@ -50,15 +50,19 @@ fn messy() -> tempfile::TempDir {
     temp
 }
 
-/// The paths `git clean -n` would remove, without trailing slashes.
+/// The paths `git clean -n` would remove, without trailing slashes,
+/// sorted: Git lists what it removes inside a directory it cannot remove
+/// whole in the order the file system returns it (not sorted on macOS).
 fn git_would_remove(dir: &Path, args: &[&str]) -> Vec<String> {
     let mut all = vec!["clean", "-n"];
     all.extend_from_slice(args);
-    git(dir, &all)
+    let mut paths: Vec<String> = git(dir, &all)
         .lines()
         .filter_map(|line| line.strip_prefix("Would remove "))
         .map(|path| path.trim_end_matches('/').to_owned())
-        .collect()
+        .collect();
+    paths.sort();
+    paths
 }
 
 fn options(args: &[&str]) -> CleanOptions {

@@ -320,7 +320,7 @@ fn remove_tree(path: &Path) -> Result<()> {
 impl Repository {
     /// Removes untracked files from the work tree, like `git clean -f`, and
     /// returns what was removed (or, with [`CleanOptions::dry_run`], what
-    /// would be), sorted, as `git clean -n` lists it.
+    /// would be), sorted by path: the paths `git clean -n` lists.
     ///
     /// By default only untracked files that are not ignored go, and
     /// untracked directories are left alone. [`CleanOptions::directories`]

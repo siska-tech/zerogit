@@ -9,3 +9,4 @@ pub(crate) mod test_support;
 
 pub use index::{PackIndex, PackIndexEntry};
 pub use reader::{BaseResolver, PackFile, PackLimits};
+pub(crate) use reader::{EntryKind, RawEntry};

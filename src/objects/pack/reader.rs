@@ -86,10 +86,21 @@ impl DeltaCache {
 /// spanning packs stay bounded. `Ok(None)` means the base does not exist.
 pub type BaseResolver<'a> = dyn FnMut(&Oid, usize) -> Result<Option<RawObject>> + 'a;
 
-enum EntryKind {
+/// What a pack entry holds: a whole object, or a delta against a base at
+/// an earlier offset of the same pack or named by its ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntryKind {
     Base(ObjectType),
     OfsDelta(u64),
     RefDelta(Oid),
+}
+
+/// A pack entry as stored: its kind, inflated size and compressed data.
+#[derive(Debug, Clone)]
+pub(crate) struct RawEntry {
+    pub(crate) kind: EntryKind,
+    pub(crate) size: u64,
+    pub(crate) compressed: Vec<u8>,
 }
 
 /// A SHA-1 pack file (version 2 or 3) opened together with its index.
@@ -353,6 +364,34 @@ impl PackFile {
 
     /// Reads, CRC-checks and inflates the entry starting at `offset`.
     fn read_entry(&self, offset: u64) -> Result<(EntryKind, Vec<u8>)> {
+        let raw = self.raw_entry_at(offset)?;
+        let corrupt = |what: &str| invalid(format!("{} at offset {}", what, offset));
+        let size = usize::try_from(raw.size).map_err(|_| corrupt("entry size overflow"))?;
+        let data =
+            decompress_exact(&raw.compressed, size).map_err(|_| corrupt("corrupt zlib data"))?;
+        if let EntryKind::OfsDelta(_) | EntryKind::RefDelta(_) = raw.kind {
+            let result = delta::result_size(&data)?;
+            if result > self.limits.max_object_size {
+                return Err(limit(format!(
+                    "delta at offset {} produces {} bytes, limit is {}",
+                    offset, result, self.limits.max_object_size
+                )));
+            }
+        }
+        Ok((raw.kind, data))
+    }
+
+    /// The entry of `oid` as stored, CRC-checked but not inflated, so it
+    /// can be copied into another pack; `None` if the pack lacks `oid`.
+    pub(crate) fn raw_entry(&self, oid: &Oid) -> Result<Option<RawEntry>> {
+        match self.index.get(oid) {
+            Some(entry) => self.raw_entry_at(entry.offset).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Reads and CRC-checks the entry starting at `offset`.
+    fn raw_entry_at(&self, offset: u64) -> Result<RawEntry> {
         let position = self
             .entries_by_offset
             .binary_search_by_key(&offset, |e| e.0)
@@ -434,19 +473,12 @@ impl PackFile {
         if crc32(&raw) != crc {
             return Err(corrupt("CRC32 mismatch"));
         }
-        let size = usize::try_from(size).map_err(|_| corrupt("entry size overflow"))?;
-        let data =
-            decompress_exact(&raw[header_len..], size).map_err(|_| corrupt("corrupt zlib data"))?;
-        if let EntryKind::OfsDelta(_) | EntryKind::RefDelta(_) = kind {
-            let result = delta::result_size(&data)?;
-            if result > self.limits.max_object_size {
-                return Err(limit(format!(
-                    "delta at offset {} produces {} bytes, limit is {}",
-                    offset, result, self.limits.max_object_size
-                )));
-            }
-        }
-        Ok((kind, data))
+        raw.drain(..header_len);
+        Ok(RawEntry {
+            kind,
+            size,
+            compressed: raw,
+        })
     }
 
     fn read_range(&self, offset: u64, len: u64) -> Result<Vec<u8>> {

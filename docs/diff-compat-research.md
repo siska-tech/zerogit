@@ -161,3 +161,29 @@ summed indentation)` plus the difference of their summed penalties:
 These weights are one point of the region that fits all observations
 (fitted with a perceptron, then a local search over integer weights);
 other points fit as well, so the compatibility tests are the final check.
+
+## 4. Large rewrites: Git stops looking for a minimal diff (not reproduced)
+
+### Results
+
+`src/diff/cutoff_research.rs` diffs random pairs of 50 to 3,200 lines with
+growing edit density, with `--minimal` and with the default. Up to about
+500 changed lines, every default diff is minimal; beyond that, some are
+not, more often in longer files (in 3,200-line files, 2 to 5 of 15 pairs
+per alphabet; the smallest non-minimal one had 534 changed lines in its
+minimal diff).
+
+### Status
+
+The total size of the diff shows that Git's default diff gives up on a
+minimal diff once the search gets costly, but not where it then cuts the
+inputs, and that choice decides the hunks. zerogit's Myers diff always
+finds a minimal diff (after setting aside lines as in finding 2), so on
+such inputs its hunks, and the blame of lines across such a commit, can
+differ from Git's. This is a known difference: the tests that show it
+are kept, marked `#[ignore]` with this reason (`large_rewrites_match_git_myers`,
+`large_histogram_diffs_match_git` for issue #37, and the
+`known_differences_still_differ` tests). On this repository's own
+history, blame differs from `git blame` only on `src/repository.rs`,
+whose history has a commit rewriting 3,785 lines into 1,024 (276 of its
+1,024 lines are blamed differently); all 240 other files match.

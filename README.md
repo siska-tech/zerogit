@@ -203,6 +203,7 @@ repo.log()?;                  // コミット履歴（Iterator。並び順は Lo
 repo.reflog("HEAD")?;         // reflog（新しい順）
 repo.describe(&DescribeOptions::new())?; // 最も近いタグからの名前（git describe。v1.0-3-gabc1234）
 repo.mailmap()?.resolve(name, email); // .mailmapによる正規の名前・メールアドレス（git check-mailmap）
+repo.blame("src/lib.rs", &BlameOptions::new())?; // 各行を最後に変えたコミット（git blame。リネームを追う）
 repo.log_with_options(opts)?; // フィルタリング付きログ
 repo.status()?;               // ワーキングツリー状態（パスごとに1つの状態）
 repo.detailed_status()?;      // index側・作業ツリー側を別々に（porcelain v2相当）
@@ -475,6 +476,33 @@ fn main() -> Result<()> {
 }
 ```
 
+### 各行の由来（blame）
+
+```rust
+use zerogit::{BlameOptions, Repository, Result};
+
+fn main() -> Result<()> {
+    let repo = Repository::discover(".")?;
+    // 10〜20行目を、mainの2つ前の版について
+    let options = BlameOptions::new().revision("main~2").lines(10, 20);
+    for line in repo.blame("src/lib.rs", &options)?.lines() {
+        println!("{} {}:{}", line.commit().short(), line.path().display(), line.original_line());
+    }
+    Ok(())
+}
+```
+
+各行を、親に同じ行がある限り過去へ渡していき、どの親にもない行をそのコミットのものとします。マージは親を順に試し、親にないファイルはリネーム元（同じ内容、または50%以上似ているファイル）を探します（`git blame`の既定と同じ）。行の比較には`git blame`と同じ結果になる行diffを使います。その規則（長い共通の末尾の扱い、よく現れる行の扱い、移動できる変更のまとまりの置き場所）は、Gitのコードではなく出力だけから実験で求めました（[docs/diff-compat-research.md](docs/diff-compat-research.md)）。
+
+計測（Windows 11、release build、`cargo run --release --example measure_blame -- <リポジトリ> [<パス>...]`）:
+
+| 対象 | Gitとの一致 | zerogit | `git blame` |
+|---|---|---|---|
+| このリポジトリの全241ファイル（77,377行） | 240ファイルが全行一致 | 2.8秒 | 19.4秒（ファイルごとのプロセス起動を含む） |
+| 2,000行のファイルを500コミットで変更（1,840行） | 全行一致 | 0.48秒 | 0.37〜0.45秒 |
+
+一致しなかった1ファイル（`src/repository.rs`）は、3,785行を1,024行に書き換えたコミットを履歴に含みます。Gitの既定のdiffは、変更が数百行を超えると最小のdiffを探すのをやめますが、zerogitはその方法を再現しておらず、常に最小のdiffを使うため、このようなコミットをまたぐ行の帰属が異なることがあります。
+
 ### オブジェクトの整理（gc）
 
 zerogitはオブジェクトをlooseとして1つずつ書きます。Gitを併用しない場合は、ときどき`gc()`を呼ぶか、書き込みの後に`gc_auto()`（`git gc --auto`と同じ条件のときだけ実行）を呼ぶと、looseオブジェクトが溜まりません。
@@ -631,7 +659,7 @@ Gitと並行して日常的に使えるように、並行性・性能・基本�
 
 - [x] describe（`describe()`・`describe_revision()`・`DescribeOptions`、#77。`--tags`・`--all`・`--long`・`--abbrev`・`--always`・`--first-parent`・`--candidates`・`--match`・`--exclude`・`--dirty`）
 - [x] mailmap（`mailmap()`・`Mailmap`、#77。`.mailmap`・`mailmap.blob`・`mailmap.file`。`log()`はコミットをそのまま返すので、表示の際に`Mailmap::resolve_signature()`で適用する）
-- [ ] blame（#77）
+- [x] blame（`blame()`・`BlameOptions`・`DiffAlgorithm`、#77。ファイル全体のリネームを追う。`--first-parent`・`-L`・`--diff-algorithm`（myers・minimal・histogram）。`-M`・`-C`（行の移動・コピーの検出）は対象外。大きな書き換えを含む履歴ではGitと異なる行がありうる。行diffをGitとそろえる規則は、Gitの出力だけから実験で求め、`docs/diff-compat-research.md`に記録した）
 
 ### 将来の検討事項
 

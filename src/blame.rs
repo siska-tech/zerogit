@@ -2,11 +2,12 @@
 //!
 //! [`Repository::blame`] starts from the file at a commit and hands each
 //! line back through history: a line that a parent has unchanged (by the
-//! diff Git uses for blame: Myers with the indent heuristic) becomes that
-//! parent's, and a line no parent has is blamed on the commit. Commits are
-//! visited newest first, parents in order; a parent with the identical file
-//! takes every line, and a file missing from a parent is followed through a
-//! whole-file rename, as `git blame` does by default.
+//! line diff chosen with [`BlameOptions::diff_algorithm`], Git's Myers diff
+//! by default) becomes that parent's, and a line no parent has is blamed on
+//! the commit. Commits are visited newest first, parents in order; a
+//! parent with the identical file takes every line, and a file missing
+//! from a parent is followed through a whole-file rename, as `git blame`
+//! does by default.
 
 use std::collections::{BinaryHeap, HashMap};
 use std::path::{Path, PathBuf};
@@ -551,9 +552,13 @@ impl Repository {
     ///
     /// The file is taken as of HEAD, or [`BlameOptions::revision`]. Each
     /// line is handed back through history while a parent has it
-    /// unchanged, compared with the diff `git blame` uses (Myers with the
-    /// indent heuristic); it is blamed on the first commit, going back,
-    /// whose parents do not have it. Merges try their parents in order. A
+    /// unchanged, compared with the line diff `git blame` uses
+    /// ([`DiffAlgorithm::Myers`] by default); it is blamed on the first
+    /// commit, going back, whose parents do not have it. The results match
+    /// `git blame`, except across a commit that rewrites a large part of
+    /// the file (several hundred changed lines in one place), where Git's
+    /// diff is not minimal and zerogit's is. Merges try their parents in
+    /// order. A
     /// file missing from a parent is looked for there under the name it
     /// was renamed from: an identical file the commit removed, or the most
     /// similar one (at least 50% alike by zerogit's measure, which can pick

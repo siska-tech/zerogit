@@ -1,4 +1,5 @@
-//! Histogram line diff with Git's hunk placement, used for merges.
+//! Line diffs with Git's hunk placement: the histogram diff merges use, and
+//! the Myers diff `git diff` and `git blame` use by default.
 //!
 //! `git merge` diffs contents with the histogram algorithm. This module
 //! implements that algorithm as published with JGit's `HistogramDiff`: in a
@@ -7,15 +8,25 @@
 //! after it are diffed the same way. A region whose common lines all occur
 //! more than [`MAX_CHAIN`] times falls back to the Myers diff.
 //!
+//! The Myers diff ("An O(ND) Difference Algorithm and Its Variations")
+//! first sets aside lines found only on one side, and lines repeated often
+//! that sit among those (as Git does; `docs/diff-compat-research.md`,
+//! finding 2). Without context lines, as for blame, a long common tail is
+//! left out first (finding 1).
+//!
 //! Change groups are then slid the way Git places them: as far down as the
 //! repeated lines allow, unless they can line up with a change on the other
-//! side, in which case they are placed there. As in Git 2.54 and later, a
-//! group that moved or joined others is diffed again when the other side
-//! has changes in the same place.
+//! side, in which case they are placed there. For `git diff` and blame (not
+//! merges), a group that could sit in several places goes where its
+//! boundaries best follow the indentation and blank lines (finding 3). As
+//! in Git 2.54 and later, in the histogram diff a group that moved or
+//! joined others is diffed again when the other side has changes in the
+//! same place.
 //!
-//! The result matches `git diff --histogram`, except where a region falls
-//! back to the Myers diff and needs hundreds of edits: Git then cuts its
-//! search short with heuristics this crate does not use.
+//! These rules were found from Git's output alone (see the research notes
+//! and `compat_tests`). The results match Git's, except on large rewrites:
+//! where the edit cost reaches several hundred lines, Git's diffs stop
+//! being minimal in a way this module does not reproduce (finding 4).
 
 use std::collections::HashMap;
 

@@ -145,6 +145,12 @@ fn myers_region(
 /// diagonal down. Git cuts the search short with heuristics once a region
 /// costs hundreds of edits; this function always finds a minimal path.
 fn classic_diff(a: &[u32], b: &[u32]) -> (Vec<bool>, Vec<bool>) {
+    classic_diff_with(a, b, false)
+}
+
+/// [`classic_diff`]; with `minimal` (`--minimal`), frequent lines are never
+/// set aside.
+fn classic_diff_with(a: &[u32], b: &[u32], minimal: bool) -> (Vec<bool>, Vec<bool>) {
     let mut a_changed = vec![false; a.len()];
     let mut b_changed = vec![false; b.len()];
 
@@ -171,12 +177,14 @@ fn classic_diff(a: &[u32], b: &[u32]) -> (Vec<bool>, Vec<bool>) {
         &b_counts,
         a.len(),
         &mut a_changed[prefix..a.len() - suffix],
+        minimal,
     );
     let b_kept = kept_lines(
         &b[prefix..b.len() - suffix],
         &a_counts,
         b.len(),
         &mut b_changed[prefix..b.len() - suffix],
+        minimal,
     );
 
     let ka: Vec<u32> = a_kept.iter().map(|&i| a[prefix + i]).collect();
@@ -210,6 +218,7 @@ fn kept_lines(
     other_counts: &HashMap<u32, usize>,
     total: usize,
     changed: &mut [bool],
+    minimal: bool,
 ) -> Vec<usize> {
     #[derive(Clone, Copy, PartialEq)]
     enum Class {
@@ -228,7 +237,7 @@ fn kept_lines(
         .iter()
         .map(|line| match other_counts.get(line).copied().unwrap_or(0) {
             0 => Class::Missing,
-            n if n < frequent_limit => Class::Kept,
+            n if minimal || n < frequent_limit => Class::Kept,
             _ => Class::Frequent,
         })
         .collect();
@@ -238,7 +247,9 @@ fn kept_lines(
     const WINDOW: usize = 100;
     let among_missing = |i: usize| {
         let mut missing_before = 0;
-        let mut frequent = 1;
+        // The line and its own run count as two (docs/diff-compat-research.md,
+        // finding 2).
+        let mut frequent = 2;
         for &c in class[i.saturating_sub(WINDOW)..i].iter().rev() {
             match c {
                 Class::Missing => missing_before += 1,
@@ -660,9 +671,34 @@ pub(crate) enum Algorithm {
     Histogram,
 }
 
+/// How many bytes at the end of both inputs Git's zero-context Myers diffs
+/// leave out, as observed (`docs/diff-compat-research.md`, finding 1): the
+/// whole kibibytes of their common suffix, except the part of those up to
+/// and including their first newline, so that the cut falls between lines.
+fn ignored_tail_len(old: &[u8], new: &[u8]) -> usize {
+    let common = old
+        .iter()
+        .rev()
+        .zip(new.iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let whole = common / 1024 * 1024;
+    match old[old.len() - whole..].iter().position(|&b| b == b'\n') {
+        Some(newline) => whole - (newline + 1),
+        None => 0,
+    }
+}
+
 /// The changed regions between two contents, line by line, without context
 /// lines (as `git diff -U0` and `git blame` compute them).
 pub(crate) fn diff_bytes<'a>(old: &'a [u8], new: &'a [u8], algorithm: Algorithm) -> Vec<Hunk> {
+    let (old, new) = match algorithm {
+        Algorithm::Myers | Algorithm::Minimal => {
+            let dropped = ignored_tail_len(old, new);
+            (&old[..old.len() - dropped], &new[..new.len() - dropped])
+        }
+        Algorithm::Histogram => (old, new),
+    };
     let (old_lines, new_lines) = (split_lines(old), split_lines(new));
     match algorithm {
         Algorithm::Histogram => diff_lines(&old_lines, &new_lines),
@@ -674,7 +710,8 @@ pub(crate) fn diff_bytes<'a>(old: &'a [u8], new: &'a [u8], algorithm: Algorithm)
             };
             let a: Vec<u32> = old_lines.iter().map(|l| intern(l)).collect();
             let b: Vec<u32> = new_lines.iter().map(|l| intern(l)).collect();
-            let (mut a_changed, mut b_changed) = classic_diff(&a, &b);
+            let minimal = algorithm == Algorithm::Minimal;
+            let (mut a_changed, mut b_changed) = classic_diff_with(&a, &b, minimal);
             compact(&a, &mut a_changed, &b, &mut b_changed, false);
             compact(&b, &mut b_changed, &a, &mut a_changed, false);
             hunks(&a_changed, &b_changed)

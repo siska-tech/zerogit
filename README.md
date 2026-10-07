@@ -202,6 +202,7 @@ repo.tags()?;                 // タグ一覧
 repo.log()?;                  // コミット履歴（Iterator。並び順は LogOptions::order、グラフは Graph）
 repo.reflog("HEAD")?;         // reflog（新しい順）
 repo.describe(&DescribeOptions::new())?; // 最も近いタグからの名前（git describe。v1.0-3-gabc1234）
+repo.mailmap()?.resolve(name, email); // .mailmapによる正規の名前・メールアドレス（git check-mailmap）
 repo.log_with_options(opts)?; // フィルタリング付きログ
 repo.status()?;               // ワーキングツリー状態（パスごとに1つの状態）
 repo.detailed_status()?;      // index側・作業ツリー側を別々に（porcelain v2相当）
@@ -629,7 +630,7 @@ Gitと並行して日常的に使えるように、並行性・性能・基本�
 ### 履歴の調査（v0.11）
 
 - [x] describe（`describe()`・`describe_revision()`・`DescribeOptions`、#77。`--tags`・`--all`・`--long`・`--abbrev`・`--always`・`--first-parent`・`--candidates`・`--match`・`--exclude`・`--dirty`）
-- [ ] mailmap（#77）
+- [x] mailmap（`mailmap()`・`Mailmap`、#77。`.mailmap`・`mailmap.blob`・`mailmap.file`。`log()`はコミットをそのまま返すので、表示の際に`Mailmap::resolve_signature()`で適用する）
 - [ ] blame（#77）
 
 ### 将来の検討事項

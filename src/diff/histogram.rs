@@ -648,6 +648,40 @@ fn hunks(a_changed: &[bool], b_changed: &[bool]) -> Vec<Hunk> {
     result
 }
 
+/// The line diffs zerogit computes, named after the `git diff` options
+/// they correspond to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Algorithm {
+    /// The default (`--diff-algorithm=myers`), used by `git blame`.
+    Myers,
+    /// `--minimal`.
+    Minimal,
+    /// `--histogram`, used by merges.
+    Histogram,
+}
+
+/// The changed regions between two contents, line by line, without context
+/// lines (as `git diff -U0` and `git blame` compute them).
+pub(crate) fn diff_bytes<'a>(old: &'a [u8], new: &'a [u8], algorithm: Algorithm) -> Vec<Hunk> {
+    let (old_lines, new_lines) = (split_lines(old), split_lines(new));
+    match algorithm {
+        Algorithm::Histogram => diff_lines(&old_lines, &new_lines),
+        Algorithm::Myers | Algorithm::Minimal => {
+            let mut ids: HashMap<&'a [u8], u32> = HashMap::new();
+            let mut intern = |line: &'a [u8]| -> u32 {
+                let next = ids.len() as u32;
+                *ids.entry(line).or_insert(next)
+            };
+            let a: Vec<u32> = old_lines.iter().map(|l| intern(l)).collect();
+            let b: Vec<u32> = new_lines.iter().map(|l| intern(l)).collect();
+            let (mut a_changed, mut b_changed) = classic_diff(&a, &b);
+            compact(&a, &mut a_changed, &b, &mut b_changed, false);
+            compact(&b, &mut b_changed, &a, &mut a_changed, false);
+            hunks(&a_changed, &b_changed)
+        }
+    }
+}
+
 /// Splits content into lines, each keeping its `\n`.
 pub(crate) fn split_lines(content: &[u8]) -> Vec<&[u8]> {
     let mut lines = Vec::new();

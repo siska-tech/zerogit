@@ -1,0 +1,31 @@
+    }
+
+    #[test]
+        // Without collecting, ignored directories are not entered.
+        assert!(files_of(&temp, None, false).ignored.is_empty());
+    }
+
+    #[test]
+    fn test_scan_keeps_tracked_ignored_files() {
+        let temp = setup(&["target/tracked.txt", "target/other.txt", "app.log"]);
+        fs::write(temp.path().join(".gitignore"), "*.log\ntarget/\n").unwrap();
+        let index = tracked(&["target/tracked.txt", "app.log"]);
+        let scan = files_of(&temp, Some(&index), false);
+        assert_eq!(
+            names(&scan.files),
+            [".gitignore", "app.log", "target/tracked.txt"]
+        );
+    }
+
+    #[test]
+    fn test_negation_cannot_reinclude_inside_excluded_directory() {
+        let temp = setup(&["build/keep.txt", "logs/a.log", "logs/keep.log"]);
+        fs::write(
+            temp.path().join(".gitignore"),
+            "build/\n!build/keep.txt\nlogs/*\n!logs/keep.log\n",
+        )
+        .unwrap();
+        let scan = files_of(&temp, None, false);
+        assert_eq!(names(&scan.files), [".gitignore", "logs/keep.log"]);
+    }
+}

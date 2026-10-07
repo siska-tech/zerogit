@@ -13,6 +13,8 @@ use crate::infra::read_file;
 use crate::objects::{Blob, Commit, FileMode, Oid, Tree};
 
 pub mod blob;
+#[cfg(test)]
+mod compat_tests;
 pub(crate) mod histogram;
 pub mod rename;
 

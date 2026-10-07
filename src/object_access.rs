@@ -1,7 +1,7 @@
 //! Reading objects by ID: commits, trees, blobs and objects of any type.
 
 use crate::error::{Error, Result};
-use crate::objects::{Blob, Commit, Object, ObjectType, Oid, Tree};
+use crate::objects::{Blob, Commit, Object, ObjectReader, ObjectType, Oid, Tree};
 use crate::repository::Repository;
 
 impl Repository {
@@ -156,6 +156,56 @@ impl Repository {
         }
 
         Blob::parse(raw)
+    }
+
+    /// Opens a blob for reading as a stream, for files too large to hold in
+    /// memory.
+    ///
+    /// `revision` is resolved as for [`Repository::blob`] (`HEAD:big.bin`
+    /// names the file in HEAD). A loose blob, or one stored whole in a pack
+    /// (as Git stores files larger than `core.bigFileThreshold`), is
+    /// inflated as it is read, using a small, fixed amount of memory and
+    /// no size limit; one stored as a delta is rebuilt in memory, within
+    /// [`PackLimits`](crate::objects::pack::PackLimits). The content is
+    /// checked against the object ID when the end is reached.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Repository::blob`]; reading fails with an
+    /// [`std::io::ErrorKind::InvalidData`] error if the content turns out
+    /// not to match the object ID.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// let mut reader = repo.blob_reader("HEAD:video.mp4").unwrap();
+    /// let mut file = std::fs::File::create("video.mp4").unwrap();
+    /// std::io::copy(&mut reader, &mut file).unwrap();
+    /// ```
+    pub fn blob_reader(&self, revision: &str) -> Result<ObjectReader> {
+        let reader = self.object_reader(revision)?;
+        if reader.object_type() != ObjectType::Blob {
+            return Err(Error::TypeMismatch {
+                expected: "blob",
+                actual: reader.object_type().as_str(),
+            });
+        }
+        Ok(reader)
+    }
+
+    /// Opens an object of any type for reading as a stream (see
+    /// [`Repository::blob_reader`]).
+    ///
+    /// # Errors
+    ///
+    /// - `Error::ObjectNotFound` if the object does not exist.
+    /// - `Error::InvalidRevision` if the revision cannot be resolved.
+    pub fn object_reader(&self, revision: &str) -> Result<ObjectReader> {
+        let oid = self.rev_parse(revision)?;
+        self.object_store().open(&oid)
     }
 
     /// Retrieves a Git object by its OID.

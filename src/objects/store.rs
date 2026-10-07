@@ -175,6 +175,50 @@ impl LooseObjectStore {
         })
     }
 
+    /// Opens a loose object for reading as a stream: only its header is
+    /// read now. `None` if there is no such loose object.
+    pub(crate) fn open_stream(
+        &self,
+        oid: &Oid,
+    ) -> Result<Option<crate::objects::reader::ObjectReader>> {
+        use crate::objects::reader::{Inflater, ObjectReader, Source};
+        use std::io::Read;
+        let file = match fs::File::open(self.oid_to_path(oid)) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let invalid = |reason: &str| Error::InvalidObject {
+            oid: oid.to_hex(),
+            reason: reason.to_owned(),
+        };
+        let mut inflater = Inflater::new(file);
+        // `<type> <size>\0`, at most a few dozen bytes.
+        let mut header = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            if inflater.read(&mut byte)? == 0 || header.len() > 64 {
+                return Err(invalid("missing null byte in header"));
+            }
+            if byte[0] == 0 {
+                break;
+            }
+            header.push(byte[0]);
+        }
+        let header = std::str::from_utf8(&header).map_err(|_| invalid("invalid header"))?;
+        let (kind, size) = header
+            .split_once(' ')
+            .ok_or_else(|| invalid("invalid header"))?;
+        let object_type = ObjectType::parse(kind).ok_or_else(|| invalid("unknown object type"))?;
+        let size: u64 = size.parse().map_err(|_| invalid("invalid size"))?;
+        Ok(Some(ObjectReader::streamed(
+            *oid,
+            object_type,
+            size,
+            Source::Loose(inflater),
+        )))
+    }
+
     /// Reads and parses a Git object by its Oid.
     ///
     /// # Arguments

@@ -99,7 +99,7 @@ pub use repository::{CheckoutOptions, Repository};
 pub use reset::ResetMode;
 
 // Re-export object types
-pub use objects::{Blob, Commit, FileMode, Object, Oid, Signature, Tree, TreeEntry};
+pub use objects::{Blob, Commit, FileMode, Object, ObjectReader, Oid, Signature, Tree, TreeEntry};
 
 // Re-export reference types
 pub use refs::{Branch, Head, ReflogEntry, ReflogExpiry, RemoteBranch, Tag};

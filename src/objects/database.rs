@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use super::pack::{PackFile, PackLimits};
-use super::{LooseObjectStore, ObjectType, Oid, RawObject};
+use super::{LooseObjectStore, ObjectReader, ObjectType, Oid, RawObject};
 use crate::error::{Error, Result};
 use crate::infra::hash_object;
 
@@ -129,6 +129,34 @@ impl ObjectStore {
     /// The loose objects.
     pub(crate) fn loose(&self) -> &LooseObjectStore {
         &self.inner.loose
+    }
+
+    /// Opens an object for reading as a stream, looking where
+    /// [`ObjectStore::read`] looks: loose objects and objects stored whole
+    /// in a pack are inflated as they are read; a delta is rebuilt in
+    /// memory.
+    pub(crate) fn open(&self, oid: &Oid) -> Result<ObjectReader> {
+        if let Some(reader) = self.inner.loose.open_stream(oid)? {
+            return Ok(reader);
+        }
+        for rescan in [false, true] {
+            let (packs, changed) = self.packs(rescan)?;
+            if rescan && !changed {
+                break;
+            }
+            if let Some(pack) = packs.iter().find(|p| p.contains(oid)) {
+                if let Some(reader) = pack.stream_entry(oid)? {
+                    return Ok(reader);
+                }
+                // A delta: rebuilt whole.
+                let object = self.read(oid)?;
+                return Ok(ObjectReader::from_memory(
+                    object.object_type,
+                    object.content,
+                ));
+            }
+        }
+        Err(Error::ObjectNotFound(oid.to_hex()))
     }
 
     pub(crate) fn read(&self, oid: &Oid) -> Result<RawObject> {

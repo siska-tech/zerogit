@@ -275,6 +275,27 @@ impl BlobDiff {
         }
     }
 
+    /// The result for blobs of which one is larger than `limit` bytes, from
+    /// their IDs and sizes alone, without reading them: equal IDs are
+    /// identical content.
+    pub(crate) fn too_large(
+        old: Option<(&crate::objects::Oid, u64)>,
+        new: Option<(&crate::objects::Oid, u64)>,
+        limit: usize,
+    ) -> Self {
+        let size = |side: Option<(_, u64)>| {
+            side.map_or(0, |(_, size)| usize::try_from(size).unwrap_or(usize::MAX))
+        };
+        BlobDiff {
+            old_exists: old.is_some(),
+            new_exists: new.is_some(),
+            old_size: size(old),
+            new_size: size(new),
+            identical: old.map(|(oid, _)| oid) == new.map(|(oid, _)| oid),
+            content: BlobDiffContent::Skipped(SkipReason::InputTooLarge { limit }),
+        }
+    }
+
     /// Returns whether the file exists in the old content.
     pub fn old_exists(&self) -> bool {
         self.old_exists

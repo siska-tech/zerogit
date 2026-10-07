@@ -446,7 +446,7 @@ impl<'a> Blamer<'a> {
             &sources,
             &[(path.clone(), target_blob, target_mode)],
             &RenameOptions::new(),
-            &mut |oid| Ok(store.read(oid)?.content),
+            &mut |oid, limit| store.read_within(oid, limit),
         )?;
         for (source, _) in pairs {
             if let Some((_, blob, _)) = sources.iter().find(|(p, _, _)| *p == source) {

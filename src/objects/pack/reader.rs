@@ -409,14 +409,48 @@ impl PackFile {
     pub(crate) fn entry_kind(&self, oid: &Oid) -> Result<Option<(EntryKind, u64)>> {
         match self.index.get(oid) {
             Some(entry) => {
-                let header = self.entry_header_at(entry.offset, true)?;
+                let header = self.entry_header_at(entry.offset, false)?;
                 Ok(Some((header.kind, header.size)))
             }
             None => Ok(None),
         }
     }
 
-    /// Reads and checks the header of the entry starting at `offset`.
+    /// Passes the compressed data of the entry of `oid` to `out` a piece at
+    /// a time, for copying a large entry into another pack without holding
+    /// it whole; the entry's CRC is checked once it is all read. Returns
+    /// `false` if the pack lacks `oid`.
+    pub(crate) fn copy_entry_data(
+        &self,
+        oid: &Oid,
+        out: &mut dyn FnMut(&[u8]) -> Result<()>,
+    ) -> Result<bool> {
+        let Some(entry) = self.index.get(oid) else {
+            return Ok(false);
+        };
+        let header = self.entry_header_at(entry.offset, false)?;
+        let mut file = File::open(&self.path)?;
+        file.seek(SeekFrom::Start(entry.offset))?;
+        let mut raw = CrcReader::new(file.take(header.len));
+        let mut skipped = vec![0u8; header.header_len];
+        raw.read_exact(&mut skipped)?;
+        let mut buffer = vec![0u8; 64 << 10];
+        loop {
+            let n = raw.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            out(&buffer[..n])?;
+        }
+        if raw.crc() != header.crc {
+            return Err(invalid(format!(
+                "CRC32 mismatch at offset {}",
+                entry.offset
+            )));
+        }
+        Ok(true)
+    }
+
     /// A reader inflating the content of `oid` as it is read, when the pack
     /// stores it whole; `None` if the pack lacks `oid` or stores it as a
     /// delta. No size limit applies: the content is not held in memory.
@@ -445,6 +479,7 @@ impl PackFile {
         )))
     }
 
+    /// Reads and checks the header of the entry starting at `offset`.
     /// With `limited`, entries larger than `max_object_size` are refused.
     fn entry_header_at(&self, offset: u64, limited: bool) -> Result<EntryHeader> {
         let position = self

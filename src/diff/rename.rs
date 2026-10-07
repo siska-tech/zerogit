@@ -184,6 +184,10 @@ fn eligible(mode: Option<FileMode>) -> bool {
     matches!(mode, Some(FileMode::Regular | FileMode::Executable))
 }
 
+/// Reads a blob for similarity: its content, or `None` without reading it
+/// when it is larger than the given number of bytes.
+pub(crate) type ReadBlob<'a> = dyn FnMut(&Oid, usize) -> Result<Option<Vec<u8>>> + 'a;
+
 /// Pairs deleted files (`sources`) with added files (`targets`) by content
 /// similarity, as [`detect_similar_renames`] does for diffs, and returns
 /// `(source, target)` path pairs. Only regular and executable files take
@@ -192,7 +196,7 @@ pub(crate) fn pair_similar(
     sources: &[(String, Oid, FileMode)],
     targets: &[(String, Oid, FileMode)],
     options: &RenameOptions,
-    read: &mut dyn FnMut(&Oid) -> Result<Vec<u8>>,
+    read: &mut ReadBlob,
 ) -> Result<Vec<(String, String)>> {
     let delta = |status, path: &str, oid: Oid, mode: FileMode| {
         let (old, new) = match status {
@@ -232,11 +236,12 @@ pub(crate) fn pair_similar(
 
 /// Pairs remaining deletions and additions by similarity.
 ///
-/// Must run after exact rename detection. `read` returns blob contents.
+/// Must run after exact rename detection. `read(oid, limit)` returns blob
+/// contents, or `None` without reading a blob larger than `limit` bytes.
 pub(crate) fn detect_similar_renames(
     deltas: &mut Vec<DiffDelta>,
     options: &RenameOptions,
-    read: &mut dyn FnMut(&Oid) -> Result<Vec<u8>>,
+    read: &mut ReadBlob,
 ) -> Result<Vec<RenameLimit>> {
     let candidates = |status: DiffStatus| -> Vec<usize> {
         deltas
@@ -277,11 +282,13 @@ pub(crate) fn detect_similar_renames(
                 delta.new_oid
             };
             let Some(oid) = oid else { continue };
-            let content = read(&oid)?;
-            if content.len() > options.max_file_size {
-                oversized += 1;
-            } else if !content.is_empty() && !content.contains(&0) {
-                loaded.push((i, content));
+            match read(&oid, options.max_file_size)? {
+                Some(content) if content.len() <= options.max_file_size => {
+                    if !content.is_empty() && !content.contains(&0) {
+                        loaded.push((i, content));
+                    }
+                }
+                _ => oversized += 1,
             }
         }
         Ok(loaded)
@@ -405,9 +412,9 @@ mod tests {
             let mut deltas: Vec<_> = order.iter().map(|&i| self.deltas[i].clone()).collect();
             super::super::detect_renames(&mut deltas);
             let mut reads = 0;
-            let limits = detect_similar_renames(&mut deltas, options, &mut |oid| {
+            let limits = detect_similar_renames(&mut deltas, options, &mut |oid, _| {
                 reads += 1;
-                Ok(self.blobs[oid].clone())
+                Ok(Some(self.blobs[oid].clone()))
             })
             .unwrap();
             let summary = deltas
@@ -479,8 +486,10 @@ mod tests {
         );
         let renamed = {
             let mut deltas = f.deltas.clone();
-            detect_similar_renames(&mut deltas, &similar(), &mut |oid| Ok(f.blobs[oid].clone()))
-                .unwrap();
+            detect_similar_renames(&mut deltas, &similar(), &mut |oid, _| {
+                Ok(Some(f.blobs[oid].clone()))
+            })
+            .unwrap();
             deltas
                 .into_iter()
                 .find(|d| d.status() == DiffStatus::Renamed)
@@ -499,8 +508,10 @@ mod tests {
         for options in [RenameOptions::new(), similar().threshold(95)] {
             let mut deltas = f.deltas.clone();
             if options.get_detection() == RenameDetection::Similar {
-                detect_similar_renames(&mut deltas, &options, &mut |oid| Ok(f.blobs[oid].clone()))
-                    .unwrap();
+                detect_similar_renames(&mut deltas, &options, &mut |oid, _| {
+                    Ok(Some(f.blobs[oid].clone()))
+                })
+                .unwrap();
             }
             assert!(deltas.iter().all(|d| d.status() != DiffStatus::Renamed));
             assert_eq!(deltas.len(), 3);

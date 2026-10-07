@@ -146,6 +146,23 @@ fn write_file(dir: &str, megabytes: usize) {
     measure("checkout (file appears)", || {
         repo.checkout("other").unwrap()
     });
+    // Touched, so that status must hash it again: a byte appended and
+    // removed changes the modification time but not the content.
+    {
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let len = file.metadata().unwrap().len();
+        std::io::Seek::seek(&mut file, std::io::SeekFrom::End(0)).unwrap();
+        file.write_all(b"x").unwrap();
+        file.set_len(len).unwrap();
+    }
+    let changes = measure("status (file rehashed)", || repo.status().unwrap().len());
+    println!("{} changes", changes);
+    measure("gc", || repo.gc().unwrap());
+    std::fs::remove_file(&path).unwrap();
+    measure("restore (from the pack)", || {
+        repo.restore(&["big.bin"], &RestoreOptions::new()).unwrap()
+    });
+    measure("gc (copying the pack)", || repo.gc().unwrap());
     println!(
         "{} bytes in the work tree",
         std::fs::metadata(&path).unwrap().len()

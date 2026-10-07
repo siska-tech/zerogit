@@ -389,7 +389,7 @@ fn detect_renames(
         let options = crate::diff::RenameOptions::new()
             .detection(crate::diff::RenameDetection::Similar)
             .threshold(50);
-        let mut read = |oid: &Oid| -> Result<Vec<u8>> { Ok(store.read(oid)?.content) };
+        let mut read = |oid: &Oid, limit| store.read_within(oid, limit);
         for (old, new) in
             crate::diff::rename::pair_similar(&sources, &targets, &options, &mut read)?
         {

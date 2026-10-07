@@ -298,6 +298,32 @@ impl ObjectStore {
         Err(Error::ObjectNotFound(oid.to_hex()))
     }
 
+    /// The type of an object, read from its header where it is stored whole
+    /// (a delta is rebuilt to find it).
+    pub(crate) fn object_type(&self, oid: &Oid) -> Result<ObjectType> {
+        if let Some(reader) = self.inner.loose.open_stream(oid)? {
+            return Ok(reader.object_type());
+        }
+        for pack in self.pack_files()? {
+            if let Some(reader) = pack.stream_entry(oid)? {
+                return Ok(reader.object_type());
+            }
+            if pack.contains(oid) {
+                return Ok(self.read(oid)?.object_type);
+            }
+        }
+        Err(Error::ObjectNotFound(oid.to_hex()))
+    }
+
+    /// The content of an object, or `None` without reading it when it is
+    /// larger than `limit` bytes.
+    pub(crate) fn read_within(&self, oid: &Oid, limit: usize) -> Result<Option<Vec<u8>>> {
+        if usize::try_from(self.object_size(oid)?).map_or(true, |size| size > limit) {
+            return Ok(None);
+        }
+        Ok(Some(self.read(oid)?.content))
+    }
+
     pub(crate) fn write(&self, kind: ObjectType, content: &[u8]) -> Result<Oid> {
         let oid = Oid::from_bytes(hash_object(kind.as_str(), content));
         if self.exists(&oid)? {

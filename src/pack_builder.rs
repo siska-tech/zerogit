@@ -8,13 +8,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::error::{Error, Result};
-use crate::infra::hash::Sha1State;
-use crate::infra::{compress, crc32};
+use crate::infra::hash::{Crc32State, Sha1State};
+use crate::infra::{compress, crc32, Deflater};
 use crate::objects::pack::deltify::{find_deltas, Candidate, DeltaSearch, NewDelta};
 use crate::objects::pack::indexer::{entry_header, type_code, IndexedObject};
 use crate::objects::pack::{EntryKind, PackFile, RawEntry};
@@ -145,6 +145,41 @@ fn ofs_distance(mut distance: u64) -> Vec<u8> {
     }
     bytes.reverse();
     bytes
+}
+
+/// One pack entry written to a sink a piece at a time, with its CRC-32, for
+/// objects too large to hold whole.
+struct EntryOut<'a> {
+    sink: &'a mut dyn PackSink,
+    crc: Crc32State,
+}
+
+impl<'a> EntryOut<'a> {
+    fn new(sink: &'a mut dyn PackSink) -> Self {
+        EntryOut {
+            sink,
+            crc: Crc32State::new(),
+        }
+    }
+
+    fn put(&mut self, data: &[u8]) -> Result<()> {
+        self.crc.update(data);
+        self.sink.write(data)
+    }
+}
+
+impl Write for EntryOut<'_> {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        self.put(data).map_err(|e| match e {
+            Error::Io(e) => e,
+            e => io::Error::new(io::ErrorKind::Other, e.to_string()),
+        })?;
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// How an object goes into the pack.
@@ -332,8 +367,43 @@ impl Repository {
                         .raw_entry(&oid)?
                         .ok_or_else(|| Error::ObjectNotFound(oid.to_hex()))
                 };
+                let how = stored.remove(&oid).expect("every object is planned once");
+                // Objects larger than `core.bigFileThreshold` are copied or
+                // compressed a piece at a time.
+                let big = plan.search.max_object_size;
+                let streamed = match &how {
+                    Stored::Copied(pack_no) => {
+                        let pack = &plan.packs[*pack_no];
+                        match pack.entry_kind(&oid)? {
+                            Some((EntryKind::Base(object_type), size)) if size > big => {
+                                let size = usize::try_from(size).map_err(|_| too_large(&oid))?;
+                                let mut out = EntryOut::new(&mut *sink);
+                                out.put(&entry_header(type_code(object_type), size))?;
+                                pack.copy_entry_data(&oid, &mut |data| out.put(data))?;
+                                Some(out.crc.finish())
+                            }
+                            _ => None,
+                        }
+                    }
+                    Stored::Whole if store.object_size(&oid)? > big => {
+                        let mut reader = store.open(&oid)?;
+                        let size = usize::try_from(reader.size()).map_err(|_| too_large(&oid))?;
+                        let mut out = EntryOut::new(&mut *sink);
+                        out.put(&entry_header(type_code(reader.object_type()), size))?;
+                        let mut deflater = Deflater::new(&mut out);
+                        io::copy(&mut reader, &mut deflater)?;
+                        deflater.finish()?;
+                        Some(out.crc.finish())
+                    }
+                    _ => None,
+                };
+                if let Some(crc32) = streamed {
+                    written.insert(oid, offset);
+                    indexed.push(IndexedObject { oid, offset, crc32 });
+                    continue;
+                }
                 let mut bytes = Vec::new();
-                match stored.remove(&oid).expect("every object is planned once") {
+                match how {
                     Stored::Copied(pack_no) => {
                         let entry = raw_entry(pack_no)?;
                         let EntryKind::Base(object_type) = entry.kind else {

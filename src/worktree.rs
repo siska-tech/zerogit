@@ -25,6 +25,7 @@ use crate::eol::{CrlfAction, EolSettings};
 use crate::error::{Error, Result};
 use crate::ignore::IgnoreRules;
 use crate::index::{Index, IndexEntry};
+use crate::infra::hash::Sha1State;
 use crate::infra::{hash_object, write_file_atomic, write_file_atomic_with};
 use crate::objects::{tree::FileMode, ObjectStore, ObjectType, Oid};
 
@@ -102,6 +103,26 @@ fn index_entry(metadata: &fs::Metadata, mode: FileMode, path: PathBuf, oid: Oid)
         0,
     )
     .with_nanos(stat.ctime.1, stat.mtime.1)
+}
+
+/// The blob ID of `size` bytes read from `content`, hashed as they are
+/// read. Content of another length (a file that changed while being read)
+/// does not fit the header, so its ID matches no blob, and the file shows
+/// as changed.
+fn hash_blob_stream(size: u64, mut content: impl io::Read) -> Result<Oid> {
+    let mut hash = Sha1State::new();
+    hash.update(format!("blob {}\0", size).as_bytes());
+    let mut buffer = vec![0; 64 << 10];
+    loop {
+        let n = match content.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
+        };
+        hash.update(&buffer[..n]);
+    }
+    Ok(Oid::from_bytes(hash.finalize()))
 }
 
 fn timestamp(time: Option<std::time::SystemTime>) -> (u64, u32) {
@@ -553,6 +574,14 @@ impl Worktree {
                         return Ok(Some((*entry.oid(), mode)));
                     }
                 }
+            }
+        }
+        // A big file with no conversion is hashed as it is read.
+        if let Some(metadata) = self.metadata(path)?.filter(fs::Metadata::is_file) {
+            let mode = self.file_mode(&metadata, tracked.map(IndexEntry::mode));
+            if matches!(self.streams(path, mode, metadata.len()), Ok(true)) {
+                let file = fs::File::open(self.root.join(path))?;
+                return Ok(Some((hash_blob_stream(metadata.len(), file)?, mode)));
             }
         }
         match self.read(path, tracked) {

@@ -92,6 +92,8 @@ zerogit/
     └── fixtures/              # テスト用リポジトリ
 ```
 
+> 初期設計時の構成。その後の機能（merge・rebase・stash・cherry-pick・gcなど）は、それぞれのモジュールに置いている。`Repository`の操作は、機能ごとのモジュールが`impl Repository`ブロックで追加する（例: `checkout.rs`・`staging.rs`・`object_access.rs`・`commit.rs`・`log.rs`・`status.rs`・`refs/branch_ops.rs`・`refs/tag_ops.rs`）。`repository.rs`には、`Repository`構造体（開く・探す・作る）と、各モジュールが共有する処理（オブジェクトと参照のストア、HEAD・indexとそのロック、参照名の検証）だけを置く（#76）。
+
 ---
 
 ## 2. モジュール間の関係

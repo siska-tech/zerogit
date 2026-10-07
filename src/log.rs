@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::Result;
 use crate::objects::{Commit, ObjectStore, ObjectType, Oid, Tree};
+use crate::repository::Repository;
 
 /// The order in which [`LogIterator`] returns commits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -901,6 +902,109 @@ impl Graph {
             after,
             parents: parents.to_vec(),
         }
+    }
+}
+
+impl Repository {
+    /// Returns an iterator over the commit history starting from HEAD.
+    ///
+    /// Commits are returned as `git log` returns them: newest committer
+    /// date first, as the history is walked.
+    ///
+    /// # Returns
+    ///
+    /// A `LogIterator` that yields commits.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::RefNotFound` if HEAD doesn't exist.
+    /// - Other errors if the initial commit cannot be read.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::repository::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// for result in repo.log().unwrap().take(10) {
+    ///     match result {
+    ///         Ok(commit) => println!("{}: {}", commit.author().name(), commit.summary()),
+    ///         Err(e) => eprintln!("Error: {}", e),
+    ///     }
+    /// }
+    /// ```
+    pub fn log(&self) -> Result<LogIterator> {
+        let head = self.head()?;
+        self.log_from(*head.oid())
+    }
+
+    /// Returns an iterator over the commit history starting from a specific commit.
+    ///
+    /// Commits are returned as `git log` returns them: newest committer
+    /// date first, as the history is walked.
+    ///
+    /// # Arguments
+    ///
+    /// * `start_oid` - The OID of the commit to start from.
+    ///
+    /// # Returns
+    ///
+    /// A `LogIterator` that yields commits.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::repository::Repository;
+    /// use zerogit::objects::Oid;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// let oid = Oid::from_hex("abc1234567890abcdef1234567890abcdef12345").unwrap();
+    /// for commit in repo.log_from(oid).unwrap().take(5) {
+    ///     // ...
+    /// }
+    /// ```
+    pub fn log_from(&self, start_oid: Oid) -> Result<LogIterator> {
+        LogIterator::with_store(self.object_store(), start_oid, LogOptions::default())
+    }
+
+    /// Returns an iterator over the commit history with filtering options.
+    ///
+    /// This allows filtering commits by path, date, author, and more.
+    ///
+    /// # Arguments
+    ///
+    /// * `options` - The filtering options to apply.
+    ///
+    /// # Returns
+    ///
+    /// A `LogIterator` that yields only commits matching the filter criteria.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::repository::Repository;
+    /// use zerogit::log::LogOptions;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    ///
+    /// // Get last 10 commits that modified src/
+    /// let log = repo.log_with_options(
+    ///     LogOptions::new()
+    ///         .path("src/")
+    ///         .max_count(10)
+    /// ).unwrap();
+    ///
+    /// for commit in log {
+    ///     println!("{}", commit.unwrap().summary());
+    /// }
+    /// ```
+    pub fn log_with_options(&self, options: LogOptions) -> Result<LogIterator> {
+        let start_oid = if let Some(oid) = options.get_from() {
+            *oid
+        } else {
+            *self.head()?.oid()
+        };
+        LogIterator::with_store(self.object_store(), start_oid, options)
     }
 }
 
@@ -1979,5 +2083,198 @@ mod tests {
         assert_eq!(commits.len(), 2);
         assert_eq!(commits[0].summary(), "Update src/lib.rs");
         assert_eq!(commits[1].summary(), "Add src/lib.rs");
+    }
+}
+
+#[cfg(test)]
+mod repository_tests {
+    use crate::repository::test_support::*;
+    use crate::repository::Repository;
+    use std::fs;
+    use tempfile::TempDir;
+
+    // =========================================================================
+    // Log iterator tests (RP-014 to RP-016)
+    // =========================================================================
+
+    // RP-014: repository.log() returns commits from HEAD
+    #[test]
+    fn test_log_returns_commits_from_head() {
+        let temp = TempDir::new().unwrap();
+        create_git_dir(temp.path());
+        let git_dir = temp.path().join(".git");
+
+        let tree_oid = create_loose_object(&git_dir, b"", "tree");
+
+        // Create commit chain
+        let c1_content =
+            make_commit_content_with_time(&tree_oid.to_hex(), None, "First commit", 1000);
+        let c1_oid = create_loose_object(&git_dir, c1_content.as_bytes(), "commit");
+
+        let c2_content = make_commit_content_with_time(
+            &tree_oid.to_hex(),
+            Some(&c1_oid.to_hex()),
+            "Second commit",
+            2000,
+        );
+        let c2_oid = create_loose_object(&git_dir, c2_content.as_bytes(), "commit");
+
+        // Set up HEAD -> refs/heads/main -> c2
+        fs::create_dir_all(git_dir.join("refs/heads")).unwrap();
+        fs::write(
+            git_dir.join("refs/heads/main"),
+            format!("{}\n", c2_oid.to_hex()),
+        )
+        .unwrap();
+
+        let repo = Repository::open(temp.path()).unwrap();
+        let log = repo.log().unwrap();
+        let commits: Vec<_> = log.filter_map(Result::ok).collect();
+
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].summary(), "Second commit");
+        assert_eq!(commits[1].summary(), "First commit");
+    }
+
+    // RP-015: repository.log() returns commits in time order (newest first)
+    #[test]
+    fn test_log_returns_commits_in_time_order() {
+        let temp = TempDir::new().unwrap();
+        create_git_dir(temp.path());
+        let git_dir = temp.path().join(".git");
+
+        let tree_oid = create_loose_object(&git_dir, b"", "tree");
+
+        let c1_content =
+            make_commit_content_with_time(&tree_oid.to_hex(), None, "First commit", 1000);
+        let c1_oid = create_loose_object(&git_dir, c1_content.as_bytes(), "commit");
+
+        let c2_content = make_commit_content_with_time(
+            &tree_oid.to_hex(),
+            Some(&c1_oid.to_hex()),
+            "Second commit",
+            2000,
+        );
+        let c2_oid = create_loose_object(&git_dir, c2_content.as_bytes(), "commit");
+
+        let c3_content = make_commit_content_with_time(
+            &tree_oid.to_hex(),
+            Some(&c2_oid.to_hex()),
+            "Third commit",
+            3000,
+        );
+        let c3_oid = create_loose_object(&git_dir, c3_content.as_bytes(), "commit");
+
+        fs::create_dir_all(git_dir.join("refs/heads")).unwrap();
+        fs::write(
+            git_dir.join("refs/heads/main"),
+            format!("{}\n", c3_oid.to_hex()),
+        )
+        .unwrap();
+
+        let repo = Repository::open(temp.path()).unwrap();
+        let log = repo.log().unwrap();
+        let commits: Vec<_> = log.filter_map(Result::ok).collect();
+
+        // Verify descending order
+        for window in commits.windows(2) {
+            assert!(window[0].author().timestamp() >= window[1].author().timestamp());
+        }
+    }
+
+    // RP-016: repository.log() handles merge commits correctly
+    #[test]
+    fn test_log_handles_merge_commits() {
+        let temp = TempDir::new().unwrap();
+        create_git_dir(temp.path());
+        let git_dir = temp.path().join(".git");
+
+        let tree_oid = create_loose_object(&git_dir, b"", "tree");
+
+        // Create a merge scenario
+        let root_content =
+            make_commit_content_with_time(&tree_oid.to_hex(), None, "Root commit", 1000);
+        let root_oid = create_loose_object(&git_dir, root_content.as_bytes(), "commit");
+
+        let branch_a_content = make_commit_content_with_time(
+            &tree_oid.to_hex(),
+            Some(&root_oid.to_hex()),
+            "Branch A commit",
+            2000,
+        );
+        let branch_a_oid = create_loose_object(&git_dir, branch_a_content.as_bytes(), "commit");
+
+        let branch_b_content = make_commit_content_with_time(
+            &tree_oid.to_hex(),
+            Some(&root_oid.to_hex()),
+            "Branch B commit",
+            2500,
+        );
+        let branch_b_oid = create_loose_object(&git_dir, branch_b_content.as_bytes(), "commit");
+
+        // Merge commit with two parents
+        let merge_content = format!(
+            "tree {}\nparent {}\nparent {}\nauthor Test <t@t.com> 3000 +0000\ncommitter Test <t@t.com> 3000 +0000\n\nMerge commit",
+            tree_oid.to_hex(),
+            branch_a_oid.to_hex(),
+            branch_b_oid.to_hex()
+        );
+        let merge_oid = create_loose_object(&git_dir, merge_content.as_bytes(), "commit");
+
+        fs::create_dir_all(git_dir.join("refs/heads")).unwrap();
+        fs::write(
+            git_dir.join("refs/heads/main"),
+            format!("{}\n", merge_oid.to_hex()),
+        )
+        .unwrap();
+
+        let repo = Repository::open(temp.path()).unwrap();
+        let log = repo.log().unwrap();
+        let commits: Vec<_> = log.filter_map(Result::ok).collect();
+
+        // Should have 4 commits: merge, branch_b, branch_a, root
+        assert_eq!(commits.len(), 4);
+        assert_eq!(commits[0].summary(), "Merge commit");
+        // Root should be last
+        assert_eq!(commits[3].summary(), "Root commit");
+    }
+
+    // Additional: log_from() starts from specific commit
+    #[test]
+    fn test_log_from_specific_commit() {
+        let temp = TempDir::new().unwrap();
+        create_git_dir(temp.path());
+        let git_dir = temp.path().join(".git");
+
+        let tree_oid = create_loose_object(&git_dir, b"", "tree");
+
+        let c1_content =
+            make_commit_content_with_time(&tree_oid.to_hex(), None, "First commit", 1000);
+        let c1_oid = create_loose_object(&git_dir, c1_content.as_bytes(), "commit");
+
+        let c2_content = make_commit_content_with_time(
+            &tree_oid.to_hex(),
+            Some(&c1_oid.to_hex()),
+            "Second commit",
+            2000,
+        );
+        let c2_oid = create_loose_object(&git_dir, c2_content.as_bytes(), "commit");
+
+        let c3_content = make_commit_content_with_time(
+            &tree_oid.to_hex(),
+            Some(&c2_oid.to_hex()),
+            "Third commit",
+            3000,
+        );
+        let _ = create_loose_object(&git_dir, c3_content.as_bytes(), "commit");
+
+        let repo = Repository::open(temp.path()).unwrap();
+        // Start from c2, should only get c2 and c1
+        let log = repo.log_from(c2_oid).unwrap();
+        let commits: Vec<_> = log.filter_map(Result::ok).collect();
+
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].summary(), "Second commit");
+        assert_eq!(commits[1].summary(), "First commit");
     }
 }

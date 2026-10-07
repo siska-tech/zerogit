@@ -17,6 +17,9 @@
 - `pack_objects()`（push・fetchで送るpack）がdeltaを使う（`repack()`と同じ探索。packにあるdeltaは、baseも送るなら再利用する）。baseはIDで示す（REF_DELTA。どの受け手も読める） (#75)
 - `zerogit-remote`: pushが`git push`と同じくthin packを送る。サーバーにあるファイルを少し変えたpushでは、そのファイルのdeltaだけを送る（約200 KBのファイルの変更で3 KB未満） (#75)
 
+### Development
+- `src/repository.rs`（3,785行）を機能ごとのモジュールに分けた（約1,000行に）。オブジェクトの読み取り（`object_access.rs`）、ステージング（`staging.rs`）、checkout（`checkout.rs`）、ブランチ・タグ（`refs/branch_ops.rs`・`refs/tag_ops.rs`）、参照の更新の共通処理（`refs/update.rs`）、log（`log.rs`）、status（`status.rs`）、commitとtreeの作成（`commit.rs`）、reflog（`refs/reflog.rs`）。公開API（名前・シグネチャ・ドキュメントとそのパス）は変わらない (#76)
+
 ### Notes
 - Git 2.55で確認したところ、`gc.reflogExpire`・`gc.reflogExpireUnreachable`がどちらも未設定の場合、`git reflog expire`は文書と異なり、到達可能なエントリも30日で消した。zerogitは文書どおりの既定（90日・30日）を使う。両方を設定するか`--expire`・`--expire-unreachable`を指定した場合の結果は一致する (#74)
 

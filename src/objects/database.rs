@@ -244,6 +244,46 @@ impl ObjectStore {
         }
     }
 
+    /// The size of an object's content, read from its header (for a delta,
+    /// the size it produces) without inflating the whole object.
+    pub(crate) fn object_size(&self, oid: &Oid) -> Result<u64> {
+        let corrupt = |reason: &str| Error::InvalidObject {
+            oid: oid.to_hex(),
+            reason: reason.to_owned(),
+        };
+        match fs::read(self.inner.loose.oid_to_path(oid)) {
+            Ok(data) => {
+                let head = crate::infra::compression::inflate_head(&data, 64)?;
+                let header = head
+                    .split(|&b| b == 0)
+                    .next()
+                    .filter(|header| header.len() < head.len())
+                    .ok_or_else(|| corrupt("missing header"))?;
+                return std::str::from_utf8(header)
+                    .ok()
+                    .and_then(|header| header.split_once(' '))
+                    .and_then(|(_, size)| size.parse().ok())
+                    .ok_or_else(|| corrupt("invalid header"));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Error::Io(e)),
+        }
+        for pack in self.pack_files()? {
+            let Some(entry) = pack.raw_entry(oid)? else {
+                continue;
+            };
+            return match entry.kind {
+                super::pack::EntryKind::Base(_) => Ok(entry.size),
+                _ => {
+                    // The result size is the second number of the delta.
+                    let head = crate::infra::compression::inflate_head(&entry.compressed, 20)?;
+                    super::pack::delta::result_size(&head)
+                }
+            };
+        }
+        Err(Error::ObjectNotFound(oid.to_hex()))
+    }
+
     pub(crate) fn write(&self, kind: ObjectType, content: &[u8]) -> Result<Oid> {
         let oid = Oid::from_bytes(hash_object(kind.as_str(), content));
         if self.exists(&oid)? {

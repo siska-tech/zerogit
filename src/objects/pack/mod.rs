@@ -1,6 +1,7 @@
 //! Git packed object storage formats.
 
-mod delta;
+pub(crate) mod delta;
+pub(crate) mod deltify;
 pub mod index;
 pub(crate) mod indexer;
 pub mod reader;

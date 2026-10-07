@@ -23,6 +23,7 @@ use crate::error::{Error, Result};
 use crate::infra::fs::remove_file;
 use crate::infra::hash::Sha1State;
 use crate::infra::{compress, crc32, write_file_atomic, LockFile};
+use crate::objects::pack::deltify::{find_deltas, Candidate, DeltaSearch, NewDelta};
 use crate::objects::pack::indexer::{entry_header, type_code, write_index, IndexedObject};
 use crate::objects::pack::{EntryKind, PackFile, RawEntry};
 use crate::objects::{Commit, FileMode, ObjectType, Oid, TagObject, Tree};
@@ -35,6 +36,7 @@ pub struct RepackSummary {
     pack: Option<PathBuf>,
     objects: usize,
     reused_deltas: usize,
+    new_deltas: usize,
     removed_packs: usize,
     removed_loose: usize,
     loosened: usize,
@@ -57,6 +59,11 @@ impl RepackSummary {
         self.reused_deltas
     }
 
+    /// How many of them were stored as new deltas.
+    pub fn new_deltas(&self) -> usize {
+        self.new_deltas
+    }
+
     /// The number of old packs removed.
     pub fn removed_packs(&self) -> usize {
         self.removed_packs
@@ -72,6 +79,19 @@ impl RepackSummary {
     pub fn loosened(&self) -> usize {
         self.loosened
     }
+}
+
+/// How an object goes into the pack [`Repository::repack`] writes.
+enum Stored {
+    /// Copied as it is from an old pack (the index), where it is whole.
+    Copied(usize),
+    /// Copied as it is from an old pack, where it is a delta against an
+    /// object that is written too.
+    CopiedDelta(usize, Oid),
+    /// Written whole.
+    Whole,
+    /// Written as a new delta.
+    NewDelta(NewDelta),
 }
 
 /// Files of a pack that go with it when it is removed (the index first,
@@ -313,8 +333,15 @@ impl Repository {
     /// reader always finds every object.
     ///
     /// Objects that are deltas in the old packs stay deltas (their stored
-    /// data is copied) when their base goes into the new pack too; loose
-    /// objects are stored whole, as zerogit does not compute deltas. Packs
+    /// data is copied) when their base goes into the new pack too. The
+    /// others, loose objects among them, are encoded as deltas against
+    /// similar objects of the pack where that saves space, as
+    /// `git pack-objects` does: each object is tried against the
+    /// `pack.window` objects (default 10) before it when sorted by type,
+    /// file name and size, and chains of deltas are kept to `pack.depth`
+    /// (default 50). Objects larger than `core.bigFileThreshold` (default
+    /// 512 MiB) are stored whole, and every new delta is checked to
+    /// reproduce its object before it is written. Packs
     /// with a `.keep` file are left as they are and their objects are not
     /// copied. Unreachable objects of the removed packs are written as loose
     /// objects, as `git repack -A` does, so nothing is lost before it is
@@ -328,6 +355,8 @@ impl Repository {
     ///   repository is corrupt). An object a reference, reflog entry or
     ///   index entry names directly is skipped if missing.
     /// - `Error::InvalidPack` if an old pack is corrupt.
+    /// - `Error::ConfigNotFound` if `pack.window`, `pack.depth` or
+    ///   `core.bigFileThreshold` is not a number.
     ///
     /// # Examples
     ///
@@ -346,7 +375,7 @@ impl Repository {
             .into_iter()
             .partition(|pack| pack.path().with_extension("keep").exists());
 
-        let reachable = self.reachable_for_repack()?;
+        let (reachable, info) = self.reachable_for_repack()?;
         let reachable_set: HashSet<Oid> = reachable.iter().copied().collect();
         let wanted: Vec<Oid> = reachable
             .into_iter()
@@ -357,14 +386,16 @@ impl Repository {
             pack: None,
             objects: wanted.len(),
             reused_deltas: 0,
+            new_deltas: 0,
             removed_packs: 0,
             removed_loose: 0,
             loosened: 0,
         };
         let mut new_pack: Option<Arc<PackFile>> = None;
         if !wanted.is_empty() {
-            let (path, reused) = self.write_repack(&pack_dir, &wanted, &old)?;
+            let (path, reused, new) = self.write_repack(&pack_dir, &wanted, info, &old)?;
             summary.reused_deltas = reused;
+            summary.new_deltas = new;
             new_pack = Some(Arc::new(PackFile::open(&path)?));
             summary.pack = Some(path);
         }
@@ -447,36 +478,73 @@ impl Repository {
     }
 
     /// Every object reachable from the roots, commits and tags before the
-    /// trees and blobs they lead to. Blobs are checked to exist, not read.
-    fn reachable_for_repack(&self) -> Result<Vec<Oid>> {
+    /// trees and blobs they lead to, with what the delta search needs of
+    /// each. Blobs are not read.
+    fn reachable_for_repack(&self) -> Result<(Vec<Oid>, HashMap<Oid, Candidate>)> {
         let mut seen = HashSet::new();
-        self.walk_objects(self.repack_roots()?, &mut seen, false)
+        let mut info = HashMap::new();
+        let order = self.walk_objects(self.repack_roots()?, &mut seen, false, Some(&mut info))?;
+        Ok((order, info))
     }
 
     /// The objects reachable from `starts` that are not in `seen` yet
     /// (which collects them). A missing object is an error, or with
-    /// `tolerant` (for objects nothing refers to) skipped.
+    /// `tolerant` (for objects nothing refers to) skipped. With `info`,
+    /// each object's type, size and the file name it was first found under
+    /// are collected too.
     fn walk_objects(
         &self,
         starts: Vec<Oid>,
         seen: &mut HashSet<Oid>,
         tolerant: bool,
+        mut info: Option<&mut HashMap<Oid, Candidate>>,
     ) -> Result<Vec<Oid>> {
         let store = self.object_store();
         let mut order = Vec::new();
-        let mut queue: VecDeque<(Oid, Option<ObjectType>)> =
-            starts.into_iter().map(|oid| (oid, None)).collect();
-        while let Some((oid, known)) = queue.pop_front() {
+        let mut queue: VecDeque<(Oid, Option<ObjectType>, Vec<u8>)> = starts
+            .into_iter()
+            .map(|oid| (oid, None, Vec::new()))
+            .collect();
+        let want_info = info.is_some();
+        let mut record = |oid: Oid, object_type: ObjectType, size: u64, name: Vec<u8>| {
+            if let Some(info) = info.as_deref_mut() {
+                info.insert(
+                    oid,
+                    Candidate {
+                        oid,
+                        object_type,
+                        name,
+                        size,
+                        reused_base: None,
+                    },
+                );
+            }
+        };
+        while let Some((oid, known, name)) = queue.pop_front() {
             if !seen.insert(oid) {
                 continue;
             }
             if known == Some(ObjectType::Blob) {
-                if !store.exists(&oid)? {
+                // The size is looked up only when it is wanted; it also
+                // shows that the blob exists.
+                let size = if want_info {
+                    match store.object_size(&oid) {
+                        Ok(size) => Some(size),
+                        Err(Error::ObjectNotFound(_)) => None,
+                        Err(e) => return Err(e),
+                    }
+                } else if store.exists(&oid)? {
+                    Some(0)
+                } else {
+                    None
+                };
+                let Some(size) = size else {
                     if tolerant {
                         continue;
                     }
                     return Err(Error::ObjectNotFound(oid.to_hex()));
-                }
+                };
+                record(oid, ObjectType::Blob, size, name);
                 order.push(oid);
                 continue;
             }
@@ -486,11 +554,12 @@ impl Repository {
                 Err(e) => return Err(e),
             };
             order.push(oid);
+            record(oid, raw.object_type, raw.content.len() as u64, name);
             match raw.object_type {
                 ObjectType::Commit => {
                     let commit = Commit::parse(oid, raw)?;
-                    queue.push_back((*commit.tree(), Some(ObjectType::Tree)));
-                    queue.extend(commit.parents().iter().map(|p| (*p, None)));
+                    queue.push_back((*commit.tree(), Some(ObjectType::Tree), Vec::new()));
+                    queue.extend(commit.parents().iter().map(|p| (*p, None, Vec::new())));
                 }
                 ObjectType::Tree => {
                     for entry in Tree::parse(raw)?.iter() {
@@ -500,25 +569,37 @@ impl Repository {
                             FileMode::Directory => ObjectType::Tree,
                             _ => ObjectType::Blob,
                         };
-                        queue.push_back((*entry.oid(), Some(kind)));
+                        let name = if want_info {
+                            entry.name().as_bytes().to_vec()
+                        } else {
+                            Vec::new()
+                        };
+                        queue.push_back((*entry.oid(), Some(kind), name));
                     }
                 }
-                ObjectType::Tag => queue.push_back((*TagObject::parse(raw)?.object(), None)),
+                ObjectType::Tag => {
+                    queue.push_back((*TagObject::parse(raw)?.object(), None, Vec::new()))
+                }
                 ObjectType::Blob => {}
             }
         }
         Ok(order)
     }
 
-    /// Writes `objects` to a new pack, copying deltas from `old` packs
-    /// whose base is written too; returns the pack's path and the number
-    /// of copied deltas.
+    /// Writes `objects` to a new pack and returns its path, the number of
+    /// deltas copied from `old` packs and the number of new deltas.
+    ///
+    /// A delta in an old pack is copied when its base is written too;
+    /// other objects are searched for deltas (see `deltify`) among the
+    /// objects written, using what `info` says of them, and otherwise
+    /// stored whole.
     fn write_repack(
         &self,
         pack_dir: &Path,
         objects: &[Oid],
+        mut info: HashMap<Oid, Candidate>,
         old: &[Arc<PackFile>],
-    ) -> Result<(PathBuf, usize)> {
+    ) -> Result<(PathBuf, usize, usize)> {
         let store = self.object_store();
         let wanted: HashSet<Oid> = objects.iter().copied().collect();
         let too_large = |oid: &Oid| Error::PackLimitExceeded {
@@ -527,79 +608,109 @@ impl Repository {
         let count = u32::try_from(objects.len()).map_err(|_| Error::PackLimitExceeded {
             reason: "too many objects for one pack".to_owned(),
         })?;
+
+        // How each object is stored in the old packs, and what of that can
+        // be copied.
+        let mut plan: HashMap<Oid, Stored> = HashMap::with_capacity(objects.len());
+        // Offsets of each old pack's entries, to name OFS_DELTA bases.
+        let mut offsets: HashMap<usize, HashMap<u64, Oid>> = HashMap::new();
+        for &oid in objects {
+            let found = old.iter().enumerate().find(|(_, p)| p.contains(&oid));
+            let stored = match found {
+                None => Stored::Whole,
+                Some((pack_no, pack)) => {
+                    let (kind, _) = pack
+                        .entry_kind(&oid)?
+                        .ok_or_else(|| Error::ObjectNotFound(oid.to_hex()))?;
+                    let base = match kind {
+                        EntryKind::Base(_) => None,
+                        EntryKind::RefDelta(base) => Some(base),
+                        EntryKind::OfsDelta(offset) => offsets
+                            .entry(pack_no)
+                            .or_insert_with(|| {
+                                pack.index()
+                                    .entries()
+                                    .iter()
+                                    .map(|e| (e.offset, e.oid))
+                                    .collect()
+                            })
+                            .get(&offset)
+                            .copied(),
+                    };
+                    match (kind, base) {
+                        (EntryKind::Base(_), _) => Stored::Copied(pack_no),
+                        // A delta against an object that goes in the new pack.
+                        (_, Some(base)) if base != oid && wanted.contains(&base) => {
+                            Stored::CopiedDelta(pack_no, base)
+                        }
+                        // The base stays behind: store the object whole.
+                        _ => Stored::Whole,
+                    }
+                }
+            };
+            plan.insert(oid, stored);
+        }
+        // Copied deltas that lead back to themselves (across packs) cannot
+        // be written in order: one of each cycle is stored whole.
+        for &oid in objects {
+            let mut seen = HashSet::new();
+            let mut current = oid;
+            while let Some(Stored::CopiedDelta(_, base)) = plan.get(&current) {
+                if !seen.insert(current) {
+                    plan.insert(current, Stored::Whole);
+                    break;
+                }
+                current = *base;
+            }
+        }
+
+        // New deltas for the rest.
+        let candidates: Vec<Candidate> = objects
+            .iter()
+            .filter_map(|oid| {
+                let mut candidate = info.remove(oid)?;
+                if let Some(Stored::CopiedDelta(_, base)) = plan.get(oid) {
+                    candidate.reused_base = Some(*base);
+                }
+                Some(candidate)
+            })
+            .collect();
+        let search = DeltaSearch::from_config(&self.config()?)?;
+        let found = find_deltas(&candidates, &search, &mut |oid| {
+            Ok(store.read(oid)?.content)
+        })?;
+        drop(candidates);
+        let new_deltas = found.len();
+        for (oid, delta) in found {
+            plan.insert(oid, Stored::NewDelta(delta));
+        }
+
         let mut writer = PackWriter::create(pack_dir, count)?;
         let mut written: HashMap<Oid, u64> = HashMap::new();
         let mut indexed: Vec<IndexedObject> = Vec::with_capacity(objects.len());
         let mut reused = 0;
-        // Offsets of each old pack's entries, to name OFS_DELTA bases.
-        let mut offsets: HashMap<usize, HashMap<u64, Oid>> = HashMap::new();
-
         for &start in objects {
-            // Follow the delta chain down to an object that is written
-            // already or will be stored whole, then write bottom up.
-            let mut chain: Vec<(Oid, Option<(RawEntry, Oid)>)> = Vec::new();
+            // Bases go before the deltas against them.
+            let mut chain = Vec::new();
             let mut current = start;
             while !written.contains_key(&current) {
-                let found = old.iter().enumerate().find(|(_, p)| p.contains(&current));
-                let Some((pack_no, pack)) = found else {
-                    chain.push((current, None));
-                    break;
-                };
-                let entry = pack
-                    .raw_entry(&current)?
-                    .ok_or_else(|| Error::ObjectNotFound(current.to_hex()))?;
-                let base = match entry.kind {
-                    EntryKind::Base(_) => None,
-                    EntryKind::RefDelta(base) => Some(base),
-                    EntryKind::OfsDelta(offset) => offsets
-                        .entry(pack_no)
-                        .or_insert_with(|| {
-                            pack.index()
-                                .entries()
-                                .iter()
-                                .map(|e| (e.offset, e.oid))
-                                .collect()
-                        })
-                        .get(&offset)
-                        .copied(),
-                };
-                match base {
-                    None => {
-                        // Stored whole: copied as it is.
-                        chain.push((current, Some((entry, current))));
-                        break;
-                    }
-                    // A delta against an object that goes in the new pack.
-                    Some(base)
-                        if wanted.contains(&base)
-                            && base != current
-                            && !chain.iter().any(|(oid, _)| *oid == base) =>
-                    {
-                        chain.push((current, Some((entry, base))));
-                        current = base;
-                    }
-                    Some(_) => {
-                        // The base stays behind: store the object whole.
-                        chain.push((current, None));
-                        break;
-                    }
+                chain.push(current);
+                match plan.get(&current) {
+                    Some(Stored::CopiedDelta(_, base)) => current = *base,
+                    Some(Stored::NewDelta(delta)) => current = delta.base,
+                    _ => break,
                 }
             }
-            for (oid, entry) in chain.into_iter().rev() {
-                if written.contains_key(&oid) {
-                    continue;
-                }
+            for oid in chain.into_iter().rev() {
+                let raw_entry = |pack_no: usize| -> Result<RawEntry> {
+                    old[pack_no]
+                        .raw_entry(&oid)?
+                        .ok_or_else(|| Error::ObjectNotFound(oid.to_hex()))
+                };
                 let mut bytes = Vec::new();
-                match entry {
-                    Some((entry, base)) if base != oid => {
-                        // OFS_DELTA against the base written before it.
-                        let size = usize::try_from(entry.size).map_err(|_| too_large(&oid))?;
-                        bytes.extend(entry_header(6, size));
-                        bytes.extend(ofs_distance(writer.offset - written[&base]));
-                        bytes.extend_from_slice(&entry.compressed);
-                        reused += 1;
-                    }
-                    Some((entry, _)) => {
+                match plan.remove(&oid).expect("every object is planned once") {
+                    Stored::Copied(pack_no) => {
+                        let entry = raw_entry(pack_no)?;
                         let EntryKind::Base(object_type) = entry.kind else {
                             unreachable!("only whole entries are copied as they are")
                         };
@@ -607,7 +718,21 @@ impl Repository {
                         bytes.extend(entry_header(type_code(object_type), size));
                         bytes.extend_from_slice(&entry.compressed);
                     }
-                    None => {
+                    Stored::CopiedDelta(pack_no, base) => {
+                        // OFS_DELTA against the base written before it.
+                        let entry = raw_entry(pack_no)?;
+                        let size = usize::try_from(entry.size).map_err(|_| too_large(&oid))?;
+                        bytes.extend(entry_header(6, size));
+                        bytes.extend(ofs_distance(writer.offset - written[&base]));
+                        bytes.extend_from_slice(&entry.compressed);
+                        reused += 1;
+                    }
+                    Stored::NewDelta(delta) => {
+                        bytes.extend(entry_header(6, delta.data.len()));
+                        bytes.extend(ofs_distance(writer.offset - written[&delta.base]));
+                        bytes.extend(compress(&delta.data));
+                    }
+                    Stored::Whole => {
                         let object = store.read(&oid)?;
                         bytes.extend(entry_header(
                             type_code(object.object_type),
@@ -638,7 +763,7 @@ impl Repository {
             fs::rename(&tmp, &pack_path)?;
             write_file_atomic(&index_path, &write_index(&indexed, &checksum))?;
         }
-        Ok((pack_path, reused))
+        Ok((pack_path, reused, new_deltas))
     }
 
     /// Removes loose objects that `packs` hold, and the fan-out
@@ -782,7 +907,7 @@ impl Repository {
     /// ```
     pub fn prune(&self, older_than: Option<SystemTime>) -> Result<usize> {
         let mut keep: HashSet<Oid> = HashSet::new();
-        self.walk_objects(self.repack_roots()?, &mut keep, false)?;
+        self.walk_objects(self.repack_roots()?, &mut keep, false, None)?;
         let expired = |modified: SystemTime| older_than.map_or(true, |limit| modified < limit);
 
         let objects = self.git_dir().join("objects");
@@ -822,7 +947,7 @@ impl Repository {
             .filter(|(oid, _, modified)| !keep.contains(oid) && !expired(*modified))
             .map(|(oid, _, _)| *oid)
             .collect();
-        self.walk_objects(recent, &mut keep, true)?;
+        self.walk_objects(recent, &mut keep, true, None)?;
 
         let mut removed = 0;
         for (oid, path, modified) in &loose {

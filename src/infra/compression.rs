@@ -148,6 +148,41 @@ pub fn decompress_prefix(data: &[u8], size: usize) -> Result<(Vec<u8>, usize)> {
     Ok((output, consumed))
 }
 
+/// Inflates the start of the zlib stream in `data`: at most `max` bytes,
+/// fewer if the stream ends first. Used to read headers without inflating
+/// whole objects; the rest of the stream is not checked.
+///
+/// # Errors
+///
+/// Returns `Error::DecompressionFailed` if the stream is corrupt or
+/// truncated before `max` bytes.
+pub(crate) fn inflate_head(data: &[u8], max: usize) -> Result<Vec<u8>> {
+    use miniz_oxide::inflate::stream::{inflate, InflateState};
+    use miniz_oxide::{DataFormat, MZFlush, MZStatus};
+
+    let mut state = InflateState::new_boxed(DataFormat::Zlib);
+    let mut output = vec![0u8; max];
+    let mut consumed = 0;
+    let mut written = 0;
+    while written < max {
+        let result = inflate(
+            &mut state,
+            &data[consumed..],
+            &mut output[written..],
+            MZFlush::None,
+        );
+        consumed += result.bytes_consumed;
+        written += result.bytes_written;
+        match result.status {
+            Ok(MZStatus::StreamEnd) => break,
+            Ok(_) if result.bytes_consumed > 0 || result.bytes_written > 0 => {}
+            _ => return Err(Error::DecompressionFailed),
+        }
+    }
+    output.truncate(written);
+    Ok(output)
+}
+
 /// Validates a zlib header.
 ///
 /// A valid zlib header consists of two bytes where:

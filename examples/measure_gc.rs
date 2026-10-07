@@ -159,10 +159,11 @@ fn main() {
     let start = Instant::now();
     let summary = repo.gc().unwrap();
     println!(
-        "gc()       {:.1?}: {} objects in one pack, {} deltas reused, {} loose removed",
+        "gc()       {:.1?}: {} objects in one pack, {} deltas reused, {} new deltas, {} loose removed",
         start.elapsed(),
         summary.repack().objects(),
         summary.repack().reused_deltas(),
+        summary.repack().new_deltas(),
         summary.repack().removed_loose()
     );
     report("after gc()", dir, &repo, commits);

@@ -201,6 +201,7 @@ repo.remote_branches()?;      // リモートブランチ一覧
 repo.tags()?;                 // タグ一覧
 repo.log()?;                  // コミット履歴（Iterator。並び順は LogOptions::order、グラフは Graph）
 repo.reflog("HEAD")?;         // reflog（新しい順）
+repo.describe(&DescribeOptions::new())?; // 最も近いタグからの名前（git describe。v1.0-3-gabc1234）
 repo.log_with_options(opts)?; // フィルタリング付きログ
 repo.status()?;               // ワーキングツリー状態（パスごとに1つの状態）
 repo.detailed_status()?;      // index側・作業ツリー側を別々に（porcelain v2相当）
@@ -624,6 +625,12 @@ Gitと並行して日常的に使えるように、並行性・性能・基本�
 - [x] gc・repack・prune（`gc()`・`gc_auto()`・`repack()`・`prune()`・`pack_refs()`、#63。reflogの期限切れ`reflog_expire()`は#74、新しいdeltaの計算は#75）
 - [x] clean（`clean()`、#64。`-x`・`-X`・`-d`・pathspec・`-n`。ネストしたリポジトリは消さない）
 - [x] logの並び順・グラフ（`LogOrder`・`reverse()`・`Graph`、#65）
+
+### 履歴の調査（v0.11）
+
+- [x] describe（`describe()`・`describe_revision()`・`DescribeOptions`、#77。`--tags`・`--all`・`--long`・`--abbrev`・`--always`・`--first-parent`・`--candidates`・`--match`・`--exclude`・`--dirty`）
+- [ ] mailmap（#77）
+- [ ] blame（#77）
 
 ### 将来の検討事項
 

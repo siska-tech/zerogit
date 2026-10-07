@@ -10,6 +10,7 @@
 - `RepackSummary::new_deltas()`: `repack()`が新しく作ったdeltaの数 (#75)
 - `Repository::pack_objects_with(wants, haves, &PackObjectsOptions)`と`PackObjectsOptions`（`thin`・`ofs_delta`）: `git pack-objects --revs`と同じく、送るpackをdeltaで作る。`thin`では、送るコミットが積み重なる`haves`のコミットのファイルとtreeもdeltaのbaseにする（受け手が補完するthin pack。`--thin`）。`ofs_delta`ではpackの中のbaseをoffsetで示す（`--delta-base-offset`） (#75)
 - `zerogit-remote`: `Transport::push_pack_options()`（既定の実装あり）: pushで送るpackの作り方。Gitのプロトコルではサーバーが`no-thin`を示さなければthin pack、`ofs-delta`を示せばOFS_DELTAにする。ローカルのトランスポートは両方を使う (#75)
+- `Repository::describe(&DescribeOptions)`（HEAD）・`describe_revision(revision, &DescribeOptions)`と`DescribeOptions`・`Description`: `git describe`と同じく、到達できる最も近いタグとそこからのコミット数・短縮OIDでコミットを名付ける（`v1.0-3-gabc1234`、タグの付いたコミットはタグ名だけ）。注釈付きタグ（`tags()`で軽量タグ、`all()`で任意の参照も）、`long()`・`abbrev()`（`core.abbrev`。既定はGitと同じくpackのオブジェクト数から決め、一意になるまで伸ばす）・`always()`・`first_parent()`・`candidates()`・`patterns()`（`--match`）・`exclude()`・`dirty()`（追跡中のファイルの変更があれば接尾辞を付ける）。同じコミットに複数のタグがあれば、注釈付きを優先し、注釈付き同士ではタグ付けの新しいものを使う。`Error::NoDescription`（軽量タグなら名付けられたかを含む） (#77)
 
 ### Changed
 - `gc()`が`git gc`と同じく、`pack_refs()`の後・`repack()`の前にreflogを期限切れにする（`reflog_expire(None, None)`）。reflogからだけ到達できていた古いオブジェクトも、pruneの期限を過ぎれば消える。`gc.*reflogExpire*`の値が不正なら何も変更せずに`Error::InvalidDate`を返す (#74)

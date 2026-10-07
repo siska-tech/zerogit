@@ -247,6 +247,15 @@ pub enum Error {
         /// What is wrong, naming the part of the revision concerned.
         reason: String,
     },
+
+    /// No tag can describe the commit (`Repository::describe`).
+    NoDescription {
+        /// The commit to describe.
+        commit: String,
+        /// Whether lightweight tags would have described it (with
+        /// `DescribeOptions::tags`).
+        unannotated_tags: bool,
+    },
 }
 
 impl fmt::Display for Error {
@@ -359,6 +368,18 @@ impl fmt::Display for Error {
             Error::InvalidRevision { revision, reason } => {
                 write!(f, "invalid revision '{}': {}", revision, reason)
             }
+            Error::NoDescription {
+                commit,
+                unannotated_tags: true,
+            } => write!(
+                f,
+                "no annotated tags can describe '{}'; there are lightweight tags",
+                commit
+            ),
+            Error::NoDescription {
+                commit,
+                unannotated_tags: false,
+            } => write!(f, "no tags can describe '{}'", commit),
             Error::Locked(path) => write!(
                 f,
                 "unable to create '{}': File exists; another process may be using the repository",

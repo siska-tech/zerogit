@@ -322,7 +322,15 @@ fn abort_returns_like_git() {
         }
         assert_eq!(git(o, &["rev-parse", "HEAD"]), before);
         assert_eq!(reflog(o, 4), reflog(t, 4));
-        assert_eq!(state_file(o, "ORIG_HEAD"), state_file(t, "ORIG_HEAD"));
+        // Where the abort came from: in a sequence, the commit each tool
+        // made for the first pick, whose ID depends on when it was made.
+        let orig_head = |dir: &Path| {
+            git(
+                dir,
+                &["log", "-1", "--format=%T %P %an %ae %ad %s", "ORIG_HEAD"],
+            )
+        };
+        assert_eq!(orig_head(o), orig_head(t));
         assert_eq!(
             fs::read_to_string(o.join("shared.txt")).unwrap(),
             "local change\n"

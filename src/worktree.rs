@@ -16,6 +16,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::attributes::{AttrValue, Attributes};
@@ -24,8 +25,8 @@ use crate::eol::{CrlfAction, EolSettings};
 use crate::error::{Error, Result};
 use crate::ignore::IgnoreRules;
 use crate::index::{Index, IndexEntry};
-use crate::infra::{hash_object, write_file_atomic};
-use crate::objects::{tree::FileMode, ObjectStore, Oid};
+use crate::infra::{hash_object, write_file_atomic, write_file_atomic_with};
+use crate::objects::{tree::FileMode, ObjectStore, ObjectType, Oid};
 
 /// The result of walking the working tree.
 #[derive(Debug, Default)]
@@ -55,22 +56,52 @@ impl WorkFile {
 
     /// Builds a stage 0 index entry for this file, with its stat data.
     pub(crate) fn index_entry(&self, path: PathBuf, oid: Oid) -> IndexEntry {
-        let stat = Stat::of(&self.metadata);
-        IndexEntry::new(
-            stat.ctime.0,
-            stat.mtime.0,
-            stat.dev,
-            stat.ino,
-            self.mode,
-            stat.uid,
-            stat.gid,
-            stat.size,
-            oid,
-            path,
-            0,
-        )
-        .with_nanos(stat.ctime.1, stat.mtime.1)
+        index_entry(&self.metadata, self.mode, path, oid)
     }
+}
+
+/// A file of the working tree stored as a blob by [`Worktree::add`].
+#[derive(Debug)]
+pub(crate) struct StoredFile {
+    /// The blob it was stored as.
+    pub(crate) oid: Oid,
+    /// The mode Git records for the file.
+    pub(crate) mode: FileMode,
+    /// The metadata of the file itself (not of a symlink's target).
+    pub(crate) metadata: fs::Metadata,
+}
+
+impl StoredFile {
+    /// Builds a stage 0 index entry for this file, with its stat data.
+    pub(crate) fn index_entry(&self, path: PathBuf) -> IndexEntry {
+        index_entry(&self.metadata, self.mode, path, self.oid)
+    }
+}
+
+/// `core.bigFileThreshold`, by default 512 MiB.
+fn big_file_threshold(config: &Config) -> Result<u64> {
+    if config.get("core", "bigfilethreshold").is_none() {
+        return Ok(512 << 20);
+    }
+    Ok(u64::try_from(config.get_int("core", "bigfilethreshold")?).unwrap_or(0))
+}
+
+fn index_entry(metadata: &fs::Metadata, mode: FileMode, path: PathBuf, oid: Oid) -> IndexEntry {
+    let stat = Stat::of(metadata);
+    IndexEntry::new(
+        stat.ctime.0,
+        stat.mtime.0,
+        stat.dev,
+        stat.ino,
+        mode,
+        stat.uid,
+        stat.gid,
+        stat.size,
+        oid,
+        path,
+        0,
+    )
+    .with_nanos(stat.ctime.1, stat.mtime.1)
 }
 
 fn timestamp(time: Option<std::time::SystemTime>) -> (u64, u32) {
@@ -218,6 +249,9 @@ pub(crate) struct Worktree {
     /// The modification time of the index file when the work tree was
     /// loaded, for the racy-git check; `None` without an index.
     index_mtime: Option<(u64, u32)>,
+    /// `core.bigFileThreshold`: files larger than this that need no
+    /// conversion are streamed when stored or checked out.
+    big_file_threshold: u64,
 }
 
 /// Attributes whose conversions are not implemented.
@@ -256,6 +290,7 @@ impl Worktree {
             index_mtime: fs::metadata(git_dir.join("index"))
                 .ok()
                 .map(|m| timestamp(m.modified().ok())),
+            big_file_threshold: big_file_threshold(config)?,
         })
     }
 
@@ -381,6 +416,52 @@ impl Worktree {
         }
         let content = cleaned.content.into_owned();
         Ok(Some(WorkFile { content, ..file }))
+    }
+
+    /// Stores a file of the working tree as a blob, read as by
+    /// [`Worktree::read`], or returns `None` if it does not exist.
+    ///
+    /// A regular file larger than `core.bigFileThreshold` that needs no
+    /// conversion is hashed and compressed as it is read, as Git does, so it
+    /// is never in memory whole.
+    pub(crate) fn add(
+        &mut self,
+        path: &Path,
+        tracked: Option<&IndexEntry>,
+    ) -> Result<Option<StoredFile>> {
+        let tracked_mode = tracked.map(IndexEntry::mode);
+        if let Some(metadata) = self.metadata(path)?.filter(fs::Metadata::is_file) {
+            let mode = self.file_mode(&metadata, tracked_mode);
+            if self.streams(path, mode, metadata.len())? {
+                let mut file = fs::File::open(self.root.join(path))?;
+                let oid = self
+                    .store
+                    .write_stream(ObjectType::Blob, metadata.len(), &mut file)?;
+                return Ok(Some(StoredFile {
+                    oid,
+                    mode,
+                    metadata,
+                }));
+            }
+        }
+        let Some(file) = self.read(path, tracked)? else {
+            return Ok(None);
+        };
+        let oid = self.store.write(ObjectType::Blob, &file.content)?;
+        Ok(Some(StoredFile {
+            oid,
+            mode: file.mode,
+            metadata: file.metadata,
+        }))
+    }
+
+    /// Whether a blob of `size` bytes at `path` is streamed between the
+    /// object store and the working tree: a file (not a link) larger than
+    /// `core.bigFileThreshold`, with no conversion.
+    fn streams(&mut self, path: &Path, mode: FileMode, size: u64) -> Result<bool> {
+        Ok(mode != FileMode::Symlink
+            && size > self.big_file_threshold
+            && self.conversion(path)? == CrlfAction::Binary)
     }
 
     /// The mode Git would record for the file at `path`, from its metadata
@@ -537,6 +618,43 @@ impl Worktree {
             let action = self.conversion(path)?;
             crate::eol::to_worktree(&self.eol, action, content)
         };
+        self.clear_way(path, mode)?;
+        if mode == FileMode::Symlink && self.symlinks && create_symlink(content, &full).is_ok() {
+            return Ok(());
+        }
+        write_file_atomic(&full, &converted)?;
+        set_executable(&full, mode == FileMode::Executable)?;
+        Ok(())
+    }
+
+    /// Writes the blob `oid` to the working tree, like [`Worktree::write`]
+    /// with its content.
+    ///
+    /// A blob larger than `core.bigFileThreshold` for a file that needs no
+    /// conversion is copied from the object store as it is decompressed,
+    /// so it is never in memory whole.
+    pub(crate) fn write_blob(&mut self, path: &Path, oid: &Oid, mode: FileMode) -> Result<()> {
+        let size = self.store.object_size(oid)?;
+        if !self.streams(path, mode, size)? {
+            let content = self.store.read(oid)?.content;
+            return self.write(path, &content, mode);
+        }
+        let mut reader = self.store.open(oid)?;
+        let full = self.root.join(path);
+        self.clear_way(path, mode)?;
+        write_file_atomic_with(&full, |file| {
+            let mut out = io::BufWriter::with_capacity(64 << 10, file);
+            io::copy(&mut reader, &mut out)?;
+            out.flush()
+        })?;
+        set_executable(&full, mode == FileMode::Executable)?;
+        Ok(())
+    }
+
+    /// Makes way for a file at `path`: creates its directories, and removes
+    /// a directory or link (or, for a link, a file) that is there.
+    fn clear_way(&self, path: &Path, mode: FileMode) -> Result<()> {
+        let full = self.root.join(path);
         if let Some(parent) = full.parent() {
             self.make_dirs(parent)?;
         }
@@ -547,11 +665,6 @@ impl Worktree {
                 fs::remove_file(&full)?;
             }
         }
-        if mode == FileMode::Symlink && self.symlinks && create_symlink(content, &full).is_ok() {
-            return Ok(());
-        }
-        write_file_atomic(&full, &converted)?;
-        set_executable(&full, mode == FileMode::Executable)?;
         Ok(())
     }
 

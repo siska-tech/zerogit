@@ -74,8 +74,16 @@ pub(crate) fn remove_file(path: &Path) -> Result<bool> {
 /// `Ok(())` on success, or an error if the write fails.
 #[allow(dead_code)]
 pub fn write_file_atomic<P: AsRef<Path>>(path: P, data: &[u8]) -> Result<()> {
-    let path = path.as_ref();
+    write_file_atomic_with(path.as_ref(), |file| file.write_all(data))
+}
 
+/// Writes a file atomically like [`write_file_atomic`], its content written
+/// to the temporary file by `fill`, so that it need not be in memory all at
+/// once.
+pub(crate) fn write_file_atomic_with(
+    path: &Path,
+    fill: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
+) -> Result<()> {
     // Create parent directories if they don't exist
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
@@ -107,7 +115,7 @@ pub fn write_file_atomic<P: AsRef<Path>>(path: P, data: &[u8]) -> Result<()> {
             .write(true)
             .create_new(true)
             .open(&temp_path)?;
-        file.write_all(data)?;
+        fill(&mut file)?;
         file.sync_all()?;
         drop(file);
         // Rename temporary file to target (atomic on most filesystems)

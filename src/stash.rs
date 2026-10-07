@@ -229,9 +229,11 @@ impl Repository {
         if !untracked.is_empty() {
             let mut files = Flat::new();
             for path in &untracked {
-                if let Some(file) = worktree.read(path, None)? {
-                    let oid = self.object_store().write(ObjectType::Blob, &file.content)?;
-                    files.insert(path.to_string_lossy().replace('\\', "/"), (oid, file.mode));
+                if let Some(file) = worktree.add(path, None)? {
+                    files.insert(
+                        path.to_string_lossy().replace('\\', "/"),
+                        (file.oid, file.mode),
+                    );
                 }
             }
             let tree = write_tree(self, &files)?;
@@ -435,11 +437,7 @@ impl Repository {
             }
         }
         for (path, (oid, mode)) in &untracked {
-            worktree.write(
-                &native_path(Path::new(path)),
-                &store.read(oid)?.content,
-                *mode,
-            )?;
+            worktree.write_blob(&native_path(Path::new(path)), oid, *mode)?;
         }
         index_lock.write(&idx)?;
         Ok(if conflicts.is_empty() {

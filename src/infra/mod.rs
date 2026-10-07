@@ -6,7 +6,9 @@ pub mod hash;
 pub(crate) mod lock;
 pub(crate) mod time;
 
+pub(crate) use compression::Deflater;
 pub use compression::{compress, decompress, decompress_exact, decompress_prefix};
+pub(crate) use fs::write_file_atomic_with;
 pub use fs::{read_file, write_file_atomic};
 pub use hash::{crc32, hash_object};
 pub(crate) use lock::{write_locked, LockFile};

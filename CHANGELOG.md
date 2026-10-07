@@ -22,6 +22,7 @@
 - `pack_objects()`（push・fetchで送るpack）がdeltaを使う（`repack()`と同じ探索。packにあるdeltaは、baseも送るなら再利用する）。baseはIDで示す（REF_DELTA。どの受け手も読める） (#75)
 - `zerogit-remote`: pushが`git push`と同じくthin packを送る。サーバーにあるファイルを少し変えたpushでは、そのファイルのdeltaだけを送る（約200 KBのファイルの変更で3 KB未満） (#75)
 - マージ（histogram diff）がMyers diffにフォールバックする領域で、よく現れる行を除く条件をGitの出力に合わせた（行自身の数え方の誤り）(#77)
+- `core.bigFileThreshold`（既定512 MiB）より大きく、変換（改行コード・`text`属性）のないファイルを、Gitと同じくストリームで扱う。`add()`・`add_all()`・`stash_save()`（未追跡ファイル）は読みながらハッシュと圧縮をしてlooseオブジェクトに書き、`checkout()`・`restore()`・マージ・`stash_apply()`は展開しながら作業ツリーに書くため、メモリ使用量はファイルの大きさによらない（1.1 GBのファイルで、add・restore・checkoutのヒープ使用量のピークは0.5 MB以下）。読む間にファイルの大きさが変わればエラーにし、何も書かない。変換のあるファイルとシンボリックリンクは従来どおりメモリ上で扱う (#78)
 
 ### Development
 - `src/repository.rs`（3,785行）を機能ごとのモジュールに分けた（約1,000行に）。オブジェクトの読み取り（`object_access.rs`）、ステージング（`staging.rs`）、checkout（`checkout.rs`）、ブランチ・タグ（`refs/branch_ops.rs`・`refs/tag_ops.rs`）、参照の更新の共通処理（`refs/update.rs`）、log（`log.rs`）、status（`status.rs`）、commitとtreeの作成（`commit.rs`）、reflog（`refs/reflog.rs`）。公開API（名前・シグネチャ・ドキュメントとそのパス）は変わらない (#76)

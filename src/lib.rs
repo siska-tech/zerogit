@@ -92,7 +92,7 @@ pub use reset::ResetMode;
 pub use objects::{Blob, Commit, FileMode, Object, Oid, Signature, Tree, TreeEntry};
 
 // Re-export reference types
-pub use refs::{Branch, Head, ReflogEntry, RemoteBranch, Tag};
+pub use refs::{Branch, Head, ReflogEntry, ReflogExpiry, RemoteBranch, Tag};
 
 // Re-export status types
 pub use status::{

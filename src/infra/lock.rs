@@ -64,11 +64,18 @@ impl LockFile {
         Ok(())
     }
 
+    /// Flushes what was written and closes the lock file, keeping the lock,
+    /// so that many locks can be held at once. Nothing more can be written.
+    pub(crate) fn close(&mut self) -> Result<()> {
+        if let Some(file) = self.file.take() {
+            file.sync_all()?;
+        }
+        Ok(())
+    }
+
     /// Replaces the file with what was written and releases the lock.
     pub(crate) fn commit(mut self) -> Result<()> {
-        let file = self.file.take().expect("lock file is open until commit");
-        file.sync_all()?;
-        drop(file);
+        self.close()?;
         fs::rename(&self.lock_path, &self.path)?;
         // Renamed away: nothing for drop to clean up.
         self.lock_path = PathBuf::new();

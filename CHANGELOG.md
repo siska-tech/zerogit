@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+### Added
+- `Repository::reflog_expire(expire, expire_unreachable)`と`ReflogExpiry`（`Never`・`Before(time)`・`All`、`ReflogExpiry::parse()`）: `git reflog expire --all`と同じく、`.git/logs/`のすべてのreflogから古いエントリを消し、消した数を返す。`expire`より古いエントリと、`expire_unreachable`より古く、古い値か新しい値が参照の現在の値から到達できないコミットのエントリを消す（HEADは`refs/`のどの参照からも到達できないもの。注釈付きタグはコミットまでたどり、コミットでない・存在しないオブジェクトは到達可能とみなす）。`None`は設定から取る: 参照に最初に一致する`gc.<pattern>.reflogExpire`・`gc.<pattern>.reflogExpireUnreachable`（`*`は`/`にも一致。パターンに設定のないほうは期限なし）、なければ`gc.reflogExpire`・`gc.reflogExpireUnreachable`（既定90日・30日）。パターンに一致しない`refs/stash`は期限切れにしない。値は`never`・`now`（`all`。未来の日時のエントリも含む）・`90.days.ago`・日時。Gitの既定（`--rewrite`なし）と同じく、残るエントリはそのまま保ち、空になったreflogは空のファイルとして残す。参照のロックとreflogのロックをGitと同じく取り、すべてのロックを取ってから書き換えるので、ロックされていれば（`Error::Locked`）何も変更しない (#74)
+
+### Changed
+- `gc()`が`git gc`と同じく、`pack_refs()`の後・`repack()`の前にreflogを期限切れにする（`reflog_expire(None, None)`）。reflogからだけ到達できていた古いオブジェクトも、pruneの期限を過ぎれば消える。`gc.*reflogExpire*`の値が不正なら何も変更せずに`Error::InvalidDate`を返す (#74)
+
+### Notes
+- Git 2.55で確認したところ、`gc.reflogExpire`・`gc.reflogExpireUnreachable`がどちらも未設定の場合、`git reflog expire`は文書と異なり、到達可能なエントリも30日で消した。zerogitは文書どおりの既定（90日・30日）を使う。両方を設定するか`--expire`・`--expire-unreachable`を指定した場合の結果は一致する (#74)
+
 ## [0.9.0] - 2026-10-06
 
 日常の操作をさらにそろえた: cherry-pick・revert、gc・repack・prune・pack-refs、clean、logの並び順（`--date-order`・`--topo-order`・`--reverse`）と`git log --graph`の列の割り当て。`zerogit-remote`は0.5.0として、zerogit 0.9に追従する。

@@ -245,7 +245,7 @@ repo.create_annotated_tag(name, target, msg, tagger, email)?; // 注釈付きタ
 repo.delete_tag(name)?;                   // タグ削除
 repo.pack_refs()?;                        // 参照をpacked-refsにまとめる（git pack-refs --all）
 repo.repack()?;                           // 到達可能なオブジェクトを1つのpackに（git repack -a -d）
-repo.gc()?;                               // pack-refs・repack・prune（git gc。gc_auto()は必要なときだけ）
+repo.gc()?;                               // pack-refs・reflog expire・repack・prune（git gc。gc_auto()は必要なときだけ）
 repo.merge(target, name, email, &MergeOptions::new())?; // マージ（ff・3-way）
 repo.abort_merge()?;                      // マージの中止
 repo.merge_base(&a, &b)?;                 // 共通祖先
@@ -483,8 +483,10 @@ use zerogit::{Repository, Result};
 fn main() -> Result<()> {
     let repo = Repository::discover(".")?;
 
-    // 参照をpacked-refsに、到達可能なオブジェクトを1つのpackにまとめ、
-    // 期限（gc.pruneExpire、既定は2週間）を過ぎた到達できないオブジェクトを消す
+    // 参照をpacked-refsにまとめ、古いreflogのエントリを消し（gc.reflogExpire・
+    // gc.reflogExpireUnreachable、既定は90日・30日）、到達可能なオブジェクトを
+    // 1つのpackにまとめ、期限（gc.pruneExpire、既定は2週間）を過ぎた到達できない
+    // オブジェクトを消す
     let summary = repo.gc()?;
     println!("{} objects packed, {} pruned", summary.repack().objects(), summary.pruned());
 
@@ -554,7 +556,7 @@ zerogitで2,000コミット（各3ファイルの変更）を書いた履歴で�
 | オブジェクト格納 | loose、pack v2/v3（idx v2）。idx v1・multi-pack-index・commit-graph・bitmapは使用しない（packの`.idx`を直接読む） |
 | 参照 | loose refs、`packed-refs`。reftableは`Error::UnsupportedRepositoryFormat` |
 | index | v2/v3/v4（読んだバージョンで書き戻す）。split index・sparse indexは`Error::UnsupportedIndex`。sparse checkout（skip-worktree）中の全体reset・mixed reset・checkoutは未対応 |
-| 未対応 | merge時のディレクトリのリネーム検出（ファイルのリネームは追従する）、対話的rebaseの`exec`・`break`・`label`・`reset`・`merge`、マージコミットのcherry-pick・revert（`-m`）、repack・gcでの新しいdeltaの計算（既存のpackのdeltaは再利用する）とreflogの期限切れ、worktree、shallow/partial clone、alternates |
+| 未対応 | merge時のディレクトリのリネーム検出（ファイルのリネームは追従する）、対話的rebaseの`exec`・`break`・`label`・`reset`・`merge`、マージコミットのcherry-pick・revert（`-m`）、repack・gcでの新しいdeltaの計算（既存のpackのdeltaは再利用する）、worktree、shallow/partial clone、alternates |
 | 差分の結果 | `Text`（完全な行差分）、`NonText`（NULを含む・不正UTF-8。暗黙の置換はしない）、`Skipped`（サイズ・計算量の上限超過。部分結果は返さない） |
 | リネーム検出 | 既定は完全一致のみ。類似度検出（任意）は通常・実行ファイルのテキストが対象で、類似度は「共通する行のバイト数 ÷ 大きい方のサイズ」。既定しきい値50%、候補ペア10万組、1ファイル1 MiBまで。上限に達した分は追加・削除のまま残り、`TreeDiff::rename_limits()`で識別できる |
 | パス | `DiffDelta::path()`はプラットフォームの`PathBuf`（Windowsでは`\`区切り）。比較は`Path`同士で行う |
@@ -619,7 +621,7 @@ Gitと並行して日常的に使えるように、並行性・性能・基本�
 ### 日常の操作をさらにそろえる（v0.10）✅
 
 - [x] cherry-pick・revert（`cherry_pick()`・`revert()`、#62）
-- [x] gc・repack・prune（`gc()`・`gc_auto()`・`repack()`・`prune()`・`pack_refs()`、#63。新しいdeltaの計算とreflogの期限切れは対象外）
+- [x] gc・repack・prune（`gc()`・`gc_auto()`・`repack()`・`prune()`・`pack_refs()`、#63。reflogの期限切れ`reflog_expire()`は#74。新しいdeltaの計算は対象外）
 - [x] clean（`clean()`、#64。`-x`・`-X`・`-d`・pathspec・`-n`。ネストしたリポジトリは消さない）
 - [x] logの並び順・グラフ（`LogOrder`・`reverse()`・`Graph`、#65）
 

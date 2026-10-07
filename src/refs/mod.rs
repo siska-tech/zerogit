@@ -11,7 +11,7 @@ mod update;
 
 pub use branch::{Branch, BranchList};
 pub use head::Head;
-pub use reflog::ReflogEntry;
+pub use reflog::{ReflogEntry, ReflogExpiry};
 pub use remote_branch::RemoteBranch;
 pub use resolver::{RefStore, RefValue, ResolvedRef};
 pub use tag::Tag;

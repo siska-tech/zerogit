@@ -8,7 +8,8 @@
 //! reachable object into one pack, as `git repack -a -d` does, so objects
 //! written loose one by one do not pile up. [`Repository::prune`] removes
 //! unreachable loose objects once they expire. [`Repository::gc`] runs the
-//! three, and [`Repository::gc_auto`] runs it only when there are many
+//! three after expiring old reflog entries
+//! ([`Repository::reflog_expire`]), and [`Repository::gc_auto`] runs it only when there are many
 //! loose objects or packs, as `git gc --auto` does.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -692,7 +693,7 @@ impl GcSummary {
 
 /// How long unreachable objects are kept (`gc.pruneExpire`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Expire {
+pub(crate) enum Expire {
     /// Never prune.
     Never,
     /// Prune objects last written before this time.
@@ -702,7 +703,7 @@ enum Expire {
 /// Parses an expiry date as Git's `gc.pruneExpire` takes it: `now`,
 /// `never`, a relative date such as `2.weeks.ago` or `3 days ago`, or an
 /// absolute date (see `infra::time::parse_git_date`).
-fn parse_expire(value: &str, now: SystemTime) -> Result<Expire> {
+pub(crate) fn parse_expire(value: &str, now: SystemTime) -> Result<Expire> {
     let text = value.trim().to_ascii_lowercase();
     match text.as_str() {
         "never" | "false" => return Ok(Expire::Never),
@@ -838,22 +839,26 @@ impl Repository {
     }
 
     /// Cleans up the repository like `git gc`: packs the references
-    /// ([`Repository::pack_refs`]), repacks the objects
+    /// ([`Repository::pack_refs`]), expires old reflog entries
+    /// ([`Repository::reflog_expire`] with `gc.reflogExpire` and
+    /// `gc.reflogExpireUnreachable`), repacks the objects
     /// ([`Repository::repack`]) and prunes unreachable loose objects older
     /// than `gc.pruneExpire` ([`Repository::prune`]; by default two weeks,
-    /// `now` for all, `never` to keep them).
+    /// `now` for all, `never` to keep them). Objects that only expired
+    /// reflog entries reached are thus pruned too, once old enough.
     ///
-    /// Unlike `git gc`, reflogs are not expired, so objects reachable only
-    /// from old reflog entries are kept, and unreachable objects are kept
-    /// as loose objects rather than in a cruft pack. A `gc.pid.lock` file
-    /// is held meanwhile, so `git gc` does not start at the same time.
+    /// Unlike `git gc`, unreachable objects are kept as loose objects
+    /// rather than in a cruft pack. A `gc.pid.lock` file is held meanwhile,
+    /// so `git gc` does not start at the same time.
     ///
     /// # Errors
     ///
     /// - `Error::Locked` if `gc.pid` or `packed-refs` is locked (another gc
-    ///   is starting).
-    /// - `Error::InvalidDate` if `gc.pruneExpire` cannot be parsed.
-    /// - The errors of [`Repository::repack`] and [`Repository::prune`].
+    ///   is starting), or a reference or reflog is (no reflog is changed).
+    /// - `Error::InvalidDate` if `gc.pruneExpire` or a `gc.*reflogExpire*`
+    ///   setting cannot be parsed; nothing is changed.
+    /// - The errors of [`Repository::reflog_expire`], [`Repository::repack`]
+    ///   and [`Repository::prune`].
     ///
     /// # Examples
     ///
@@ -869,8 +874,12 @@ impl Repository {
             Some(value) => parse_expire(value, SystemTime::now())?,
             None => parse_expire("2.weeks.ago", SystemTime::now())?,
         };
+        // Check the reflog settings before changing anything.
+        crate::refs::reflog::check_expiry_config(&self.config()?)?;
         let _lock = LockFile::acquire(self.git_dir().join("gc.pid"))?;
+        // In Git's order: references, reflogs, then objects.
         self.pack_refs()?;
+        self.reflog_expire(None, None)?;
         let repack = self.repack()?;
         let pruned = match expire {
             Expire::Never => 0,

@@ -309,7 +309,14 @@ enum Wild {
 /// `WM_PATHNAME`: `*` and `?` do not match `/`, `**` between slashes matches
 /// any number of directories.
 pub(crate) fn wildmatch(pattern: &[u8], text: &[u8], icase: bool) -> bool {
-    dowild(pattern, text, icase) == Wild::Match
+    dowild(pattern, text, icase, true) == Wild::Match
+}
+
+/// Matches `text` against a glob the way Git's `wildmatch` does without
+/// `WM_PATHNAME` (as for `gc.<pattern>.reflogExpire`): `*`, `?` and
+/// brackets match `/` too, and `**` is the same as `*`.
+pub(crate) fn wildmatch_any(pattern: &[u8], text: &[u8]) -> bool {
+    dowild(pattern, text, false, false) == Wild::Match
 }
 
 fn fold(c: u8, icase: bool) -> u8 {
@@ -320,7 +327,7 @@ fn fold(c: u8, icase: bool) -> u8 {
     }
 }
 
-fn dowild(pattern: &[u8], text: &[u8], icase: bool) -> Wild {
+fn dowild(pattern: &[u8], text: &[u8], icase: bool, pathname: bool) -> Wild {
     let mut p = 0;
     let mut t = 0;
     while p < pattern.len() {
@@ -341,14 +348,20 @@ fn dowild(pattern: &[u8], text: &[u8], icase: bool) -> Wild {
                 }
             }
             b'?' => {
-                if text[t] == b'/' {
+                if pathname && text[t] == b'/' {
                     return Wild::NoMatch;
                 }
             }
             b'*' => {
                 let match_slash;
                 p += 1;
-                if pattern.get(p) == Some(&b'*') {
+                if !pathname {
+                    // Without WM_PATHNAME, "*" is the same as "**".
+                    while pattern.get(p) == Some(&b'*') {
+                        p += 1;
+                    }
+                    match_slash = true;
+                } else if pattern.get(p) == Some(&b'*') {
                     let prev_is_boundary = p < 2 || pattern[p - 2] == b'/';
                     while pattern.get(p) == Some(&b'*') {
                         p += 1;
@@ -360,7 +373,7 @@ fn dowild(pattern: &[u8], text: &[u8], icase: bool) -> Wild {
                     if prev_is_boundary && next_is_boundary {
                         // "**/" may match no directory at all.
                         if next == Some(b'/')
-                            && dowild(&pattern[p + 1..], &text[t..], icase) == Wild::Match
+                            && dowild(&pattern[p + 1..], &text[t..], icase, pathname) == Wild::Match
                         {
                             return Wild::Match;
                         }
@@ -391,7 +404,7 @@ fn dowild(pattern: &[u8], text: &[u8], icase: bool) -> Wild {
                     }
                 }
                 while t < text.len() {
-                    match dowild(&pattern[p..], &text[t..], icase) {
+                    match dowild(&pattern[p..], &text[t..], icase, pathname) {
                         Wild::NoMatch => {
                             if !match_slash && text[t] == b'/' {
                                 return Wild::AbortToStarStar;
@@ -406,7 +419,7 @@ fn dowild(pattern: &[u8], text: &[u8], icase: bool) -> Wild {
             }
             b'[' => {
                 let t_ch = text[t];
-                if t_ch == b'/' {
+                if pathname && t_ch == b'/' {
                     return Wild::NoMatch;
                 }
                 match match_bracket(pattern, p, t_ch, icase) {
@@ -565,6 +578,21 @@ mod tests {
         assert!(!wm("a[]-]b", "aab"));
         assert!(wm("a[]a-]b", "aab"));
         assert!(wm("]", "]"));
+    }
+
+    // Cases from Git's t/t3070-wildmatch.sh (without WM_PATHNAME).
+    #[test]
+    fn test_wildmatch_any_matches_slashes() {
+        let wm = |pattern: &str, text: &str| wildmatch_any(pattern.as_bytes(), text.as_bytes());
+        assert!(wm("foo*bar", "foo/baz/bar"));
+        assert!(wm("foo**bar", "foo/baz/bar"));
+        assert!(wm("foo/**/bar", "foo/baz/bar"));
+        assert!(!wm("foo/**/bar", "foo/bar"));
+        assert!(wm("foo?bar", "foo/bar"));
+        assert!(wm("foo[/]bar", "foo/bar"));
+        assert!(!wm("**/foo", "foo"));
+        assert!(wm("refs/remotes/*", "refs/remotes/origin/main"));
+        assert!(!wm("refs/heads/*", "refs/tags/v1"));
     }
 
     #[test]

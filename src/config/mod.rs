@@ -347,6 +347,19 @@ impl Config {
             .unwrap_or_default()
     }
 
+    /// Every value of `section` in the order read, as (subsection, key,
+    /// value) with the key lowercased; later values override earlier ones.
+    pub(crate) fn section_in_order<'a>(
+        &'a self,
+        section: &str,
+    ) -> impl Iterator<Item = (&'a str, &'a str, &'a str)> + 'a {
+        let section_lower = section.to_lowercase();
+        self.all
+            .iter()
+            .filter(move |(s, _, _, _)| *s == section_lower)
+            .map(|(_, sub, key, value)| (sub.as_str(), key.as_str(), value.as_str()))
+    }
+
     /// Sets a configuration value (internal use for building).
     pub(crate) fn set(&mut self, section: &str, subsection: &str, key: &str, value: &str) {
         let section_lower = section.to_lowercase();

@@ -111,3 +111,53 @@ missing from the new file is set aside under `--minimal` as well).
 
 The flip at `d = 77` matches a window of 100 lines: 3 + 76 unmatched
 lines against `3 * (2 + 24)` once 24 frequent lines are within reach.
+
+## 3. Where a group of changed lines that could sit in several places goes
+
+### Probe
+
+A slice of a short file of indented and blank lines is repeated right
+after itself, so that the inserted group can sit in several places
+("slide"); `git diff -U0` shows where Git puts it. `src/diff/slider_research.rs`
+generates such cases, records every position the group could take with
+what surrounds its two boundaries (the line at the boundary, the blank
+lines before and after it, the indentation of the nearest non-blank lines
+before and after), and fits a rule to Git's choices.
+
+### Results
+
+- In 3,000 cases, the group is never put more than its own size plus one
+  line above its lowest position, although it could often go higher.
+- A rule that scores each boundary with additive penalties cannot
+  explain all choices (at best 95%); one where positions are compared in
+  turn, from the highest down, each replacing the best so far unless it
+  is worse, and where indentation only counts by which of two positions
+  has the more indented boundaries, explains all 3,000. The same rule,
+  unchanged, explains 2,998 of 3,000 new cases (another random seed), and
+  after refitting all 6,000 of both sets together.
+
+### Conclusion
+
+For each position, its two boundaries (just before the group's first
+line, and just after its last) are described by: the indentation of the
+first non-blank line at or after the boundary (or after the next blank
+lines), the indentation of the nearest non-blank line before, the blank
+lines before and after, and whether the boundary is at the start or the
+end of the file. Two positions compare by `150 * sign(difference of the
+summed indentation)` plus the difference of their summed penalties:
+
+| Penalty, per boundary | Weight |
+|---|---|
+| no line before it (start of the file) | 6 |
+| at the end of the file | -6 |
+| blank lines around it | -75 each |
+| of those, blank lines from it onwards | 15 each |
+| indented further than the line before, no blank lines | -9 |
+| indented further, with blank lines | 25 |
+| indented less, no blank lines | 56 |
+| indented less, with blank lines | 41 |
+| indented less, and the line after is indented further | 3 more |
+
+These weights are one point of the region that fits all observations
+(fitted with a perceptron, then a local search over integer weights);
+other points fit as well, so the compatibility tests are the final check.

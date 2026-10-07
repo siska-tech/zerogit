@@ -17,6 +17,8 @@ pub mod blob;
 mod compat_tests;
 pub(crate) mod histogram;
 pub mod rename;
+#[cfg(test)]
+mod slider_research;
 
 use crate::Repository;
 pub use blob::{

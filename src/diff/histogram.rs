@@ -58,15 +58,29 @@ fn diff_lines_with<'a>(old: &[&'a [u8]], new: &[&'a [u8]], rediff: bool) -> Vec<
     };
     let a: Vec<u32> = old.iter().map(|l| intern(l)).collect();
     let b: Vec<u32> = new.iter().map(|l| intern(l)).collect();
-    diff_ids(&a, &b, rediff)
+    diff_ids(&a, &b, rediff, None)
 }
 
-fn diff_ids(a: &[u32], b: &[u32], rediff: bool) -> Vec<Hunk> {
+fn diff_ids(a: &[u32], b: &[u32], rediff: bool, indents: Option<(&[i32], &[i32])>) -> Vec<Hunk> {
     let mut a_changed = vec![false; a.len()];
     let mut b_changed = vec![false; b.len()];
     histogram(a, b, &mut a_changed, &mut b_changed);
-    compact(a, &mut a_changed, b, &mut b_changed, rediff);
-    compact(b, &mut b_changed, a, &mut a_changed, rediff);
+    compact(
+        a,
+        &mut a_changed,
+        b,
+        &mut b_changed,
+        rediff,
+        indents.map(|i| i.0),
+    );
+    compact(
+        b,
+        &mut b_changed,
+        a,
+        &mut a_changed,
+        rediff,
+        indents.map(|i| i.1),
+    );
     hunks(&a_changed, &b_changed)
 }
 
@@ -529,6 +543,7 @@ fn compact(
     other_lines: &[u32],
     other_changed: &mut [bool],
     rediff: bool,
+    indents: Option<&[i32]>,
 ) {
     let mut other_gaps = gaps(other_changed);
     let other_nonempty =
@@ -596,6 +611,15 @@ fn compact(
                 end -= 1;
                 gap -= 1;
             }
+        } else if let Some(indents) = indents {
+            let target = placement(indents, earliest_end, end, end - start);
+            while end > target {
+                changed[start - 1] = true;
+                changed[end - 1] = false;
+                start -= 1;
+                end -= 1;
+                gap -= 1;
+            }
         }
         if rediff && other_nonempty(&other_gaps, gap) && (start, end) != original {
             let (o_start, o_end) = other_gaps[gap];
@@ -633,6 +657,102 @@ fn gaps(changed: &[bool]) -> Vec<(usize, usize)> {
     }
     result.push((start, changed.len()));
     result
+}
+
+/// The indentation of a line in columns (a tab moves to the next multiple
+/// of 8), or -1 for a blank line (only spaces, tabs and line endings).
+pub(crate) fn line_indent(line: &[u8]) -> i32 {
+    let mut columns = 0;
+    for &byte in line {
+        match byte {
+            b' ' => columns += 1,
+            b'\t' => columns += 8 - columns % 8,
+            b'\n' | b'\r' => {}
+            _ => return columns,
+        }
+    }
+    -1
+}
+
+/// What decides where a group goes (`docs/diff-compat-research.md`,
+/// finding 3): for each boundary, an indentation, and penalties.
+#[derive(Clone, Copy, Default)]
+struct PlacementScore {
+    indent: i32,
+    penalty: i32,
+}
+
+impl PlacementScore {
+    /// Adds the boundary just before line `s` of a side whose lines have
+    /// the indentations `indents` (-1 for blank lines).
+    fn add_boundary(&mut self, indents: &[i32], s: usize) {
+        let at_end = s >= indents.len();
+        let at = if at_end { -1 } else { indents[s] };
+        let before = &indents[..s.min(indents.len())];
+        let pre_blank = before.iter().rev().take_while(|&&i| i == -1).count() as i32;
+        let pre = before
+            .iter()
+            .rev()
+            .copied()
+            .find(|&i| i != -1)
+            .unwrap_or(-1);
+        let rest = indents.get(s + 1..).unwrap_or(&[]);
+        let post_blank = rest.iter().take_while(|&&i| i == -1).count() as i32;
+        let post = rest.iter().copied().find(|&i| i != -1).unwrap_or(-1);
+
+        let blank_at = !at_end && at == -1;
+        let after_blank = if blank_at { 1 + post_blank } else { 0 };
+        let blanks = pre_blank + after_blank;
+        let indent = if at != -1 { at } else { post };
+        self.indent += indent;
+
+        let mut penalty = -75 * blanks + 15 * after_blank;
+        if pre == -1 && pre_blank == 0 {
+            penalty += 6;
+        }
+        if at_end {
+            penalty -= 6;
+        }
+        if indent != -1 && pre != -1 {
+            if indent > pre {
+                penalty += if blanks > 0 { 25 } else { -9 };
+            } else if indent < pre {
+                penalty += if blanks > 0 { 41 } else { 56 };
+                if blanks == 0 && post != -1 && post > indent {
+                    penalty += 3;
+                }
+            }
+        }
+        self.penalty += penalty;
+    }
+
+    /// Negative when `self` is the better position.
+    fn compare(&self, other: &PlacementScore) -> i32 {
+        150 * (self.indent - other.indent).signum() + self.penalty - other.penalty
+    }
+}
+
+/// Where a group of `size` changed lines ending at `end` (its lowest
+/// position), which could also end anywhere from `earliest_end` on, is
+/// placed: positions from the highest Git considers (at most `size + 1`
+/// lines up) down to `end` are compared in turn, each replacing the best
+/// so far unless it is worse. Returns the chosen end.
+fn placement(indents: &[i32], earliest_end: usize, end: usize, size: usize) -> usize {
+    let highest = earliest_end.max(end.saturating_sub(size + 1));
+    let score = |e: usize| {
+        let mut score = PlacementScore::default();
+        score.add_boundary(indents, e - size);
+        score.add_boundary(indents, e);
+        score
+    };
+    let mut best = (highest, score(highest));
+    for e in highest + 1..=end {
+        let s = score(e);
+        if s.compare(&best.1) <= 0 {
+            best = (e, s);
+        }
+    }
+    best.0
 }
 
 /// Collects the changed regions of both sides into hunks.
@@ -700,20 +820,36 @@ pub(crate) fn diff_bytes<'a>(old: &'a [u8], new: &'a [u8], algorithm: Algorithm)
         Algorithm::Histogram => (old, new),
     };
     let (old_lines, new_lines) = (split_lines(old), split_lines(new));
+    let mut ids: HashMap<&'a [u8], u32> = HashMap::new();
+    let mut intern = |line: &'a [u8]| -> u32 {
+        let next = ids.len() as u32;
+        *ids.entry(line).or_insert(next)
+    };
+    let a: Vec<u32> = old_lines.iter().map(|l| intern(l)).collect();
+    let b: Vec<u32> = new_lines.iter().map(|l| intern(l)).collect();
+    let a_indents: Vec<i32> = old_lines.iter().map(|l| line_indent(l)).collect();
+    let b_indents: Vec<i32> = new_lines.iter().map(|l| line_indent(l)).collect();
     match algorithm {
-        Algorithm::Histogram => diff_lines(&old_lines, &new_lines),
+        Algorithm::Histogram => diff_ids(&a, &b, true, Some((&a_indents, &b_indents))),
         Algorithm::Myers | Algorithm::Minimal => {
-            let mut ids: HashMap<&'a [u8], u32> = HashMap::new();
-            let mut intern = |line: &'a [u8]| -> u32 {
-                let next = ids.len() as u32;
-                *ids.entry(line).or_insert(next)
-            };
-            let a: Vec<u32> = old_lines.iter().map(|l| intern(l)).collect();
-            let b: Vec<u32> = new_lines.iter().map(|l| intern(l)).collect();
             let minimal = algorithm == Algorithm::Minimal;
             let (mut a_changed, mut b_changed) = classic_diff_with(&a, &b, minimal);
-            compact(&a, &mut a_changed, &b, &mut b_changed, false);
-            compact(&b, &mut b_changed, &a, &mut a_changed, false);
+            compact(
+                &a,
+                &mut a_changed,
+                &b,
+                &mut b_changed,
+                false,
+                Some(&a_indents),
+            );
+            compact(
+                &b,
+                &mut b_changed,
+                &a,
+                &mut a_changed,
+                false,
+                Some(&b_indents),
+            );
             hunks(&a_changed, &b_changed)
         }
     }

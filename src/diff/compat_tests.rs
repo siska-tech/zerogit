@@ -38,7 +38,7 @@ fn flag(algorithm: Algorithm) -> &'static str {
 }
 
 /// `git diff --no-index -U0` of two files, as hunk headers.
-fn git_headers(dir: &Path, old: &str, new: &str, algorithm: Algorithm) -> Vec<String> {
+pub(super) fn git_headers(dir: &Path, old: &str, new: &str, algorithm: Algorithm) -> Vec<String> {
     let output = Command::new("git")
         .current_dir(dir)
         .args(["-c", "core.autocrlf=false", "diff", "--no-index", "-U0"])
@@ -128,10 +128,10 @@ fn fixtures_match_git_histogram() {
 }
 
 /// A xorshift generator, so that every run uses the same cases.
-struct Rng(u64);
+pub(super) struct Rng(pub(super) u64);
 
 impl Rng {
-    fn below(&mut self, n: u64) -> u64 {
+    pub(super) fn below(&mut self, n: u64) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;

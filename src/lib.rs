@@ -49,6 +49,7 @@
 //! - [`status`] - Working tree status
 
 pub(crate) mod attributes;
+pub(crate) mod checkout;
 pub mod cherry_pick;
 pub mod clean;
 pub mod commit;
@@ -61,6 +62,7 @@ pub(crate) mod ignore;
 pub mod index;
 pub mod log;
 pub mod merge;
+pub(crate) mod object_access;
 pub mod objects;
 pub(crate) mod pack_builder;
 pub mod path_ops;
@@ -71,6 +73,7 @@ pub mod remote;
 pub mod repository;
 pub mod reset;
 pub mod revision;
+pub(crate) mod staging;
 pub mod stash;
 pub mod status;
 pub mod transfer;

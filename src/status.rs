@@ -7,9 +7,10 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::index::{Index, IndexEntry};
+use crate::index::{self, Index, IndexEntry};
 use crate::infra::{hash_object, read_file};
 use crate::objects::{tree::FileMode, LooseObjectStore, ObjectStore, ObjectType, Oid, Tree};
+use crate::repository::Repository;
 use crate::worktree::Worktree;
 
 /// The status of a file in the working tree, as reported by
@@ -640,6 +641,232 @@ pub(crate) fn compute_detailed_status(
             })
     });
     Ok(entries)
+}
+
+impl Repository {
+    /// Returns the status of the working tree.
+    ///
+    /// This compares HEAD, the index, and the working tree to detect:
+    /// - Untracked files (new files not in Git)
+    /// - Modified files (changed since last staged)
+    /// - Deleted files (removed from working tree)
+    /// - Staged changes (added/modified/deleted in index)
+    ///
+    /// Each path gets a single [`FileStatus`], so staged and unstaged
+    /// changes are merged by these rules:
+    ///
+    /// | Situation | Reported as |
+    /// | --- | --- |
+    /// | Staged and unstaged changes (`MM`) | `Modified` |
+    /// | Staged new file, then edited (`AM`) | `Added` |
+    /// | Staged new file, then deleted from the work tree (`AD`) | `Deleted` |
+    /// | Intent-to-add file (`git add -N`, `.A`) | `Added` |
+    /// | Removed from the index while the file still exists (`D.` + `??`) | `StagedDeleted` |
+    /// | Unresolved merge conflict (`UU`, `AA`, ...) | `Modified` |
+    /// | Type change between file and symlink (`T`) | `Modified` / `StagedModified` |
+    ///
+    /// Use [`Repository::detailed_status`] to get both sides separately, as
+    /// `git status --porcelain=v2` does.
+    ///
+    /// # Returns
+    ///
+    /// A vector of `StatusEntry` representing all files with changes.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::repository::Repository;
+    /// use zerogit::status::FileStatus;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// for entry in repo.status().unwrap() {
+    ///     match entry.status() {
+    ///         FileStatus::Untracked => println!("?? {}", entry.path().display()),
+    ///         FileStatus::Modified => println!(" M {}", entry.path().display()),
+    ///         FileStatus::Deleted => println!(" D {}", entry.path().display()),
+    ///         FileStatus::Added => println!("A  {}", entry.path().display()),
+    ///         FileStatus::StagedModified => println!("M  {}", entry.path().display()),
+    ///         FileStatus::StagedDeleted => println!("D  {}", entry.path().display()),
+    ///     }
+    /// }
+    /// ```
+    pub fn status(&self) -> Result<Vec<StatusEntry>> {
+        let store = self.object_store();
+
+        // An unborn branch has no tree; a missing/corrupt commit is an error.
+        let head_tree_oid = self.head_tree_oid()?;
+
+        // Read and parse index (if exists)
+        let index_path = self.git_dir.join("index");
+        let parsed_index = if index_path.exists() {
+            let index_data = read_file(&index_path)?;
+            Some(index::parse(&index_data)?)
+        } else {
+            None
+        };
+
+        compute_status_with_store(
+            &store,
+            head_tree_oid.as_ref(),
+            parsed_index.as_ref(),
+            &mut self.worktree()?,
+        )
+    }
+
+    /// Returns the status of every changed path with the index side and the
+    /// work tree side reported separately, like `git status --porcelain=v2`.
+    ///
+    /// Unlike [`Repository::status`], nothing is merged into one value: a
+    /// file with staged and unstaged changes is `MM`, a staged new file
+    /// deleted from the work tree is `AD`, an intent-to-add file (`git add
+    /// -N`) is `.A`, a change between file and symlink is `T`, and conflicts
+    /// are reported by kind (`UU`, `AA`, `DU`, ...). Untracked files that are
+    /// not ignored are listed individually (as with `-uall`). Renames are not
+    /// detected (as with `--no-renames`).
+    ///
+    /// Entries are sorted by path; a path deleted from the index that still
+    /// exists in the work tree appears twice (`D.` and untracked).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::{DetailedStatus, Repository};
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// for entry in repo.detailed_status().unwrap() {
+    ///     println!("{} {}", entry.status().code(), entry.path().display());
+    /// }
+    /// ```
+    pub fn detailed_status(&self) -> Result<Vec<DetailedStatusEntry>> {
+        let head_tree_oid = self.head_tree_oid()?;
+        let index_path = self.git_dir.join("index");
+        let index = if index_path.exists() {
+            Some(index::parse(&read_file(&index_path)?)?)
+        } else {
+            None
+        };
+        crate::status::compute_detailed_status(
+            &self.object_store(),
+            head_tree_oid.as_ref(),
+            index.as_ref(),
+            &mut self.worktree()?,
+        )
+    }
+
+    /// Updates the stat data of index entries whose files are unchanged,
+    /// like `git update-index --refresh`, and returns how many entries were
+    /// updated.
+    ///
+    /// [`Repository::status`] and the other operations that compare the
+    /// work tree with the index skip reading files whose stat data (size,
+    /// modification time and, as Git compares them, ctime, inode and owner)
+    /// matches the index entry. After files are touched without changing
+    /// (for example by a build tool, or a fresh clone of the work tree),
+    /// their content is read and hashed each time until the index is
+    /// refreshed. `status()` itself never writes the index; call this to
+    /// save the refreshed stat data, as `git status` does when it can.
+    ///
+    /// Files modified within the current second are recorded so that the
+    /// next comparison still reads them (Git's racy-git handling).
+    ///
+    /// # Errors
+    ///
+    /// `Error::Locked` if the index is locked by another process.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// repo.refresh_index().unwrap();
+    /// let status = repo.status().unwrap(); // reads only changed files
+    /// ```
+    pub fn refresh_index(&self) -> Result<usize> {
+        let (lock, mut idx) = self.lock_index()?;
+        let mut worktree = self.worktree()?;
+        let count = self.refresh_entries(&mut idx, &mut worktree)?;
+        if count > 0 {
+            lock.write(&idx)?;
+        }
+        Ok(count)
+    }
+
+    /// Gives the entries of `idx` whose files are unchanged the files'
+    /// current stat data, and returns how many were updated.
+    pub(crate) fn refresh_entries(
+        &self,
+        idx: &mut Index,
+        worktree: &mut Worktree,
+    ) -> Result<usize> {
+        let mut refreshed = Vec::new();
+        for entry in idx.entries() {
+            if entry.stage() != 0 || entry.skip_worktree() || entry.intent_to_add() {
+                continue;
+            }
+            let path = crate::worktree::native_path(entry.path());
+            if worktree.is_stat_clean(&path, entry)? {
+                continue;
+            }
+            // Only an unchanged file gets new stat data; a changed one keeps
+            // its entry, so it stays reported as modified.
+            let wanted = Some((*entry.oid(), entry.mode()));
+            if worktree.hash(&path, Some(entry))? == wanted {
+                refreshed.push(worktree.stat_entry(
+                    &path,
+                    entry.path().to_path_buf(),
+                    *entry.oid(),
+                    entry.mode(),
+                )?);
+            }
+        }
+        let count = refreshed.len();
+        for entry in refreshed {
+            idx.refresh(entry);
+        }
+        Ok(count)
+    }
+
+    /// Returns whether a path is ignored by `.gitignore` files,
+    /// `.git/info/exclude` or `core.excludesFile`.
+    ///
+    /// The path is relative to the repository root. A path is ignored when it
+    /// or one of its parent directories matches an exclude pattern, as in
+    /// `git check-ignore --no-index`. Whether the path is tracked is not
+    /// considered: a tracked file stays tracked even if it is ignored. An
+    /// existing directory is checked as a directory, so patterns ending in
+    /// `/` apply to it.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// if repo.is_ignored("target/debug/app").unwrap() {
+    ///     println!("ignored");
+    /// }
+    /// ```
+    pub fn is_ignored<P: AsRef<Path>>(&self, path: P) -> Result<bool> {
+        let path = path.as_ref();
+        let is_dir = self.work_dir.join(path).is_dir();
+        self.worktree()?.rules().is_ignored(path, is_dir)
+    }
+
+    /// Lists the untracked files that are ignored, like
+    /// `git ls-files --others --ignored --exclude-standard`.
+    ///
+    /// Every file inside an ignored directory is listed individually.
+    /// Tracked files are never listed, even if they match an ignore pattern.
+    ///
+    /// # Returns
+    ///
+    /// The paths relative to the repository root, sorted.
+    pub fn ignored_files(&self) -> Result<Vec<PathBuf>> {
+        let index = self.read_index()?;
+        let scan = self.worktree()?.scan(Some(&index), true)?;
+        Ok(scan.ignored.into_iter().collect())
+    }
 }
 
 #[cfg(test)]

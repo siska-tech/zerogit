@@ -571,6 +571,33 @@ fn normalize_message(message: &str) -> String {
     message.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+impl Repository {
+    /// Returns the reflog of a reference, newest entry first, as
+    /// `git reflog show <name>` lists it.
+    ///
+    /// `name` is `HEAD`, a full reference name such as `refs/heads/main`, or
+    /// a branch name. A reference without a reflog has no entries.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::Repository;
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// for (i, entry) in repo.reflog("HEAD").unwrap().iter().enumerate() {
+    ///     println!("HEAD@{{{}}}: {}", i, entry.message());
+    /// }
+    /// ```
+    pub fn reflog(&self, name: &str) -> Result<Vec<ReflogEntry>> {
+        let refname = if name == "HEAD" || name.starts_with("refs/") {
+            name.to_owned()
+        } else {
+            format!("refs/heads/{}", name)
+        };
+        self.reflog_writer()?.read(&refname)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

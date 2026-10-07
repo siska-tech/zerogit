@@ -1,6 +1,9 @@
 //! Reading and updating arbitrary references (used by fetch, push and
 //! clone).
 
+use std::fs;
+use std::path::Path;
+
 use crate::error::{Error, Result};
 use crate::infra::LockFile;
 use crate::objects::Oid;
@@ -152,5 +155,124 @@ impl Repository {
             .merge_bases(ancestor, descendant)?
             .iter()
             .any(|base| base == ancestor))
+    }
+}
+
+impl Repository {
+    /// Checks that `refs/<namespace>/<name>` can be created: neither it nor a
+    /// reference that would conflict with it as a directory or file exists
+    /// (`a` and `a/b` cannot both exist).
+    pub(crate) fn check_new_ref(&self, namespace: &str, name: &str) -> Result<String> {
+        let ref_name = format!("refs/{}/{}", namespace, name);
+        let prefix = format!("refs/{}/", namespace);
+        for existing in self.ref_store().resolved_refs(&prefix)? {
+            let other = &existing.name;
+            if *other == ref_name
+                || other.starts_with(&format!("{}/", ref_name))
+                || ref_name.starts_with(&format!("{}/", other))
+            {
+                return Err(Error::RefAlreadyExists(other.clone()));
+            }
+        }
+        match self.ref_store().read_ref_file(&ref_name) {
+            Ok(_) => Err(Error::RefAlreadyExists(ref_name)),
+            Err(Error::RefNotFound(_)) => Ok(ref_name),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Writes a loose reference file.
+    pub(crate) fn write_ref(&self, ref_name: &str, oid: &Oid) -> Result<()> {
+        let mut lock = self.lock_new_ref(ref_name)?;
+        lock.write_all(format!("{}\n", oid.to_hex()).as_bytes())?;
+        lock.commit()
+    }
+
+    /// Locks a reference that is about to be created, and checks under the
+    /// lock that it still does not exist, so that a reference created
+    /// concurrently (after [`Repository::check_new_ref`]) is not overwritten.
+    pub(crate) fn lock_new_ref(&self, ref_name: &str) -> Result<LockFile> {
+        let lock = LockFile::acquire(self.git_dir.join(ref_name))?;
+        match self.ref_store().read_ref_file(ref_name) {
+            Ok(_) => Err(Error::RefAlreadyExists(ref_name.to_owned())),
+            Err(Error::RefNotFound(_)) => Ok(lock),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Removes a reference (and its peeled line) from `packed-refs`.
+    pub(crate) fn remove_packed_ref(&self, ref_name: &str) -> Result<()> {
+        let path = self.git_dir.join("packed-refs");
+        // Read under the lock so a concurrent rewrite is not lost.
+        let mut lock = LockFile::acquire(&path)?;
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = String::with_capacity(content.len());
+        let mut skipping = false;
+        for line in content.lines() {
+            if line.starts_with('^') {
+                if !skipping {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+                continue;
+            }
+            skipping = line.split_once(' ').map(|(_, name)| name) == Some(ref_name);
+            if !skipping {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        lock.write_all(out.as_bytes())?;
+        lock.commit()
+    }
+
+    /// Deletes a reference, loose or packed (or both), its reflog and the
+    /// directories under `root` it leaves empty.
+    pub(crate) fn delete_ref(&self, ref_name: &str, root: &str) -> Result<()> {
+        let store = self.ref_store();
+        let path = self.git_dir.join(ref_name);
+        let lock = LockFile::acquire(&path)?;
+        store.read_ref_file(ref_name)?;
+        // The packed record first: removing only the loose file would
+        // uncover an older packed value.
+        if store.is_packed(ref_name)? {
+            self.remove_packed_ref(ref_name)?;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        self.reflog_writer()?.delete(ref_name)?;
+        // Release the lock first: its file would keep the directory non-empty.
+        drop(lock);
+        self.remove_empty_ref_dirs(&path, &self.git_dir.join(root))
+    }
+
+    /// Removes the directories above a deleted reference file that are now
+    /// empty, up to (not including) `root`.
+    pub(crate) fn remove_empty_ref_dirs(&self, path: &Path, root: &Path) -> Result<()> {
+        let mut parent = path.parent();
+        while let Some(dir) = parent {
+            if dir == root || !dir.starts_with(root) {
+                break;
+            }
+            match dir.read_dir() {
+                Ok(mut entries) => {
+                    if entries.next().is_some() {
+                        break;
+                    }
+                    fs::remove_dir(dir)?;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+            parent = dir.parent();
+        }
+        Ok(())
     }
 }

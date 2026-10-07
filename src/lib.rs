@@ -62,6 +62,7 @@ pub mod index;
 pub mod log;
 pub mod merge;
 pub mod objects;
+pub(crate) mod pack_builder;
 pub mod path_ops;
 pub(crate) mod pathspec;
 pub mod rebase;
@@ -112,7 +113,7 @@ pub use merge::{FastForward, MergeOptions, MergeOutcome};
 pub use remote::{Refspec, Remote};
 
 // Re-export transfer types
-pub use transfer::StoredPack;
+pub use transfer::{PackObjectsOptions, StoredPack};
 
 // Re-export housekeeping types
 pub use gc::{GcSummary, RepackSummary};

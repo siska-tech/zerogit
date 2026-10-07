@@ -63,12 +63,16 @@ impl DeltaSearch {
 pub(crate) struct Candidate {
     pub(crate) oid: Oid,
     pub(crate) object_type: ObjectType,
-    /// The path the object was found at (empty for commits and tags).
+    /// The file name the object was found under (empty for commits and
+    /// tags).
     pub(crate) name: Vec<u8>,
     pub(crate) size: u64,
     /// The base it is already stored against, when an existing delta is
     /// copied as it is; it is not searched then.
     pub(crate) reused_base: Option<Oid>,
+    /// Not written, only tried as a base: an object the reader already has
+    /// (for a thin pack).
+    pub(crate) base_only: bool,
 }
 
 /// A delta found for an object: its base and the delta instructions.
@@ -162,6 +166,8 @@ pub(crate) fn find_deltas(
         type_rank(x.object_type)
             .cmp(&type_rank(y.object_type))
             .then_with(|| keys[a].cmp(&keys[b]))
+            // What the reader has comes first, as a base for what it gets.
+            .then_with(|| y.base_only.cmp(&x.base_only))
             .then_with(|| y.size.cmp(&x.size))
             .then_with(|| a.cmp(&b))
     });
@@ -181,6 +187,7 @@ pub(crate) fn find_deltas(
             index: None,
         };
         let searched = target.reused_base.is_none()
+            && !target.base_only
             && target.size <= search.max_object_size
             && !window.is_empty();
         // A delta must save at least half the object, less 20 bytes, as in
@@ -278,6 +285,7 @@ mod tests {
                 name: name.as_bytes().to_vec(),
                 size: content.len() as u64,
                 reused_base: None,
+                base_only: false,
             })
             .collect()
     }

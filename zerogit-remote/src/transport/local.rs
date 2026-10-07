@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use zerogit::{Oid, Repository};
+use zerogit::{Oid, PackObjectsOptions, Repository};
 
 use super::{PushCommand, PushReply, RemoteRef, Transport};
 use crate::error::Result;
@@ -96,7 +96,14 @@ impl Transport for LocalTransport {
                 }
             }
         }
-        Ok(self.repo.pack_objects(&wants, haves)?)
+        // The fetching side completes a thin pack (`store_pack`).
+        let options = PackObjectsOptions::new().thin(true).ofs_delta(true);
+        Ok(self.repo.pack_objects_with(&wants, haves, &options)?)
+    }
+
+    fn push_pack_options(&mut self) -> Result<PackObjectsOptions> {
+        // `store_pack` completes thin packs and reads every delta.
+        Ok(PackObjectsOptions::new().thin(true).ofs_delta(true))
     }
 
     fn list_push_refs(&mut self) -> Result<Vec<RemoteRef>> {

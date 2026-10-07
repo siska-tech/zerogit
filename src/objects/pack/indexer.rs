@@ -322,7 +322,8 @@ pub(crate) fn write_index(objects: &[IndexedObject], pack_checksum: &[u8; 20]) -
     out
 }
 
-/// Builds a pack (version 2, no deltas) from objects.
+/// Builds a pack (version 2, no deltas) from objects, for tests.
+#[cfg(test)]
 pub(crate) fn write_pack(objects: &[(ObjectType, Vec<u8>)]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"PACK");

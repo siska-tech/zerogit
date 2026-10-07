@@ -4,13 +4,15 @@
 //! These are the repository-side halves of fetch and push. The network side
 //! (protocols and transports) lives in the separate `zerogit-remote` crate.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use crate::error::{Error, Result};
 use crate::infra::write_file_atomic;
-use crate::objects::pack::indexer::{index_pack, write_index, write_pack};
+use crate::objects::pack::deltify::DeltaSearch;
+use crate::objects::pack::indexer::{index_pack, write_index};
 use crate::objects::{ObjectType, Oid, TagObject, Tree};
+use crate::pack_builder::{MemoryPack, PackPlan};
 use crate::repository::Repository;
 
 /// A pack stored by [`Repository::store_pack`].
@@ -126,15 +128,129 @@ impl Repository {
         self.reachable_objects(wants, &excluded)
     }
 
-    /// Builds a pack (version 2, without deltas) of the objects reachable
-    /// from `wants` but not from `haves`, as sent by fetch or push.
+    /// Builds a pack (version 2) of the objects reachable from `wants` but
+    /// not from `haves`, as sent by fetch or push, with the default
+    /// [`PackObjectsOptions`]: deltas against objects of the pack, named
+    /// by object ID, which every Git reads.
     pub fn pack_objects(&self, wants: &[Oid], haves: &[Oid]) -> Result<Vec<u8>> {
+        self.pack_objects_with(wants, haves, &PackObjectsOptions::new())
+    }
+
+    /// Builds a pack (version 2) of the objects reachable from `wants` but
+    /// not from `haves`, like `git pack-objects --revs`.
+    ///
+    /// Objects are encoded as deltas against similar objects where that
+    /// saves space, as [`Repository::repack`] does (`pack.window`,
+    /// `pack.depth`, `core.bigFileThreshold`), and deltas already in this
+    /// repository's packs are copied when their base is sent too (or, for
+    /// a thin pack, is one the receiver has). With
+    /// [`PackObjectsOptions::thin`], the files and trees of the commits
+    /// in `haves` that the sent commits build on are tried as delta bases
+    /// too; the receiver completes such a pack from its own objects (as
+    /// `git index-pack --fix-thin` and [`Repository::store_pack`] do).
+    ///
+    /// # Errors
+    ///
+    /// `Error::ObjectNotFound` if an object to send is missing.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use zerogit::{Oid, PackObjectsOptions, Repository};
+    ///
+    /// let repo = Repository::open("path/to/repo").unwrap();
+    /// # let (new, old) = (Oid::from_bytes([1; 20]), Oid::from_bytes([2; 20]));
+    /// // A push to a server that takes thin packs and OFS_DELTA.
+    /// let options = PackObjectsOptions::new().thin(true).ofs_delta(true);
+    /// let pack = repo.pack_objects_with(&[new], &[old], &options).unwrap();
+    /// ```
+    pub fn pack_objects_with(
+        &self,
+        wants: &[Oid],
+        haves: &[Oid],
+        options: &PackObjectsOptions,
+    ) -> Result<Vec<u8>> {
         let store = self.object_store();
-        let mut objects = Vec::new();
-        for oid in self.objects_to_send(wants, haves)? {
-            let raw = store.read(&oid)?;
-            objects.push((raw.object_type, raw.content));
+        let mut known: Vec<Oid> = Vec::new();
+        for oid in haves {
+            if store.exists(oid)? {
+                known.push(*oid);
+            }
         }
-        Ok(write_pack(&objects))
+        let excluded: HashSet<Oid> = self
+            .reachable_objects(&known, &HashSet::new())?
+            .into_iter()
+            .collect();
+        // Seeded with what the receiver has, the walk stops there.
+        let mut seen = excluded.clone();
+        let mut info = HashMap::new();
+        let objects = self.walk_objects(wants.to_vec(), &mut seen, false, Some(&mut info))?;
+        let count = u32::try_from(objects.len()).map_err(|_| Error::PackLimitExceeded {
+            reason: "too many objects for one pack".to_owned(),
+        })?;
+
+        let mut external_bases = Vec::new();
+        if options.thin {
+            // The trees of the commits the sent ones build on.
+            let mut edges = Vec::new();
+            for oid in &objects {
+                if info.get(oid).map(|c| c.object_type) == Some(ObjectType::Commit) {
+                    for parent in self.commit(&oid.to_hex())?.parents() {
+                        if excluded.contains(parent) {
+                            edges.push(*self.commit(&parent.to_hex())?.tree());
+                        }
+                    }
+                }
+            }
+            let mut base_info = HashMap::new();
+            self.walk_objects(edges, &mut HashSet::new(), false, Some(&mut base_info))?;
+            external_bases = base_info.into_values().collect();
+        }
+
+        let packs = store.pack_files()?;
+        let plan = PackPlan {
+            objects: &objects,
+            info,
+            external_bases,
+            reader_has: options.thin.then_some(&excluded),
+            packs: &packs,
+            ofs_delta: options.ofs_delta,
+            search: DeltaSearch::from_config(&self.config()?)?,
+        };
+        let mut pack = MemoryPack::new(count);
+        self.write_pack_objects(plan, &mut pack)?;
+        Ok(pack.finish())
+    }
+}
+
+/// Options for [`Repository::pack_objects_with`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PackObjectsOptions {
+    thin: bool,
+    ofs_delta: bool,
+}
+
+impl PackObjectsOptions {
+    /// The default options: a complete pack whose deltas name their base
+    /// by object ID (REF_DELTA), which every receiver reads.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Builds a thin pack (`--thin`): deltas may be against objects the
+    /// receiver has (named in `haves`) rather than in the pack. Send one
+    /// only to a receiver that completes it: a Git server that does not
+    /// advertise `no-thin`, or a client that asked for `thin-pack`.
+    pub fn thin(mut self, thin: bool) -> Self {
+        self.thin = thin;
+        self
+    }
+
+    /// Lets deltas name a base in the pack by its offset (OFS_DELTA,
+    /// `--delta-base-offset`), which is smaller. Use it when the receiver
+    /// advertises `ofs-delta`.
+    pub fn ofs_delta(mut self, ofs_delta: bool) -> Self {
+        self.ofs_delta = ofs_delta;
+        self
     }
 }

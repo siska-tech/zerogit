@@ -7,7 +7,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use zerogit::{Oid, Repository};
+use zerogit::{Oid, PackObjectsOptions, Repository};
 
 fn git_stdin(dir: &Path, args: &[&str], input: &[u8]) -> Vec<u8> {
     let mut child = Command::new("git")
@@ -187,4 +187,129 @@ fn built_pack_has_what_git_rev_list_lists() {
     git_stdin(target, &["index-pack", "--stdin"], &pack);
     git(target, &["update-ref", "refs/heads/main", &want.to_hex()]);
     assert_fsck(target);
+}
+
+/// The objects of a pack's index, after `git index-pack`, and how many
+/// are deltas.
+fn indexed_deltas(dir: &Path) -> (usize, usize) {
+    let pack_dir = dir.join(".git/objects/pack");
+    let (mut objects, mut deltas) = (0, 0);
+    for entry in fs::read_dir(&pack_dir).unwrap() {
+        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+        if !name.ends_with(".idx") {
+            continue;
+        }
+        let output = git(
+            dir,
+            &["verify-pack", "-v", &format!(".git/objects/pack/{}", name)],
+        );
+        for line in output.lines() {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() >= 5 && fields[0].len() == 40 {
+                objects += 1;
+                if fields.len() >= 7 {
+                    deltas += 1;
+                }
+            }
+        }
+    }
+    (objects, deltas)
+}
+
+#[test]
+fn built_packs_use_deltas_and_git_reads_them() {
+    let source = history();
+    let dir = source.path();
+    let repo = Repository::open(dir).unwrap();
+    let want = Oid::from_hex(git(dir, &["rev-parse", "main"]).trim()).unwrap();
+    let have = Oid::from_hex(git(dir, &["rev-parse", "HEAD~10"]).trim()).unwrap();
+    let sent = repo.objects_to_send(&[want], &[have]).unwrap().len();
+    let early = git_stdin(
+        dir,
+        &["pack-objects", "--stdout", "--revs"],
+        format!("{}\n", have).as_bytes(),
+    );
+    let git_pack = |args: &[&str]| -> Vec<u8> {
+        let mut command = vec!["pack-objects", "--stdout", "--revs"];
+        command.extend_from_slice(args);
+        git_stdin(dir, &command, format!("main\n^{}\n", have).as_bytes())
+    };
+
+    // Receivers that have the history up to `have`, indexing with Git
+    // (and completing a thin pack) or with zerogit.
+    let receive = |pack: &[u8], thin: bool| -> (usize, usize) {
+        let target = empty_repository();
+        let t = target.path();
+        git_stdin(t, &["index-pack", "--stdin"], &early);
+        let before = indexed_deltas(t);
+        let mut args = vec!["index-pack", "--stdin"];
+        if thin {
+            args.push("--fix-thin");
+        }
+        git_stdin(t, &args, pack);
+        git(t, &["update-ref", "refs/heads/main", &want.to_hex()]);
+        assert_fsck(t);
+        let after = indexed_deltas(t);
+
+        let ours = empty_repository();
+        let ours_repo = Repository::open(ours.path()).unwrap();
+        ours_repo.store_pack(&early).unwrap();
+        ours_repo.store_pack(pack).unwrap();
+        git(
+            ours.path(),
+            &["update-ref", "refs/heads/main", &want.to_hex()],
+        );
+        assert_fsck(ours.path());
+        (after.0 - before.0, after.1 - before.1)
+    };
+
+    // Complete packs, with REF_DELTA (the default) and OFS_DELTA.
+    let by_ref = repo.pack_objects(&[want], &[have]).unwrap();
+    let (objects, deltas) = receive(&by_ref, false);
+    assert_eq!(objects, sent);
+    assert!(deltas > 0);
+    let by_offset = repo
+        .pack_objects_with(&[want], &[have], &PackObjectsOptions::new().ofs_delta(true))
+        .unwrap();
+    assert_eq!(receive(&by_offset, false), (objects, deltas));
+    assert!(by_offset.len() < by_ref.len());
+    let reference = git_pack(&["--delta-base-offset"]);
+    assert!(
+        by_offset.len() < reference.len() * 3 / 2,
+        "{} vs {}",
+        by_offset.len(),
+        reference.len()
+    );
+
+    // A thin pack is smaller still: the new versions of the document are
+    // deltas against the one the receiver has.
+    let thin = repo
+        .pack_objects_with(
+            &[want],
+            &[have],
+            &PackObjectsOptions::new().thin(true).ofs_delta(true),
+        )
+        .unwrap();
+    assert!(
+        thin.len() < by_offset.len(),
+        "{} vs {}",
+        thin.len(),
+        by_offset.len()
+    );
+    let reference = git_pack(&["--delta-base-offset", "--thin"]);
+    assert!(
+        thin.len() < reference.len() * 3 / 2,
+        "{} vs {}",
+        thin.len(),
+        reference.len()
+    );
+    // `--fix-thin` appends the bases it took from the receiver.
+    let (objects, _) = receive(&thin, true);
+    assert!(objects > sent);
+    // Without the receiver's objects, the thin pack is incomplete.
+    let alone = empty_repository();
+    assert!(Repository::open(alone.path())
+        .unwrap()
+        .store_pack(&thin)
+        .is_err());
 }

@@ -233,7 +233,8 @@ pub fn push_with(
         .copied()
         .filter(|oid| repo.has_object(oid).unwrap_or(false))
         .collect();
-    let pack = repo.pack_objects(&wants, &haves)?;
+    let pack_options = transport.push_pack_options()?;
+    let pack = repo.pack_objects_with(&wants, &haves, &pack_options)?;
     let replies = transport.push(&commands, &pack)?;
 
     let mut result = Vec::new();

@@ -14,8 +14,10 @@ network side on top of it:
 
 Fetching uses Git protocol version 2 and falls back to the original
 protocol when a server does not offer it; pushing uses the receive-pack
-protocol. TLS is provided by rustls (the `https` feature, enabled by
-default).
+protocol. The pack a push sends encodes objects as deltas, and, as with
+`git push`, is thin (deltas against objects the server already has) unless
+the server advertises `no-thin`. TLS is provided by rustls (the `https`
+feature, enabled by default).
 
 ```rust,no_run
 use std::path::Path;

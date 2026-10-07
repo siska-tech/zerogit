@@ -4,7 +4,7 @@
 
 use std::io::Read;
 
-use zerogit::Oid;
+use zerogit::{Oid, PackObjectsOptions};
 
 use super::{PushCommand, PushReply, RemoteRef, Transport};
 use crate::error::{Error, Result};
@@ -410,6 +410,15 @@ impl<C: Connector> Transport for GitTransport<C> {
 
     fn list_push_refs(&mut self) -> Result<Vec<RemoteRef>> {
         Ok(self.receive()?.1.clone())
+    }
+
+    fn push_pack_options(&mut self) -> Result<PackObjectsOptions> {
+        let (_, _, capabilities) = self.receive()?;
+        let has = |name: &str| capabilities.iter().any(|c| c == name);
+        // Like `git push`: thin unless the server refuses it.
+        Ok(PackObjectsOptions::new()
+            .thin(!has("no-thin"))
+            .ofs_delta(has("ofs-delta")))
     }
 
     fn push(&mut self, commands: &[PushCommand], pack: &[u8]) -> Result<Vec<PushReply>> {

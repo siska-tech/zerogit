@@ -11,22 +11,20 @@
 //! three after expiring old reflog entries
 //! ([`Repository::reflog_expire`]), and [`Repository::gc_auto`] runs it only when there are many
 //! loose objects or packs, as `git gc --auto` does.
-
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use crate::error::{Error, Result};
 use crate::infra::fs::remove_file;
-use crate::infra::hash::Sha1State;
-use crate::infra::{compress, crc32, write_file_atomic, LockFile};
-use crate::objects::pack::deltify::{find_deltas, Candidate, DeltaSearch, NewDelta};
-use crate::objects::pack::indexer::{entry_header, type_code, write_index, IndexedObject};
-use crate::objects::pack::{EntryKind, PackFile, RawEntry};
+use crate::infra::{write_file_atomic, LockFile};
+use crate::objects::pack::deltify::{Candidate, DeltaSearch};
+use crate::objects::pack::indexer::write_index;
+use crate::objects::pack::PackFile;
 use crate::objects::{Commit, FileMode, ObjectType, Oid, TagObject, Tree};
+use crate::pack_builder::{PackPlan, PackWriter};
 use crate::refs::RefValue;
 use crate::repository::Repository;
 
@@ -81,19 +79,6 @@ impl RepackSummary {
     }
 }
 
-/// How an object goes into the pack [`Repository::repack`] writes.
-enum Stored {
-    /// Copied as it is from an old pack (the index), where it is whole.
-    Copied(usize),
-    /// Copied as it is from an old pack, where it is a delta against an
-    /// object that is written too.
-    CopiedDelta(usize, Oid),
-    /// Written whole.
-    Whole,
-    /// Written as a new delta.
-    NewDelta(NewDelta),
-}
-
 /// Files of a pack that go with it when it is removed (the index first,
 /// which makes the pack invisible to readers).
 const PACK_FILES: &[&str] = &["idx", "pack", "rev", "bitmap", "mtimes"];
@@ -118,81 +103,6 @@ const STATE_FILES: &[&str] = &[
     "sequencer/head",
     "sequencer/abort-safety",
 ];
-
-/// A pack being written to a temporary file, hashed as it goes.
-struct PackWriter {
-    path: PathBuf,
-    file: Option<BufWriter<File>>,
-    sha1: Sha1State,
-    offset: u64,
-}
-
-impl PackWriter {
-    fn create(dir: &Path, count: u32) -> Result<Self> {
-        fs::create_dir_all(dir)?;
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let path = dir.join(format!("tmp_pack_zerogit_{}_{}", std::process::id(), nanos));
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-        let mut writer = PackWriter {
-            path,
-            file: Some(BufWriter::new(file)),
-            sha1: Sha1State::new(),
-            offset: 0,
-        };
-        let mut header = b"PACK".to_vec();
-        header.extend_from_slice(&2u32.to_be_bytes());
-        header.extend_from_slice(&count.to_be_bytes());
-        writer.write(&header)?;
-        Ok(writer)
-    }
-
-    fn write(&mut self, data: &[u8]) -> Result<()> {
-        self.file
-            .as_mut()
-            .expect("open until finished")
-            .write_all(data)?;
-        self.sha1.update(data);
-        self.offset += data.len() as u64;
-        Ok(())
-    }
-
-    /// Writes the trailer and closes the file; returns the checksum.
-    fn finish(mut self) -> Result<(PathBuf, [u8; 20])> {
-        let checksum = std::mem::replace(&mut self.sha1, Sha1State::new()).finalize();
-        let mut file = self.file.take().expect("open until finished");
-        file.write_all(&checksum)?;
-        let file = file.into_inner().map_err(|e| Error::Io(e.into_error()))?;
-        file.sync_all()?;
-        Ok((std::mem::take(&mut self.path), checksum))
-    }
-}
-
-impl Drop for PackWriter {
-    fn drop(&mut self) {
-        // Not finished: remove the partial file.
-        if self.file.take().is_some() {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
-/// Encodes the distance back to an OFS_DELTA base, as Git does.
-fn ofs_distance(mut distance: u64) -> Vec<u8> {
-    let mut bytes = vec![(distance & 0x7f) as u8];
-    distance >>= 7;
-    while distance > 0 {
-        distance -= 1;
-        bytes.push(0x80 | (distance & 0x7f) as u8);
-        distance >>= 7;
-    }
-    bytes.reverse();
-    bytes
-}
 
 /// Reads the object IDs at the start of each line of a state file (a
 /// `rewritten-list` line has two).
@@ -492,7 +402,7 @@ impl Repository {
     /// `tolerant` (for objects nothing refers to) skipped. With `info`,
     /// each object's type, size and the file name it was first found under
     /// are collected too.
-    fn walk_objects(
+    pub(crate) fn walk_objects(
         &self,
         starts: Vec<Oid>,
         seen: &mut HashSet<Oid>,
@@ -516,6 +426,7 @@ impl Repository {
                         name,
                         size,
                         reused_base: None,
+                        base_only: false,
                     },
                 );
             }
@@ -590,166 +501,29 @@ impl Repository {
     /// deltas copied from `old` packs and the number of new deltas.
     ///
     /// A delta in an old pack is copied when its base is written too;
-    /// other objects are searched for deltas (see `deltify`) among the
-    /// objects written, using what `info` says of them, and otherwise
-    /// stored whole.
+    /// other objects are searched for deltas among the objects written,
+    /// using what `info` says of them, and otherwise stored whole.
     fn write_repack(
         &self,
         pack_dir: &Path,
         objects: &[Oid],
-        mut info: HashMap<Oid, Candidate>,
+        info: HashMap<Oid, Candidate>,
         old: &[Arc<PackFile>],
     ) -> Result<(PathBuf, usize, usize)> {
-        let store = self.object_store();
-        let wanted: HashSet<Oid> = objects.iter().copied().collect();
-        let too_large = |oid: &Oid| Error::PackLimitExceeded {
-            reason: format!("object {} too large for this platform", oid),
-        };
         let count = u32::try_from(objects.len()).map_err(|_| Error::PackLimitExceeded {
             reason: "too many objects for one pack".to_owned(),
         })?;
-
-        // How each object is stored in the old packs, and what of that can
-        // be copied.
-        let mut plan: HashMap<Oid, Stored> = HashMap::with_capacity(objects.len());
-        // Offsets of each old pack's entries, to name OFS_DELTA bases.
-        let mut offsets: HashMap<usize, HashMap<u64, Oid>> = HashMap::new();
-        for &oid in objects {
-            let found = old.iter().enumerate().find(|(_, p)| p.contains(&oid));
-            let stored = match found {
-                None => Stored::Whole,
-                Some((pack_no, pack)) => {
-                    let (kind, _) = pack
-                        .entry_kind(&oid)?
-                        .ok_or_else(|| Error::ObjectNotFound(oid.to_hex()))?;
-                    let base = match kind {
-                        EntryKind::Base(_) => None,
-                        EntryKind::RefDelta(base) => Some(base),
-                        EntryKind::OfsDelta(offset) => offsets
-                            .entry(pack_no)
-                            .or_insert_with(|| {
-                                pack.index()
-                                    .entries()
-                                    .iter()
-                                    .map(|e| (e.offset, e.oid))
-                                    .collect()
-                            })
-                            .get(&offset)
-                            .copied(),
-                    };
-                    match (kind, base) {
-                        (EntryKind::Base(_), _) => Stored::Copied(pack_no),
-                        // A delta against an object that goes in the new pack.
-                        (_, Some(base)) if base != oid && wanted.contains(&base) => {
-                            Stored::CopiedDelta(pack_no, base)
-                        }
-                        // The base stays behind: store the object whole.
-                        _ => Stored::Whole,
-                    }
-                }
-            };
-            plan.insert(oid, stored);
-        }
-        // Copied deltas that lead back to themselves (across packs) cannot
-        // be written in order: one of each cycle is stored whole.
-        for &oid in objects {
-            let mut seen = HashSet::new();
-            let mut current = oid;
-            while let Some(Stored::CopiedDelta(_, base)) = plan.get(&current) {
-                if !seen.insert(current) {
-                    plan.insert(current, Stored::Whole);
-                    break;
-                }
-                current = *base;
-            }
-        }
-
-        // New deltas for the rest.
-        let candidates: Vec<Candidate> = objects
-            .iter()
-            .filter_map(|oid| {
-                let mut candidate = info.remove(oid)?;
-                if let Some(Stored::CopiedDelta(_, base)) = plan.get(oid) {
-                    candidate.reused_base = Some(*base);
-                }
-                Some(candidate)
-            })
-            .collect();
-        let search = DeltaSearch::from_config(&self.config()?)?;
-        let found = find_deltas(&candidates, &search, &mut |oid| {
-            Ok(store.read(oid)?.content)
-        })?;
-        drop(candidates);
-        let new_deltas = found.len();
-        for (oid, delta) in found {
-            plan.insert(oid, Stored::NewDelta(delta));
-        }
-
+        let plan = PackPlan {
+            objects,
+            info,
+            external_bases: Vec::new(),
+            reader_has: None,
+            packs: old,
+            ofs_delta: true,
+            search: DeltaSearch::from_config(&self.config()?)?,
+        };
         let mut writer = PackWriter::create(pack_dir, count)?;
-        let mut written: HashMap<Oid, u64> = HashMap::new();
-        let mut indexed: Vec<IndexedObject> = Vec::with_capacity(objects.len());
-        let mut reused = 0;
-        for &start in objects {
-            // Bases go before the deltas against them.
-            let mut chain = Vec::new();
-            let mut current = start;
-            while !written.contains_key(&current) {
-                chain.push(current);
-                match plan.get(&current) {
-                    Some(Stored::CopiedDelta(_, base)) => current = *base,
-                    Some(Stored::NewDelta(delta)) => current = delta.base,
-                    _ => break,
-                }
-            }
-            for oid in chain.into_iter().rev() {
-                let raw_entry = |pack_no: usize| -> Result<RawEntry> {
-                    old[pack_no]
-                        .raw_entry(&oid)?
-                        .ok_or_else(|| Error::ObjectNotFound(oid.to_hex()))
-                };
-                let mut bytes = Vec::new();
-                match plan.remove(&oid).expect("every object is planned once") {
-                    Stored::Copied(pack_no) => {
-                        let entry = raw_entry(pack_no)?;
-                        let EntryKind::Base(object_type) = entry.kind else {
-                            unreachable!("only whole entries are copied as they are")
-                        };
-                        let size = usize::try_from(entry.size).map_err(|_| too_large(&oid))?;
-                        bytes.extend(entry_header(type_code(object_type), size));
-                        bytes.extend_from_slice(&entry.compressed);
-                    }
-                    Stored::CopiedDelta(pack_no, base) => {
-                        // OFS_DELTA against the base written before it.
-                        let entry = raw_entry(pack_no)?;
-                        let size = usize::try_from(entry.size).map_err(|_| too_large(&oid))?;
-                        bytes.extend(entry_header(6, size));
-                        bytes.extend(ofs_distance(writer.offset - written[&base]));
-                        bytes.extend_from_slice(&entry.compressed);
-                        reused += 1;
-                    }
-                    Stored::NewDelta(delta) => {
-                        bytes.extend(entry_header(6, delta.data.len()));
-                        bytes.extend(ofs_distance(writer.offset - written[&delta.base]));
-                        bytes.extend(compress(&delta.data));
-                    }
-                    Stored::Whole => {
-                        let object = store.read(&oid)?;
-                        bytes.extend(entry_header(
-                            type_code(object.object_type),
-                            object.content.len(),
-                        ));
-                        bytes.extend(compress(&object.content));
-                    }
-                }
-                written.insert(oid, writer.offset);
-                indexed.push(IndexedObject {
-                    oid,
-                    offset: writer.offset,
-                    crc32: crc32(&bytes),
-                });
-                writer.write(&bytes)?;
-            }
-        }
+        let stats = self.write_pack_objects(plan, &mut writer)?;
 
         let (tmp, checksum) = writer.finish()?;
         let name: String = checksum.iter().map(|b| format!("{:02x}", b)).collect();
@@ -761,9 +535,9 @@ impl Repository {
         } else {
             // The pack first, then the index that makes it visible.
             fs::rename(&tmp, &pack_path)?;
-            write_file_atomic(&index_path, &write_index(&indexed, &checksum))?;
+            write_file_atomic(&index_path, &write_index(&stats.indexed, &checksum))?;
         }
-        Ok((pack_path, reused, new_deltas))
+        Ok((pack_path, stats.reused_deltas, stats.new_deltas))
     }
 
     /// Removes loose objects that `packs` hold, and the fan-out

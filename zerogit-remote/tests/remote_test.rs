@@ -5,9 +5,10 @@ mod common;
 use common::*;
 use std::path::Path;
 use tempfile::TempDir;
-use zerogit::Repository;
+use zerogit::{Oid, PackObjectsOptions, Repository};
 use zerogit_remote::transport::{
-    GitTransport, HttpConnector, LocalTransport, ProcessConnector, Transport,
+    GitTransport, HttpConnector, LocalTransport, ProcessConnector, PushCommand, PushReply,
+    RemoteRef, Transport,
 };
 use zerogit_remote::{
     clone_with, fetch_with, push_with, CloneOptions, PushOptions, PushStatus, UpdateKind,
@@ -495,4 +496,108 @@ fn original_protocol_clone_and_fetch_match_git() {
     git(&theirs, &["fetch", "origin"]);
     assert_eq!(refs(&ours), refs(&theirs));
     git(&ours, &["fsck", "--strict"]);
+}
+
+/// Forwards to another transport and records the size of each pack
+/// pushed.
+struct Recording {
+    inner: Box<dyn Transport>,
+    sent: std::rc::Rc<std::cell::RefCell<Vec<usize>>>,
+}
+
+impl Transport for Recording {
+    fn list_refs(&mut self, prefixes: &[String]) -> zerogit_remote::Result<Vec<RemoteRef>> {
+        self.inner.list_refs(prefixes)
+    }
+
+    fn fetch_pack(&mut self, wants: &[Oid], haves: &[Oid]) -> zerogit_remote::Result<Vec<u8>> {
+        self.inner.fetch_pack(wants, haves)
+    }
+
+    fn list_push_refs(&mut self) -> zerogit_remote::Result<Vec<RemoteRef>> {
+        self.inner.list_push_refs()
+    }
+
+    fn push(
+        &mut self,
+        commands: &[PushCommand],
+        pack: &[u8],
+    ) -> zerogit_remote::Result<Vec<PushReply>> {
+        self.sent.borrow_mut().push(pack.len());
+        self.inner.push(commands, pack)
+    }
+
+    fn push_pack_options(&mut self) -> zerogit_remote::Result<PackObjectsOptions> {
+        self.inner.push_pack_options()
+    }
+}
+
+/// Text that compresses poorly, so that only deltas make it small.
+fn noise(seed: u64, lines: usize) -> String {
+    let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+    (0..lines)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            format!("{:016x} {:016x}\n", state, state.rotate_left(17))
+        })
+        .collect()
+}
+
+#[test]
+fn push_sends_deltas_against_what_the_remote_has() {
+    for kind in KINDS {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let bare = bare_origin(root);
+        let (url, _) = connect(kind, root, &bare);
+        git(root, &["clone", "-q", &url, "local"]);
+        let local = root.join("local");
+        // A large file the remote gets first, then a small change to it.
+        let mut content = noise(1, 6000);
+        write(&local, "large.txt", &content);
+        git(&local, &["add", "large.txt"]);
+        git(&local, &["commit", "-q", "-m", "Large"]);
+        let repo = Repository::open(&local).unwrap();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let push = |message: &str| {
+            let (_, inner) = connect(kind, root, &bare);
+            let mut transport = Recording {
+                inner,
+                sent: sent.clone(),
+            };
+            let updates = push_with(
+                &repo,
+                "origin",
+                &mut transport,
+                &["main"],
+                &PushOptions::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                updates[0].status,
+                PushStatus::FastForward,
+                "{} {:?}",
+                message,
+                kind
+            );
+            git(&bare, &["fsck", "--strict"]);
+            assert_eq!(
+                git(&bare, &["rev-parse", "main"]),
+                git(&local, &["rev-parse", "main"])
+            );
+        };
+        push("large");
+        content.push_str(&noise(2, 10));
+        write(&local, "large.txt", &content);
+        git(&local, &["commit", "-q", "-am", "Change"]);
+        push("change");
+
+        let sent = sent.borrow();
+        // The first push carries the file (about 200 KB, compressing
+        // poorly); the second only a delta against it.
+        assert!(sent[0] > 100_000, "{:?} {:?}", kind, sent);
+        assert!(sent[1] < 3_000, "{:?} {:?}", kind, sent);
+    }
 }

@@ -21,7 +21,7 @@ pub use protocol::{Connector, GitTransport, Session};
 #[cfg(feature = "https")]
 pub use http::{HttpAuth, HttpConnector};
 
-use zerogit::Oid;
+use zerogit::{Oid, PackObjectsOptions};
 
 use crate::error::Result;
 
@@ -75,6 +75,13 @@ pub trait Transport {
     /// Sends updates and the pack with the objects they need, and returns
     /// the remote's answer for each update.
     fn push(&mut self, commands: &[PushCommand], pack: &[u8]) -> Result<Vec<PushReply>>;
+
+    /// How to build the pack for [`Transport::push`]: thin and with
+    /// OFS_DELTA when the remote takes them. By default, a complete pack
+    /// whose deltas name their base by ID, which every receiver reads.
+    fn push_pack_options(&mut self) -> Result<PackObjectsOptions> {
+        Ok(PackObjectsOptions::new())
+    }
 }
 
 /// Opens the transport for a URL: local paths and `file://` with

@@ -49,6 +49,7 @@
 //! - [`status`] - Working tree status
 
 pub(crate) mod attributes;
+pub mod blame;
 pub(crate) mod checkout;
 pub mod cherry_pick;
 pub mod clean;
@@ -85,6 +86,7 @@ pub(crate) mod worktree;
 pub(crate) mod infra;
 
 // Re-export primary types for convenient access
+pub use blame::{Blame, BlameHunk, BlameLine, BlameOptions, DiffAlgorithm};
 pub use cherry_pick::{CherryPickOptions, PickOutcome};
 pub use clean::{CleanIgnored, CleanOptions};
 pub use commit::CommitOptions;

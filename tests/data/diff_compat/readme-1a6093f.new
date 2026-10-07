@@ -19,7 +19,7 @@ Pure Rust製の軽量Gitクライアントライブラリ。最小限の依存�
 
 ```toml
 [dependencies]
-zerogit = "0.9"
+zerogit = "0.3"
 ```
 
 ### 必要環境
@@ -84,16 +84,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 ```
-
-statusは、Gitと同じくindexに記録したstat情報（サイズ・更新時刻など）が一致するファイルを読みません。indexの書き込みと同じ秒に変更されたファイル（racy-git）は内容で比較します。`status()`はindexを書き換えないので、ファイルに触れただけ（内容は同じ）のときは`repo.refresh_index()`でstat情報を更新すると、以降のstatusが速くなります。
-
-4,000ファイル・220 MB、変更なしの作業ツリーでの計測（Windows 11、release build、`cargo run --release --example measure_status`）:
-
-| | 時間 | `git status`との比 |
-|---|---|---|
-| `git status --porcelain` | 97 ms | 1.0 |
-| `status()`（Gitが書いたindex） | 128 ms | 1.3 |
-| `status()`（zerogitが書いたindex） | 147 ms | 1.5 |
 
 ### 特定コミットの詳細を取得
 
@@ -199,21 +189,13 @@ repo.head()?;                 // HEAD取得
 repo.branches()?;             // ローカルブランチ一覧
 repo.remote_branches()?;      // リモートブランチ一覧
 repo.tags()?;                 // タグ一覧
-repo.log()?;                  // コミット履歴（Iterator。並び順は LogOptions::order、グラフは Graph）
-repo.reflog("HEAD")?;         // reflog（新しい順）
-repo.describe(&DescribeOptions::new())?; // 最も近いタグからの名前（git describe。v1.0-3-gabc1234）
-repo.mailmap()?.resolve(name, email); // .mailmapによる正規の名前・メールアドレス（git check-mailmap）
-repo.blame("src/lib.rs", &BlameOptions::new())?; // 各行を最後に変えたコミット（git blame。リネームを追う）
+repo.log()?;                  // コミット履歴（Iterator）
 repo.log_with_options(opts)?; // フィルタリング付きログ
-repo.status()?;               // ワーキングツリー状態（パスごとに1つの状態）
-repo.detailed_status()?;      // index側・作業ツリー側を別々に（porcelain v2相当）
-repo.refresh_index()?;        // 変更のないファイルのstat情報を更新（git update-index --refresh）
-repo.commit("sha")?;          // コミット取得（"HEAD~1"・"v1.0^{}" などのリビジョンも可）
+repo.status()?;               // ワーキングツリー状態
+repo.commit("sha")?;          // コミット取得
 repo.tree("sha")?;            // ツリー取得
 repo.blob("sha")?;            // Blob取得
 repo.index()?;                // インデックス取得
-repo.is_ignored(path)?;       // .gitignore等で無視されるか
-repo.ignored_files()?;        // 無視された未追跡ファイル一覧
 
 // 差分操作
 repo.diff_trees(old, new)?;       // Tree間の差分
@@ -223,41 +205,15 @@ repo.diff_head_to_index()?;       // git diff --staged 相当
 repo.diff_head_to_workdir()?;     // git diff HEAD 相当
 repo.diff_blobs(old, new, &opts)?; // Blob間の行差分（旧新行番号付き）
 repo.resolve_short_oid("abc1234")?; // 短縮OIDの解決（loose・pack横断）
-repo.rev_parse("main~2")?;        // git rev-parse 相当（HEAD^2、v1^{}、@{u}、@{-1}、HEAD:path など）
 
 // 書き込み操作
-repo.add(path)?;              // ファイルをステージ（無視対象の未追跡ファイルは拒否）
-repo.add_force(path)?;        // 無視対象でもステージ（git add -f）
+repo.add(path)?;              // ファイルをステージ
 repo.add_all()?;              // 全変更をステージ
 repo.reset(path)?;            // ステージを解除
-repo.reset_to("HEAD~1", ResetMode::Soft)?; // git reset --soft/--mixed/--hard
-repo.reset_paths("HEAD~2", &["src"])?;     // git reset <rev> -- <paths>
-repo.restore(&["src"], &RestoreOptions::new())?;   // git restore（--source・--staged も）
-repo.remove(&["old.txt"], &RemoveOptions::new())?; // git rm（--cached・-f・-r も）
-repo.move_path("a.rs", "src/a.rs")?;      // git mv
-repo.clean(&CleanOptions::new().directories(true))?; // git clean -f -d（-x・-X・pathspec・-n も）
 repo.create_commit(msg, author, email)?;  // コミット作成
-repo.create_commit_with(msg, &CommitOptions::new())?; // 作者・コミッター・日時を指定（既定はGitと同じ解決）
-repo.amend_commit(None, &CommitOptions::new())?;     // git commit --amend --no-edit
 repo.create_branch(name, target)?;        // ブランチ作成
 repo.delete_branch(name)?;                // ブランチ削除
-repo.checkout(target)?;                   // ブランチ切り替え（無関係な変更・未追跡ファイルは持ち越す）
-repo.checkout_with(target, &CheckoutOptions::new().force(true))?; // git checkout -f
-repo.create_tag(name, target)?;           // 軽量タグ作成
-repo.create_annotated_tag(name, target, msg, tagger, email)?; // 注釈付きタグ作成
-repo.delete_tag(name)?;                   // タグ削除
-repo.pack_refs()?;                        // 参照をpacked-refsにまとめる（git pack-refs --all）
-repo.repack()?;                           // 到達可能なオブジェクトを1つのpackに（git repack -a -d）
-repo.gc()?;                               // pack-refs・reflog expire・repack・prune（git gc。gc_auto()は必要なときだけ）
-repo.merge(target, name, email, &MergeOptions::new())?; // マージ（ff・3-way）
-repo.abort_merge()?;                      // マージの中止
-repo.merge_base(&a, &b)?;                 // 共通祖先
-repo.stash_save(name, email, &StashOptions::new())?; // 変更の退避
-repo.stash_list()?;                       // stash一覧
-repo.stash_pop(0, false)?;                // 復元して削除（apply/dropも）
-repo.rebase("main", None, name, email)?;  // rebase（continue/skip/abortも）
-repo.cherry_pick(&["topic~1"], &CherryPickOptions::new(), name, email)?; // cherry-pick（continue/skip/abortも）
-repo.revert(&["HEAD"], name, email)?;   // revert（continue/skip/abortも）
+repo.checkout(target)?;                   // ブランチ切り替え
 ```
 
 詳細は [APIドキュメント](https://docs.rs/zerogit) を参照してください。
@@ -362,37 +318,6 @@ fn main() -> Result<()> {
 }
 ```
 
-### 並び順とグラフ
-
-既定の並びは`git log`と同じく、履歴をたどる順でcommitterの日時が新しいものから返します（先頭から順に読むので、全体を読み込まずに返せます）。`LogOrder::Date`（`--date-order`）と`LogOrder::Topo`（`--topo-order`）は親が子より先に出ない順で、履歴全体を読んでから返します。`reverse(true)`で古い順になります。`Graph`は、与えた順のコミットに`git log --graph`と同じ列を割り当てます（文字の描画は利用側で行います）。
-
-```rust
-use zerogit::log::{Graph, LogOptions, LogOrder};
-use zerogit::{Repository, Result};
-
-fn main() -> Result<()> {
-    let repo = Repository::discover(".")?;
-    let mut graph = Graph::new();
-    for commit in repo.log_with_options(LogOptions::new().order(LogOrder::Topo))? {
-        let commit = commit?;
-        let row = graph.push(*commit.oid(), commit.parents());
-        // row.column(): コミットの列、row.columns_before()/columns_after(): 前後の線、
-        // row.parent_columns(): 各親へ続く列
-        println!("{:width$}* {}", "", commit.summary(), width = row.column() * 2);
-    }
-    Ok(())
-}
-```
-
-50,000コミット（50コミットごとに10コミットのブランチをマージ）の履歴での計測（Windows 11、release build、`cargo run --release --example measure_log`。commit-graphはどちらも使わない。Gitの時間はプロセスの起動を含む）:
-
-| | 先頭10件 | 全件 |
-|---|---|---|
-| zerogit 既定の順 | 0.2 ms | 666 ms |
-| `git log` | 23 ms | 371 ms |
-| zerogit `LogOrder::Topo` | 690 ms | 700 ms |
-| `git log --topo-order` | 202 ms | 293 ms |
-
 ### ワーキングツリーの差分
 
 ```rust
@@ -422,7 +347,7 @@ fn main() -> Result<()> {
 ### ファイルをステージしてコミット
 
 ```rust
-use zerogit::{CommitOptions, Repository, Result, Signature};
+use zerogit::{Repository, Result};
 
 fn main() -> Result<()> {
     let repo = Repository::discover(".")?;
@@ -438,13 +363,6 @@ fn main() -> Result<()> {
         "Add new feature",
         "Your Name",
         "your@email.com"
-    )?;
-
-    // 作者とコミッターを別々に指定する（省略時はGIT_AUTHOR_*・user.nameなどから解決）
-    repo.add("README.md")?;
-    let oid = repo.create_commit_with(
-        "Fix typo",
-        &CommitOptions::new().author(Signature::now("Alice", "alice@example.com")),
     )?;
 
     println!("Created commit: {}", oid.short());
@@ -475,66 +393,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 ```
-
-### 各行の由来（blame）
-
-```rust
-use zerogit::{BlameOptions, Repository, Result};
-
-fn main() -> Result<()> {
-    let repo = Repository::discover(".")?;
-    // 10〜20行目を、mainの2つ前の版について
-    let options = BlameOptions::new().revision("main~2").lines(10, 20);
-    for line in repo.blame("src/lib.rs", &options)?.lines() {
-        println!("{} {}:{}", line.commit().short(), line.path().display(), line.original_line());
-    }
-    Ok(())
-}
-```
-
-各行を、親に同じ行がある限り過去へ渡していき、どの親にもない行をそのコミットのものとします。マージは親を順に試し、親にないファイルはリネーム元（同じ内容、または50%以上似ているファイル）を探します（`git blame`の既定と同じ）。行の比較には`git blame`と同じ結果になる行diffを使います。その規則（長い共通の末尾の扱い、よく現れる行の扱い、移動できる変更のまとまりの置き場所）は、Gitのコードではなく出力だけから実験で求めました（[docs/diff-compat-research.md](docs/diff-compat-research.md)）。
-
-計測（Windows 11、release build、`cargo run --release --example measure_blame -- <リポジトリ> [<パス>...]`）:
-
-| 対象 | Gitとの一致 | zerogit | `git blame` |
-|---|---|---|---|
-| このリポジトリの全241ファイル（77,377行） | 240ファイルが全行一致 | 2.8秒 | 19.4秒（ファイルごとのプロセス起動を含む） |
-| 2,000行のファイルを500コミットで変更（1,840行） | 全行一致 | 0.48秒 | 0.37〜0.45秒 |
-
-一致しなかった1ファイル（`src/repository.rs`）は、3,785行を1,024行に書き換えたコミットを履歴に含みます。Gitの既定のdiffは、変更が数百行を超えると最小のdiffを探すのをやめますが、zerogitはその方法を再現しておらず、常に最小のdiffを使うため、このようなコミットをまたぐ行の帰属が異なることがあります。
-
-### オブジェクトの整理（gc）
-
-zerogitはオブジェクトをlooseとして1つずつ書きます。Gitを併用しない場合は、ときどき`gc()`を呼ぶか、書き込みの後に`gc_auto()`（`git gc --auto`と同じ条件のときだけ実行）を呼ぶと、looseオブジェクトが溜まりません。
-
-```rust
-use zerogit::{Repository, Result};
-
-fn main() -> Result<()> {
-    let repo = Repository::discover(".")?;
-
-    // 参照をpacked-refsにまとめ、古いreflogのエントリを消し（gc.reflogExpire・
-    // gc.reflogExpireUnreachable、既定は90日・30日）、到達可能なオブジェクトを
-    // deltaで1つのpackにまとめ（pack.window・pack.depth、既定は10・50）、
-    // 期限（gc.pruneExpire、既定は2週間）を過ぎた到達できないオブジェクトを消す
-    let summary = repo.gc()?;
-    println!("{} objects packed, {} pruned", summary.repack().objects(), summary.pruned());
-
-    // looseオブジェクトやpackが多いときだけ実行する（gc.auto・gc.autoPackLimit）
-    repo.gc_auto()?;
-    Ok(())
-}
-```
-
-zerogitで2,000コミット（各3ファイルの変更）を書いた履歴での計測（Windows 11、release build、`cargo run --release --example measure_gc`）:
-
-| | looseオブジェクト | `objects/`のサイズ | `log()`（全履歴） | `status()` |
-|---|---|---|---|---|
-| gc前 | 14,480 | 7.3 MB | 121 ms | 21 ms |
-| `gc()`後（7.2秒） | 0（1 pack、10,385個がdelta） | 1.5 MB | 36 ms | 23 ms |
-| 参考: `git gc`後（5.8秒） | 0（1 pack） | 1.7 MB | – | – |
-
-ファイル数が減り、履歴の読み取りは約3倍速くなります。looseオブジェクトは、似たオブジェクトとのdeltaとしてpackに入るので、サイズは`git gc`と同程度になります（既存のpackのdeltaはそのまま再利用します）。gcの時間は実行ごとのばらつきが大きく、同じ環境で`gc()`は7〜13秒、`git gc`は6〜17秒でした（Gitは複数スレッドでdeltaを探します）。looseのサイズはファイルの長さの合計で、小さなファイルが実際に占めるディスク容量はこれより大きくなります。
 
 ## ロードマップ
 
@@ -568,15 +426,14 @@ zerogitで2,000コミット（各3ファイルの変更）を書いた履歴で�
 - [x] コミット変更一覧（`commit_diff()`）
 - [x] ワーキングツリー差分（`diff_index_to_workdir()`, `diff_head_to_index()`）
 
-### Phase 3: Packfile・行単位差分・マージ ✅
+### Phase 3: Packfile・行単位差分（✅ 読み取りと差分） / マージ（将来）
 
 - [x] Packfile読み取り - pack v2/v3、idx v2（64bit offset含む）、OFS_DELTA/REF_DELTA、多段delta。looseと複数packを透過的に扱い、`git repack`/`git gc`後も開いたままの`Repository`で読み続けられる
-- [x] `packed-refs` - loose参照を優先し、HEAD・ブランチ・リモートブランチ・タグを解決・列挙。ブランチ・タグの削除はpacked-refsの記録も消す（古い値が復活しない）。`pack_refs()`（`git pack-refs --all`）
+- [x] `packed-refs` - loose参照を優先し、HEAD・ブランチ・リモートブランチ・タグを解決・列挙。packed参照の削除は参照の復活を防ぐため`Error::PackedRefDeletionUnsupported`
 - [x] 行単位差分（`diff_blobs()` / `BlobDiff::compute()`）- 最小編集のMyers法、旧新行番号、文脈行数指定、LF/CRLF・末尾改行の保持
 - [x] 完全一致リネームの旧新mode保持と決定的な対応付け
 - [x] 類似度によるリネーム検出（任意）- `diff_trees_with_options()`/`commit_diff_with_options()`に`RenameOptions::new().detection(RenameDetection::Similar)`を渡す。既定は完全一致のみ
-- [x] 3-way merge（`merge()`）- fast-forward、共通祖先（複数の場合は仮想祖先）ベースのマージ、Gitと同じ形のコンフリクト記録。内容のマージは`git merge`と同じhistogram diff
-- [x] stash（`stash_save()`など）・rebase（`rebase()`など）- Gitと同じ形式で状態を保存し、Gitと相互に扱える
+- [ ] 3-way merge - 共通祖先ベースのマージ（将来）
 
 #### 対応形式と制限
 
@@ -585,8 +442,7 @@ zerogitで2,000コミット（各3ファイルの変更）を書いた履歴で�
 | オブジェクト形式 | SHA-1のみ。SHA-256（`extensions.objectFormat`）は`Error::UnsupportedRepositoryFormat` |
 | オブジェクト格納 | loose、pack v2/v3（idx v2）。idx v1・multi-pack-index・commit-graph・bitmapは使用しない（packの`.idx`を直接読む） |
 | 参照 | loose refs、`packed-refs`。reftableは`Error::UnsupportedRepositoryFormat` |
-| index | v2/v3/v4（読んだバージョンで書き戻す）。split index・sparse indexは`Error::UnsupportedIndex`。sparse checkout（skip-worktree）中の全体reset・mixed reset・checkoutは未対応 |
-| 未対応 | merge時のディレクトリのリネーム検出（ファイルのリネームは追従する）、対話的rebaseの`exec`・`break`・`label`・`reset`・`merge`、マージコミットのcherry-pick・revert（`-m`）、worktree、shallow/partial clone、alternates |
+| 未対応 | 3-way merge、リモート通信、worktree、shallow/partial clone、alternates |
 | 差分の結果 | `Text`（完全な行差分）、`NonText`（NULを含む・不正UTF-8。暗黙の置換はしない）、`Skipped`（サイズ・計算量の上限超過。部分結果は返さない） |
 | リネーム検出 | 既定は完全一致のみ。類似度検出（任意）は通常・実行ファイルのテキストが対象で、類似度は「共通する行のバイト数 ÷ 大きい方のサイズ」。既定しきい値50%、候補ペア10万組、1ファイル1 MiBまで。上限に達した分は追加・削除のまま残り、`TreeDiff::rename_limits()`で識別できる |
 | パス | `DiffDelta::path()`はプラットフォームの`PathBuf`（Windowsでは`\`区切り）。比較は`Path`同士で行う |
@@ -606,67 +462,87 @@ zerogitで2,000コミット（各3ファイルの変更）を書いた履歴で�
 
 測定は`cargo run --release --example measure_document_diff`で再現できます（Windows 11、release build。1,000コミット・50文書をpack化したリポジトリで、全履歴の走査50〜220 ms、全コミットの変更一覧160〜670 ms、全変更ファイルの行差分は1件あたり0.6〜2.5 ms、ピークメモリ約46 MiB）。
 
-### Phase 4: リモート操作（別crate: `zerogit-remote`）✅
+### Phase 4: リモート操作（別crate: `zerogit-remote`）
 
-ネットワーク操作は依存関係が増えるため、別crate [`zerogit-remote`](zerogit-remote/) として提供します。コアの`zerogit`の依存は`miniz_oxide`のみのままです。
+ネットワーク操作は依存関係が増えるため、別crateとして提供予定です。
 
-| 観点         | zerogit (コア)     | zerogit-remote                     |
-| ------------ | ------------------ | ---------------------------------- |
-| 依存         | `miniz_oxide` のみ | `zerogit`、`ureq`（`rustls`、`https` feature） |
-| ビルド時間   | 高速               | TLS依存で増加                      |
-| WASM対応     | ○                  | △（制限あり）                      |
+#### なぜ別crateなのか？
 
-| プロトコル | URL形式 | 認証方式 | 状態 |
-| --- | --- | --- | --- |
-| ローカル | パス、`file://` | なし | ✅（Gitを起動せず直接読み書き） |
-| HTTPS / HTTP | `https://...` | Basic（URLまたは`HttpAuth`）/ Bearer Token | ✅ Smart HTTP、protocol v2 |
-| SSH | `git@host:path`、`ssh://...` | SSH鍵（システムの`ssh`クライアントとagent） | ✅ |
-| Git | `git://...` | なし | 未対応 |
+| 観点         | zerogit (コア)     | zerogit-remote               |
+| ------------ | ------------------ | ---------------------------- |
+| 依存         | `miniz_oxide` のみ | `rustls`, `russh`, `ureq` 等 |
+| ビルド時間   | 高速               | TLS/SSH依存で増加            |
+| WASM対応     | ○                  | △（制限あり）                |
+| 組み込み用途 | ○                  | △                            |
+
+#### サポート予定プロトコル
+
+| プロトコル | URL形式                  | 認証方式             | 優先度 |
+| ---------- | ------------------------ | -------------------- | ------ |
+| HTTPS      | `https://github.com/...` | Basic / Bearer Token | 高     |
+| SSH        | `git@github.com:...`     | SSH鍵                | 中     |
+| Git        | `git://...`              | なし（読み取り専用） | 低     |
+
+#### 想定API
 
 ```rust
-use std::path::Path;
-use zerogit_remote::{clone, fetch, push, CloneOptions, PushOptions};
+use zerogit::Repository;
+use zerogit_remote::{Remote, Credentials};
 
-let repo = clone("https://github.com/user/repo.git", Path::new("./local-repo"), &CloneOptions::new())?;
-fetch(&repo, "origin")?;
-push(&repo, "origin", &["main"], &PushOptions::new())?;
+// クローン
+let repo = Remote::clone(
+    "https://github.com/user/repo.git",
+    "./local-repo",
+    Credentials::token("ghp_xxxx"),
+)?;
+
+// フェッチ
+let remote = repo.remote("origin")?;
+remote.fetch(&Credentials::ssh_key("~/.ssh/id_ed25519"))?;
+
+// プッシュ
+remote.push("main", &Credentials::token("ghp_xxxx"))?;
 ```
 
-コア側には、受け取ったpackの検証・保存（`store_pack()`、thin packの補完）、送るpackの作成（`pack_objects()`・`pack_objects_with()`。deltaを使い、pushではサーバーが受け付ければthin packとOFS_DELTAにする）、リモート設定とrefspec（`remotes()`、`add_remote()`、`Refspec`）、upstream（`set_branch_upstream()`）、参照の更新（`update_reference()`）を追加しました。shallow・partial cloneは対象外です。
+#### 技術的な実装要素
 
-### ローカル運用の成熟化（v0.6〜v0.8）✅
+```
+Smart HTTP Protocol:
+┌─────────┐                              ┌─────────┐
+│ Client  │  GET /info/refs              │ Server  │
+│         │ ───────────────────────────> │         │
+│         │  200 OK (refs + capabilities)│         │
+│         │ <─────────────────────────── │         │
+│         │                              │         │
+│         │  POST /git-upload-pack       │         │
+│         │  (want/have negotiation)     │         │
+│         │ ───────────────────────────> │         │
+│         │  200 OK (packfile)           │         │
+│         │ <─────────────────────────── │         │
+└─────────┘                              └─────────┘
+```
 
-Gitと並行して日常的に使えるように、並行性・性能・基本操作を固めました。
+#### 代替アプローチ
 
-- [x] Gitと安全に共存する（v0.6）- index・参照・config・状態ファイルの書き込みにGitと同じロックファイル（`<path>.lock`）を使い、参照の更新はcompare-and-swapにする。コミットにローカルのタイムゾーンを記録し、メッセージを`git commit -m`と同じく整形する（同じ入力でGitと同じOID）。作者・コミッター・日時の指定（`create_commit_with()`）
-- [x] 大きなリポジトリでも速い（v0.7）- statusはindexのstat情報が一致するファイルを読まない（racy-git対応）。4,000ファイル・220 MBで`git status`の1.3倍。indexのcache tree・resolve-undoを保持する
-- [x] 日常の操作がそろう（v0.8）- リビジョン指定（`rev_parse()`: `HEAD~1`、`v1^{}`、`@{u}`、`@{-1}`、`HEAD:path`など）、`reset --soft/--mixed/--hard`（`reset_to()`）、`commit --amend`（`amend_commit()`）、`restore`・`rm`・`mv`、変更を持ち越すcheckout
+リモート操作が必要だが `zerogit-remote` を待てない場合、システムのgitコマンドと連携できます：
 
-### Gitとの互換性の拡充（v0.9）✅
+```rust
+use std::process::Command;
 
-- [x] merge・rebase・stashでのリネーム検出（#35。ディレクトリのリネームは対象外）
-- [x] 対話的rebase（pick・reword・edit・squash・fixup・drop、#34）
-- [x] SSHトランスポートの実サーバーでの結合テスト（#36）
-
-### 日常の操作をさらにそろえる（v0.10）✅
-
-- [x] cherry-pick・revert（`cherry_pick()`・`revert()`、#62）
-- [x] gc・repack・prune（`gc()`・`gc_auto()`・`repack()`・`prune()`・`pack_refs()`、#63。reflogの期限切れ`reflog_expire()`は#74、新しいdeltaの計算は#75）
-- [x] clean（`clean()`、#64。`-x`・`-X`・`-d`・pathspec・`-n`。ネストしたリポジトリは消さない）
-- [x] logの並び順・グラフ（`LogOrder`・`reverse()`・`Graph`、#65）
-
-### 履歴の調査（v0.11）
-
-- [x] describe（`describe()`・`describe_revision()`・`DescribeOptions`、#77。`--tags`・`--all`・`--long`・`--abbrev`・`--always`・`--first-parent`・`--candidates`・`--match`・`--exclude`・`--dirty`）
-- [x] mailmap（`mailmap()`・`Mailmap`、#77。`.mailmap`・`mailmap.blob`・`mailmap.file`。`log()`はコミットをそのまま返すので、表示の際に`Mailmap::resolve_signature()`で適用する）
-- [x] blame（`blame()`・`BlameOptions`・`DiffAlgorithm`、#77。ファイル全体のリネームを追う。`--first-parent`・`-L`・`--diff-algorithm`（myers・minimal・histogram）。`-M`・`-C`（行の移動・コピーの検出）は対象外。大きな書き換えを含む履歴ではGitと異なる行がありうる。行diffをGitとそろえる規則は、Gitの出力だけから実験で求め、`docs/diff-compat-research.md`に記録した）
+fn fetch_with_git(repo_path: &str, remote: &str) -> std::io::Result {
+    Command::new("git")
+        .args(["-C", repo_path, "fetch", remote])
+        .status()?;
+    Ok(())
+}
+```
 
 ### 将来の検討事項
 
 - **Worktree対応**: 複数のワーキングツリー
 - **Submodule対応**: サブモジュールの読み取り
 - **Sparse checkout**: 部分的なチェックアウト
-- **Shallow / partial clone**: 履歴・オブジェクトを限定したクローン
+- **Shallow clone**: 履歴を限定したクローン
 
 ## 貢献
 
@@ -678,29 +554,31 @@ Gitと並行して日常的に使えるように、並行性・性能・基本�
 git clone https://github.com/siska-tech/zerogit
 cd zerogit
 
-# テスト実行（テスト用フィクスチャは初回実行時に自動で作られる）
+# テスト用フィクスチャの準備
+cd tests/fixtures
+bash create_fixtures.sh
+cd ../..
+
+# テスト実行
 cargo test
 
-# フォーマット・Lint・ドキュメント（CIと同じ検査）
+# フォーマットとLint
 cargo fmt
-cargo clippy --all-targets -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+cargo clippy
 ```
-
-テストの実行には `git` コマンドが必要です。フィクスチャの作成と期待値の比較に使います。
 
 ### プルリクエスト
 
 1. Issueを作成して変更内容を議論
 2. フォークしてfeatureブランチを作成
 3. 変更を実装（テスト必須）
-4. `cargo fmt`・`cargo clippy --all-targets`・`cargo doc` を実行
+4. `cargo fmt` と `cargo clippy` を実行
 5. プルリクエストを送信
 
 ### コーディング規約
 
 - `cargo fmt` でフォーマット
-- `cargo clippy --all-targets` と `cargo doc` の警告をゼロに
+- `cargo clippy` の警告をゼロに
 - 公開APIには必ずドキュメントコメント
 - 新機能にはテストを追加
 

@@ -13,8 +13,14 @@ use crate::infra::read_file;
 use crate::objects::{Blob, Commit, FileMode, Oid, Tree};
 
 pub mod blob;
+#[cfg(test)]
+mod compat_tests;
+#[cfg(test)]
+mod cutoff_research;
 pub(crate) mod histogram;
 pub mod rename;
+#[cfg(test)]
+mod slider_research;
 
 use crate::Repository;
 pub use blob::{

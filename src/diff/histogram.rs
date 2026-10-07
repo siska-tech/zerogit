@@ -1,4 +1,5 @@
-//! Histogram line diff with Git's hunk placement, used for merges.
+//! Line diffs with Git's hunk placement: the histogram diff merges use, and
+//! the Myers diff `git diff` and `git blame` use by default.
 //!
 //! `git merge` diffs contents with the histogram algorithm. This module
 //! implements that algorithm as published with JGit's `HistogramDiff`: in a
@@ -7,15 +8,25 @@
 //! after it are diffed the same way. A region whose common lines all occur
 //! more than [`MAX_CHAIN`] times falls back to the Myers diff.
 //!
+//! The Myers diff ("An O(ND) Difference Algorithm and Its Variations")
+//! first sets aside lines found only on one side, and lines repeated often
+//! that sit among those (as Git does; `docs/diff-compat-research.md`,
+//! finding 2). Without context lines, as for blame, a long common tail is
+//! left out first (finding 1).
+//!
 //! Change groups are then slid the way Git places them: as far down as the
 //! repeated lines allow, unless they can line up with a change on the other
-//! side, in which case they are placed there. As in Git 2.54 and later, a
-//! group that moved or joined others is diffed again when the other side
-//! has changes in the same place.
+//! side, in which case they are placed there. For `git diff` and blame (not
+//! merges), a group that could sit in several places goes where its
+//! boundaries best follow the indentation and blank lines (finding 3). As
+//! in Git 2.54 and later, in the histogram diff a group that moved or
+//! joined others is diffed again when the other side has changes in the
+//! same place.
 //!
-//! The result matches `git diff --histogram`, except where a region falls
-//! back to the Myers diff and needs hundreds of edits: Git then cuts its
-//! search short with heuristics this crate does not use.
+//! These rules were found from Git's output alone (see the research notes
+//! and `compat_tests`). The results match Git's, except on large rewrites:
+//! where the edit cost reaches several hundred lines, Git's diffs stop
+//! being minimal in a way this module does not reproduce (finding 4).
 
 use std::collections::HashMap;
 
@@ -58,15 +69,29 @@ fn diff_lines_with<'a>(old: &[&'a [u8]], new: &[&'a [u8]], rediff: bool) -> Vec<
     };
     let a: Vec<u32> = old.iter().map(|l| intern(l)).collect();
     let b: Vec<u32> = new.iter().map(|l| intern(l)).collect();
-    diff_ids(&a, &b, rediff)
+    diff_ids(&a, &b, rediff, None)
 }
 
-fn diff_ids(a: &[u32], b: &[u32], rediff: bool) -> Vec<Hunk> {
+fn diff_ids(a: &[u32], b: &[u32], rediff: bool, indents: Option<(&[i32], &[i32])>) -> Vec<Hunk> {
     let mut a_changed = vec![false; a.len()];
     let mut b_changed = vec![false; b.len()];
     histogram(a, b, &mut a_changed, &mut b_changed);
-    compact(a, &mut a_changed, b, &mut b_changed, rediff);
-    compact(b, &mut b_changed, a, &mut a_changed, rediff);
+    compact(
+        a,
+        &mut a_changed,
+        b,
+        &mut b_changed,
+        rediff,
+        indents.map(|i| i.0),
+    );
+    compact(
+        b,
+        &mut b_changed,
+        a,
+        &mut a_changed,
+        rediff,
+        indents.map(|i| i.1),
+    );
     hunks(&a_changed, &b_changed)
 }
 
@@ -145,6 +170,12 @@ fn myers_region(
 /// diagonal down. Git cuts the search short with heuristics once a region
 /// costs hundreds of edits; this function always finds a minimal path.
 fn classic_diff(a: &[u32], b: &[u32]) -> (Vec<bool>, Vec<bool>) {
+    classic_diff_with(a, b, false)
+}
+
+/// [`classic_diff`]; with `minimal` (`--minimal`), frequent lines are never
+/// set aside.
+fn classic_diff_with(a: &[u32], b: &[u32], minimal: bool) -> (Vec<bool>, Vec<bool>) {
     let mut a_changed = vec![false; a.len()];
     let mut b_changed = vec![false; b.len()];
 
@@ -171,12 +202,14 @@ fn classic_diff(a: &[u32], b: &[u32]) -> (Vec<bool>, Vec<bool>) {
         &b_counts,
         a.len(),
         &mut a_changed[prefix..a.len() - suffix],
+        minimal,
     );
     let b_kept = kept_lines(
         &b[prefix..b.len() - suffix],
         &a_counts,
         b.len(),
         &mut b_changed[prefix..b.len() - suffix],
+        minimal,
     );
 
     let ka: Vec<u32> = a_kept.iter().map(|&i| a[prefix + i]).collect();
@@ -210,6 +243,7 @@ fn kept_lines(
     other_counts: &HashMap<u32, usize>,
     total: usize,
     changed: &mut [bool],
+    minimal: bool,
 ) -> Vec<usize> {
     #[derive(Clone, Copy, PartialEq)]
     enum Class {
@@ -228,7 +262,7 @@ fn kept_lines(
         .iter()
         .map(|line| match other_counts.get(line).copied().unwrap_or(0) {
             0 => Class::Missing,
-            n if n < frequent_limit => Class::Kept,
+            n if minimal || n < frequent_limit => Class::Kept,
             _ => Class::Frequent,
         })
         .collect();
@@ -238,7 +272,9 @@ fn kept_lines(
     const WINDOW: usize = 100;
     let among_missing = |i: usize| {
         let mut missing_before = 0;
-        let mut frequent = 1;
+        // The line and its own run count as two (docs/diff-compat-research.md,
+        // finding 2).
+        let mut frequent = 2;
         for &c in class[i.saturating_sub(WINDOW)..i].iter().rev() {
             match c {
                 Class::Missing => missing_before += 1,
@@ -518,6 +554,7 @@ fn compact(
     other_lines: &[u32],
     other_changed: &mut [bool],
     rediff: bool,
+    indents: Option<&[i32]>,
 ) {
     let mut other_gaps = gaps(other_changed);
     let other_nonempty =
@@ -585,6 +622,15 @@ fn compact(
                 end -= 1;
                 gap -= 1;
             }
+        } else if let Some(indents) = indents {
+            let target = placement(indents, earliest_end, end, end - start);
+            while end > target {
+                changed[start - 1] = true;
+                changed[end - 1] = false;
+                start -= 1;
+                end -= 1;
+                gap -= 1;
+            }
         }
         if rediff && other_nonempty(&other_gaps, gap) && (start, end) != original {
             let (o_start, o_end) = other_gaps[gap];
@@ -624,6 +670,102 @@ fn gaps(changed: &[bool]) -> Vec<(usize, usize)> {
     result
 }
 
+/// The indentation of a line in columns (a tab moves to the next multiple
+/// of 8), or -1 for a blank line (only spaces, tabs and line endings).
+pub(crate) fn line_indent(line: &[u8]) -> i32 {
+    let mut columns = 0;
+    for &byte in line {
+        match byte {
+            b' ' => columns += 1,
+            b'\t' => columns += 8 - columns % 8,
+            b'\n' | b'\r' => {}
+            _ => return columns,
+        }
+    }
+    -1
+}
+
+/// What decides where a group goes (`docs/diff-compat-research.md`,
+/// finding 3): for each boundary, an indentation, and penalties.
+#[derive(Clone, Copy, Default)]
+struct PlacementScore {
+    indent: i32,
+    penalty: i32,
+}
+
+impl PlacementScore {
+    /// Adds the boundary just before line `s` of a side whose lines have
+    /// the indentations `indents` (-1 for blank lines).
+    fn add_boundary(&mut self, indents: &[i32], s: usize) {
+        let at_end = s >= indents.len();
+        let at = if at_end { -1 } else { indents[s] };
+        let before = &indents[..s.min(indents.len())];
+        let pre_blank = before.iter().rev().take_while(|&&i| i == -1).count() as i32;
+        let pre = before
+            .iter()
+            .rev()
+            .copied()
+            .find(|&i| i != -1)
+            .unwrap_or(-1);
+        let rest = indents.get(s + 1..).unwrap_or(&[]);
+        let post_blank = rest.iter().take_while(|&&i| i == -1).count() as i32;
+        let post = rest.iter().copied().find(|&i| i != -1).unwrap_or(-1);
+
+        let blank_at = !at_end && at == -1;
+        let after_blank = if blank_at { 1 + post_blank } else { 0 };
+        let blanks = pre_blank + after_blank;
+        let indent = if at != -1 { at } else { post };
+        self.indent += indent;
+
+        let mut penalty = -75 * blanks + 15 * after_blank;
+        if pre == -1 && pre_blank == 0 {
+            penalty += 6;
+        }
+        if at_end {
+            penalty -= 6;
+        }
+        if indent != -1 && pre != -1 {
+            if indent > pre {
+                penalty += if blanks > 0 { 25 } else { -9 };
+            } else if indent < pre {
+                penalty += if blanks > 0 { 41 } else { 56 };
+                if blanks == 0 && post != -1 && post > indent {
+                    penalty += 3;
+                }
+            }
+        }
+        self.penalty += penalty;
+    }
+
+    /// Negative when `self` is the better position.
+    fn compare(&self, other: &PlacementScore) -> i32 {
+        150 * (self.indent - other.indent).signum() + self.penalty - other.penalty
+    }
+}
+
+/// Where a group of `size` changed lines ending at `end` (its lowest
+/// position), which could also end anywhere from `earliest_end` on, is
+/// placed: positions from the highest Git considers (at most `size + 1`
+/// lines up) down to `end` are compared in turn, each replacing the best
+/// so far unless it is worse. Returns the chosen end.
+fn placement(indents: &[i32], earliest_end: usize, end: usize, size: usize) -> usize {
+    let highest = earliest_end.max(end.saturating_sub(size + 1));
+    let score = |e: usize| {
+        let mut score = PlacementScore::default();
+        score.add_boundary(indents, e - size);
+        score.add_boundary(indents, e);
+        score
+    };
+    let mut best = (highest, score(highest));
+    for e in highest + 1..=end {
+        let s = score(e);
+        if s.compare(&best.1) <= 0 {
+            best = (e, s);
+        }
+    }
+    best.0
+}
+
 /// Collects the changed regions of both sides into hunks.
 fn hunks(a_changed: &[bool], b_changed: &[bool]) -> Vec<Hunk> {
     let mut result = Vec::new();
@@ -646,6 +788,82 @@ fn hunks(a_changed: &[bool], b_changed: &[bool]) -> Vec<Hunk> {
         }
     }
     result
+}
+
+/// The line diffs zerogit computes, named after the `git diff` options
+/// they correspond to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Algorithm {
+    /// The default (`--diff-algorithm=myers`), used by `git blame`.
+    Myers,
+    /// `--minimal`.
+    Minimal,
+    /// `--histogram`, used by merges.
+    Histogram,
+}
+
+/// How many bytes at the end of both inputs Git's zero-context Myers diffs
+/// leave out, as observed (`docs/diff-compat-research.md`, finding 1): the
+/// whole kibibytes of their common suffix, except the part of those up to
+/// and including their first newline, so that the cut falls between lines.
+fn ignored_tail_len(old: &[u8], new: &[u8]) -> usize {
+    let common = old
+        .iter()
+        .rev()
+        .zip(new.iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let whole = common / 1024 * 1024;
+    match old[old.len() - whole..].iter().position(|&b| b == b'\n') {
+        Some(newline) => whole - (newline + 1),
+        None => 0,
+    }
+}
+
+/// The changed regions between two contents, line by line, without context
+/// lines (as `git diff -U0` and `git blame` compute them).
+pub(crate) fn diff_bytes<'a>(old: &'a [u8], new: &'a [u8], algorithm: Algorithm) -> Vec<Hunk> {
+    let (old, new) = match algorithm {
+        Algorithm::Myers | Algorithm::Minimal => {
+            let dropped = ignored_tail_len(old, new);
+            (&old[..old.len() - dropped], &new[..new.len() - dropped])
+        }
+        Algorithm::Histogram => (old, new),
+    };
+    let (old_lines, new_lines) = (split_lines(old), split_lines(new));
+    let mut ids: HashMap<&'a [u8], u32> = HashMap::new();
+    let mut intern = |line: &'a [u8]| -> u32 {
+        let next = ids.len() as u32;
+        *ids.entry(line).or_insert(next)
+    };
+    let a: Vec<u32> = old_lines.iter().map(|l| intern(l)).collect();
+    let b: Vec<u32> = new_lines.iter().map(|l| intern(l)).collect();
+    let a_indents: Vec<i32> = old_lines.iter().map(|l| line_indent(l)).collect();
+    let b_indents: Vec<i32> = new_lines.iter().map(|l| line_indent(l)).collect();
+    match algorithm {
+        Algorithm::Histogram => diff_ids(&a, &b, true, Some((&a_indents, &b_indents))),
+        Algorithm::Myers | Algorithm::Minimal => {
+            let minimal = algorithm == Algorithm::Minimal;
+            let (mut a_changed, mut b_changed) = classic_diff_with(&a, &b, minimal);
+            compact(
+                &a,
+                &mut a_changed,
+                &b,
+                &mut b_changed,
+                false,
+                Some(&a_indents),
+            );
+            compact(
+                &b,
+                &mut b_changed,
+                &a,
+                &mut a_changed,
+                false,
+                Some(&b_indents),
+            );
+            hunks(&a_changed, &b_changed)
+        }
+    }
 }
 
 /// Splits content into lines, each keeping its `\n`.

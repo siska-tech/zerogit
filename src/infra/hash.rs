@@ -207,11 +207,29 @@ const CRC32_TABLE: [u32; 256] = {
 
 /// Computes the CRC-32 (IEEE, as used by zlib) recorded in pack indexes.
 pub fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffffu32;
-    for &byte in data {
-        crc = CRC32_TABLE[((crc ^ u32::from(byte)) & 0xff) as usize] ^ (crc >> 8);
+    let mut crc = Crc32State::new();
+    crc.update(data);
+    crc.finish()
+}
+
+/// A CRC-32 computed over data given in pieces.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Crc32State(u32);
+
+impl Crc32State {
+    pub(crate) fn new() -> Self {
+        Crc32State(0xffff_ffff)
     }
-    !crc
+
+    pub(crate) fn update(&mut self, data: &[u8]) {
+        for &byte in data {
+            self.0 = CRC32_TABLE[((self.0 ^ u32::from(byte)) & 0xff) as usize] ^ (self.0 >> 8);
+        }
+    }
+
+    pub(crate) fn finish(self) -> u32 {
+        !self.0
+    }
 }
 
 #[cfg(test)]

@@ -211,6 +211,7 @@ repo.refresh_index()?;        // 変更のないファイルのstat情報を更�
 repo.commit("sha")?;          // コミット取得（"HEAD~1"・"v1.0^{}" などのリビジョンも可）
 repo.tree("sha")?;            // ツリー取得
 repo.blob("sha")?;            // Blob取得
+repo.blob_reader("HEAD:big.bin")?; // Blobをストリームで読む（std::io::Read。大きなファイル向け）
 repo.index()?;                // インデックス取得
 repo.is_ignored(path)?;       // .gitignore等で無視されるか
 repo.ignored_files()?;        // 無視された未追跡ファイル一覧

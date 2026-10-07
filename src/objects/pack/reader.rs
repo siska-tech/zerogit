@@ -11,6 +11,7 @@ use super::index::PackIndex;
 use crate::error::{Error, Result};
 use crate::infra::hash::Sha1State;
 use crate::infra::{crc32, decompress_exact, hash_object};
+use crate::objects::reader::{CrcReader, Inflater, ObjectReader, Source};
 use crate::objects::{ObjectType, Oid, RawObject};
 
 const HEADER_SIZE: u64 = 12;
@@ -408,7 +409,7 @@ impl PackFile {
     pub(crate) fn entry_kind(&self, oid: &Oid) -> Result<Option<(EntryKind, u64)>> {
         match self.index.get(oid) {
             Some(entry) => {
-                let header = self.entry_header_at(entry.offset)?;
+                let header = self.entry_header_at(entry.offset, true)?;
                 Ok(Some((header.kind, header.size)))
             }
             None => Ok(None),
@@ -416,7 +417,36 @@ impl PackFile {
     }
 
     /// Reads and checks the header of the entry starting at `offset`.
-    fn entry_header_at(&self, offset: u64) -> Result<EntryHeader> {
+    /// A reader inflating the content of `oid` as it is read, when the pack
+    /// stores it whole; `None` if the pack lacks `oid` or stores it as a
+    /// delta. No size limit applies: the content is not held in memory.
+    pub(crate) fn stream_entry(&self, oid: &Oid) -> Result<Option<ObjectReader>> {
+        let Some(entry) = self.index.get(oid) else {
+            return Ok(None);
+        };
+        let header = self.entry_header_at(entry.offset, false)?;
+        let EntryKind::Base(object_type) = header.kind else {
+            return Ok(None);
+        };
+        let mut file = File::open(&self.path)?;
+        file.seek(SeekFrom::Start(entry.offset))?;
+        let mut raw = CrcReader::new(file.take(header.len));
+        // The CRC covers the entry header as well.
+        let mut skipped = vec![0u8; header.header_len];
+        raw.read_exact(&mut skipped)?;
+        Ok(Some(ObjectReader::streamed(
+            *oid,
+            object_type,
+            header.size,
+            Source::Packed {
+                inflater: Inflater::new(raw),
+                crc: header.crc,
+            },
+        )))
+    }
+
+    /// With `limited`, entries larger than `max_object_size` are refused.
+    fn entry_header_at(&self, offset: u64, limited: bool) -> Result<EntryHeader> {
         let position = self
             .entries_by_offset
             .binary_search_by_key(&offset, |e| e.0)
@@ -481,7 +511,7 @@ impl PackFile {
         };
         let header_len = prefix.len() - bytes.len();
 
-        if size > self.limits.max_object_size {
+        if limited && size > self.limits.max_object_size {
             return Err(limit(format!(
                 "entry at offset {} inflates to {} bytes, limit is {}",
                 offset, size, self.limits.max_object_size
@@ -510,7 +540,7 @@ impl PackFile {
             len,
             crc,
             prefix: mut raw,
-        } = self.entry_header_at(offset)?;
+        } = self.entry_header_at(offset, true)?;
         let rest = len - raw.len() as u64;
         if rest > 0 {
             raw.extend(self.read_range(offset + raw.len() as u64, rest)?);
@@ -656,6 +686,65 @@ mod tests {
         b.ref_delta(c, a, &delta);
         let (_temp, pack) = open(&b, PackLimits::default());
         assert!(reason(pack.unwrap().read(&a)).contains("delta cycle"));
+    }
+
+    #[test]
+    fn whole_entries_stream_past_the_size_limit() {
+        let mut b = Builder::default();
+        let content = base_text().repeat(50);
+        let (oid, offset) = b.object(ObjectType::Blob, &content);
+        let longer = [content.clone(), b"more\n".to_vec()].concat();
+        let delta_oid = oid_of(ObjectType::Blob, &longer);
+        b.ofs_delta(delta_oid, offset, &append_delta(&content, b"more\n"));
+        let limits = PackLimits {
+            max_object_size: 100,
+            ..PackLimits::default()
+        };
+        let (_temp, pack) = open(&b, limits);
+        let pack = pack.unwrap();
+        // Too large to read whole, but streamed with no limit.
+        assert!(matches!(
+            pack.read(&oid),
+            Err(Error::PackLimitExceeded { .. })
+        ));
+        let mut reader = pack.stream_entry(&oid).unwrap().unwrap();
+        assert_eq!(reader.size(), content.len() as u64);
+        let mut read = Vec::new();
+        reader.read_to_end(&mut read).unwrap();
+        assert_eq!(read, content);
+        // Deltas are not streamed; missing objects are not found.
+        assert!(pack.stream_entry(&delta_oid).unwrap().is_none());
+        assert!(pack
+            .stream_entry(&oid_of(ObjectType::Blob, b"missing"))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn corrupt_streamed_entries_fail_at_the_end() {
+        let mut b = Builder::default();
+        let content = base_text();
+        let (oid, _) = b.object(ObjectType::Blob, &content);
+        let temp = TempDir::new().unwrap();
+        let path = b.write(temp.path(), 2);
+        // Damage a byte of the compressed data, keeping the index.
+        let mut data = std::fs::read(&path).unwrap();
+        data[12 + 3] ^= 0x01;
+        std::fs::write(&path, &data).unwrap();
+        let pack = PackFile::with_index(
+            &path,
+            PackIndex::read(path.with_extension("idx")).unwrap(),
+            PackLimits::default(),
+        )
+        .unwrap();
+        // Opening checks the layout, not the data: the stream must fail.
+        let mut reader = pack.stream_entry(&oid).unwrap().unwrap();
+        let mut read = Vec::new();
+        let error = reader.read_to_end(&mut read).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
+        ));
     }
 
     #[test]

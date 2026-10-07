@@ -97,6 +97,18 @@ pub(crate) enum EntryKind {
 
 /// A pack entry as stored: its kind, inflated size and compressed data.
 #[derive(Debug, Clone)]
+/// The checked header of an entry, with the bytes read to parse it.
+struct EntryHeader {
+    kind: EntryKind,
+    size: u64,
+    header_len: usize,
+    /// The length of the whole entry (header and compressed data).
+    len: u64,
+    crc: u32,
+    /// The first bytes of the entry.
+    prefix: Vec<u8>,
+}
+
 pub(crate) struct RawEntry {
     pub(crate) kind: EntryKind,
     pub(crate) size: u64,
@@ -390,8 +402,21 @@ impl PackFile {
         }
     }
 
-    /// Reads and CRC-checks the entry starting at `offset`.
-    fn raw_entry_at(&self, offset: u64) -> Result<RawEntry> {
+    /// How `oid` is stored (whole, or a delta and against what) and its
+    /// stored size, read from the entry header only; `None` if the pack
+    /// lacks `oid`.
+    pub(crate) fn entry_kind(&self, oid: &Oid) -> Result<Option<(EntryKind, u64)>> {
+        match self.index.get(oid) {
+            Some(entry) => {
+                let header = self.entry_header_at(entry.offset)?;
+                Ok(Some((header.kind, header.size)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Reads and checks the header of the entry starting at `offset`.
+    fn entry_header_at(&self, offset: u64) -> Result<EntryHeader> {
         let position = self
             .entries_by_offset
             .binary_search_by_key(&offset, |e| e.0)
@@ -402,10 +427,10 @@ impl PackFile {
             .get(position + 1)
             .map_or(self.data_end, |e| e.0);
         let len = end - offset;
-        let mut raw = self.read_range(offset, len.min(MAX_ENTRY_HEADER))?;
+        let prefix = self.read_range(offset, len.min(MAX_ENTRY_HEADER))?;
 
         let corrupt = |what: &str| invalid(format!("{} at offset {}", what, offset));
-        let mut bytes = raw.iter().copied();
+        let mut bytes = prefix.iter().copied();
         let mut next = || {
             bytes
                 .next()
@@ -454,7 +479,7 @@ impl PackFile {
             }
             other => return Err(corrupt(&format!("invalid object type {}", other))),
         };
-        let header_len = raw.len() - bytes.len();
+        let header_len = prefix.len() - bytes.len();
 
         if size > self.limits.max_object_size {
             return Err(limit(format!(
@@ -466,12 +491,32 @@ impl PackFile {
         if size > compressed.saturating_mul(MAX_DEFLATE_RATIO) + 64 {
             return Err(corrupt("declared size too large for compressed data"));
         }
+        Ok(EntryHeader {
+            kind,
+            size,
+            header_len,
+            len,
+            crc,
+            prefix,
+        })
+    }
+
+    /// Reads and CRC-checks the entry starting at `offset`.
+    fn raw_entry_at(&self, offset: u64) -> Result<RawEntry> {
+        let EntryHeader {
+            kind,
+            size,
+            header_len,
+            len,
+            crc,
+            prefix: mut raw,
+        } = self.entry_header_at(offset)?;
         let rest = len - raw.len() as u64;
         if rest > 0 {
             raw.extend(self.read_range(offset + raw.len() as u64, rest)?);
         }
         if crc32(&raw) != crc {
-            return Err(corrupt("CRC32 mismatch"));
+            return Err(invalid(format!("CRC32 mismatch at offset {}", offset)));
         }
         raw.drain(..header_len);
         Ok(RawEntry {

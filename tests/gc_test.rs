@@ -337,7 +337,9 @@ fn repack_packs_every_reachable_object_like_git() {
     assert_eq!(packs, [format!("{}.idx", name), format!("{}.pack", name)]);
     let (packed, deltas) = verify_pack(dir, &pack);
     assert_eq!(packed, reachable);
-    assert_eq!(deltas, summary.reused_deltas());
+    assert_eq!(deltas, summary.reused_deltas() + summary.new_deltas());
+    // The trees written loose after the pack are encoded against the packed ones.
+    assert!(summary.new_deltas() > 0);
     assert_fsck(dir);
     assert_eq!(git(dir, &["count-objects"]), "0 objects, 0 kilobytes\n");
     assert_eq!(repo.commit(&head).unwrap().summary(), "After gc");
@@ -365,6 +367,91 @@ fn repack_packs_every_reachable_object_like_git() {
     let packs = object_files(dir).1;
     assert_eq!(packs.iter().filter(|p| p.ends_with(".pack")).count(), 1);
     assert_fsck(dir);
+}
+
+/// The longest delta chain in a pack, from `git verify-pack -v`.
+fn longest_chain(dir: &Path, pack: &Path) -> usize {
+    let relative = format!(
+        ".git/objects/pack/{}",
+        pack.file_name().unwrap().to_string_lossy()
+    );
+    git(dir, &["verify-pack", "-v", &relative])
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            (fields.len() >= 7 && fields[0].len() == 40).then(|| fields[5].parse().unwrap())
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// A history of 40 commits of a growing file and a file edited in place,
+/// in two directories, every object loose (as zerogit writes them).
+fn loose_history() -> tempfile::TempDir {
+    let temp = repository(&["base.txt"]);
+    let dir = temp.path();
+    git(dir, &["config", "gc.auto", "0"]);
+    let mut log = String::new();
+    let mut table: Vec<String> = (0..200).map(|i| format!("row {} value 0\n", i)).collect();
+    for i in 0..40 {
+        log.push_str(&format!("entry {} with some text to make it longer\n", i));
+        table[(i * 37) % 200] = format!("row {} value {}\n", (i * 37) % 200, i);
+        write(dir, "docs/log.txt", &log);
+        write(dir, "data/table.txt", &table.concat());
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", &format!("Commit {}", i)]);
+    }
+    temp
+}
+
+#[test]
+fn repack_encodes_loose_objects_as_deltas() {
+    let temp = loose_history();
+    let source = temp.path();
+    assert!(object_files(source).1.is_empty());
+
+    let copy = twin(source);
+    let dir = copy.path();
+    let summary = Repository::open(dir).unwrap().repack().unwrap();
+    let pack = summary.pack().unwrap().to_path_buf();
+    let (packed, deltas) = verify_pack(dir, &pack);
+    assert_eq!(packed, git_reachable(dir));
+    assert_eq!(summary.reused_deltas(), 0);
+    assert_eq!(deltas, summary.new_deltas());
+    // Most versions of the files are deltas (Git makes 76 here; the
+    // commits and trees are too small to gain).
+    assert!(summary.new_deltas() >= 70, "{}", summary.new_deltas());
+    assert!(longest_chain(dir, &pack) <= 50);
+    assert_fsck(dir);
+    // Git reads every object back.
+    let read = git_output(dir, &["cat-file", "--batch-all-objects", "--batch"]);
+    assert!(read.status.success());
+
+    // About the size of Git's own pack.
+    let theirs = twin(source);
+    git(theirs.path(), &["repack", "-a", "-d", "-q"]);
+    let size = |dir: &Path| -> u64 {
+        let packs = object_files(dir).1;
+        let name = packs.iter().find(|p| p.ends_with(".pack")).unwrap();
+        fs::metadata(dir.join(".git/objects/pack").join(name))
+            .unwrap()
+            .len()
+    };
+    let (ours, git_size) = (size(dir), size(theirs.path()));
+    assert!(ours < git_size * 3 / 2, "{} vs {}", ours, git_size);
+
+    // pack.depth limits the chains; pack.window = 0 turns deltas off.
+    let shallow = twin(source);
+    git(shallow.path(), &["config", "pack.depth", "3"]);
+    let summary = Repository::open(shallow.path()).unwrap().repack().unwrap();
+    assert!(summary.new_deltas() > 0);
+    assert!(longest_chain(shallow.path(), summary.pack().unwrap()) <= 3);
+    assert_fsck(shallow.path());
+    let off = twin(source);
+    git(off.path(), &["config", "pack.window", "0"]);
+    let summary = Repository::open(off.path()).unwrap().repack().unwrap();
+    assert_eq!(summary.new_deltas(), 0);
+    assert_eq!(verify_pack(off.path(), summary.pack().unwrap()).1, 0);
 }
 
 /// Runs `git pack-objects` on the objects listed in `input` and returns

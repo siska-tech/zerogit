@@ -7,9 +7,11 @@
 
 ### Added
 - `Repository::reflog_expire(expire, expire_unreachable)`と`ReflogExpiry`（`Never`・`Before(time)`・`All`、`ReflogExpiry::parse()`）: `git reflog expire --all`と同じく、`.git/logs/`のすべてのreflogから古いエントリを消し、消した数を返す。`expire`より古いエントリと、`expire_unreachable`より古く、古い値か新しい値が参照の現在の値から到達できないコミットのエントリを消す（HEADは`refs/`のどの参照からも到達できないもの。注釈付きタグはコミットまでたどり、コミットでない・存在しないオブジェクトは到達可能とみなす）。`None`は設定から取る: 参照に最初に一致する`gc.<pattern>.reflogExpire`・`gc.<pattern>.reflogExpireUnreachable`（`*`は`/`にも一致。パターンに設定のないほうは期限なし）、なければ`gc.reflogExpire`・`gc.reflogExpireUnreachable`（既定90日・30日）。パターンに一致しない`refs/stash`は期限切れにしない。値は`never`・`now`（`all`。未来の日時のエントリも含む）・`90.days.ago`・日時。Gitの既定（`--rewrite`なし）と同じく、残るエントリはそのまま保ち、空になったreflogは空のファイルとして残す。参照のロックとreflogのロックをGitと同じく取り、すべてのロックを取ってから書き換えるので、ロックされていれば（`Error::Locked`）何も変更しない (#74)
+- `RepackSummary::new_deltas()`: `repack()`が新しく作ったdeltaの数 (#75)
 
 ### Changed
 - `gc()`が`git gc`と同じく、`pack_refs()`の後・`repack()`の前にreflogを期限切れにする（`reflog_expire(None, None)`）。reflogからだけ到達できていた古いオブジェクトも、pruneの期限を過ぎれば消える。`gc.*reflogExpire*`の値が不正なら何も変更せずに`Error::InvalidDate`を返す (#74)
+- `repack()`（と`gc()`）がdeltaを計算する: 既存のpackのdeltaを再利用できないオブジェクト（looseオブジェクトなど）を、`git pack-objects`と同じく型・ファイル名・サイズで並べ、前の`pack.window`個（既定10）のオブジェクトとのdeltaを試し、最も小さいものを使う。deltaの連鎖は`pack.depth`（既定50）まで、`core.bigFileThreshold`（既定512 MiB）より大きいオブジェクトはdeltaにしない。delta（コピーと挿入の命令列）の作成はクリーンルームで実装し、作ったdeltaは元のオブジェクトを再現することを確かめてから書く。READMEの計測（zerogitが書いた2,000コミット）で、`gc()`後のサイズが7.6 MBから1.5 MB（`git gc`は1.7 MB）になった (#75)
 
 ### Notes
 - Git 2.55で確認したところ、`gc.reflogExpire`・`gc.reflogExpireUnreachable`がどちらも未設定の場合、`git reflog expire`は文書と異なり、到達可能なエントリも30日で消した。zerogitは文書どおりの既定（90日・30日）を使う。両方を設定するか`--expire`・`--expire-unreachable`を指定した場合の結果は一致する (#74)

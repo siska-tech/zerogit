@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 use crate::index::IndexEntry;
 use crate::objects::tree::FileMode;
-use crate::objects::{ObjectType, Oid};
+use crate::objects::Oid;
 use crate::repository::{reject_sparse_checkout, Repository};
 use crate::status::flatten_tree_with_store as flatten_tree;
 
@@ -59,20 +59,22 @@ impl Repository {
 
         // A tracked file that was deleted has its removal staged, as
         // `git add` does; this also resolves a conflict by deletion.
-        let Some(file) = worktree.read(path, tracked.as_ref())? else {
+        if worktree.mode(path, tracked_mode)?.is_none() {
             if idx.remove(path) {
                 return index_lock.write(&idx);
             }
             return Err(Error::PathNotFound(path.to_path_buf()));
-        };
+        }
 
         if !force && tracked_mode.is_none() && worktree.rules().is_ignored(path, false)? {
             return Err(Error::IgnoredPath(path.to_path_buf()));
         }
 
         // Write the blob and stage it.
-        let oid = self.object_store().write(ObjectType::Blob, &file.content)?;
-        idx.add(file.index_entry(path.to_path_buf(), oid));
+        let Some(file) = worktree.add(path, tracked.as_ref())? else {
+            return Err(Error::PathNotFound(path.to_path_buf()));
+        };
+        idx.add(file.index_entry(path.to_path_buf()));
         index_lock.write(&idx)
     }
 
@@ -93,7 +95,6 @@ impl Repository {
     /// repo.add_all().unwrap();
     /// ```
     pub fn add_all(&self) -> Result<()> {
-        let store = self.object_store();
         let (index_lock, mut idx) = self.lock_index()?;
 
         // Report a missing or corrupt HEAD commit before touching the index.
@@ -107,11 +108,10 @@ impl Repository {
         // Add all working tree files
         for path in &working_files {
             let tracked = idx.get(path).cloned();
-            let Some(file) = worktree.read(path, tracked.as_ref())? else {
+            let Some(file) = worktree.add(path, tracked.as_ref())? else {
                 continue;
             };
-            let oid = store.write(ObjectType::Blob, &file.content)?;
-            idx.add(file.index_entry(path.clone(), oid));
+            idx.add(file.index_entry(path.clone()));
         }
 
         // Handle deleted files: remove index entries (including conflict

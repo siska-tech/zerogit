@@ -244,7 +244,6 @@ impl Repository {
 
         if to_worktree {
             let mut worktree = self.worktree()?;
-            let store = self.object_store();
             // Check every conversion first, so an unsupported attribute
             // changes nothing.
             for path in &paths {
@@ -266,7 +265,7 @@ impl Repository {
                 };
                 match wanted {
                     Some((oid, mode)) => {
-                        worktree.write(&native, &store.read(&oid)?.content, mode)?;
+                        worktree.write_blob(&native, &oid, mode)?;
                         // The index entry, if it has this content, gets the
                         // new stat data.
                         if entry.is_some_and(|e| *e.oid() == oid && e.mode() == mode) {

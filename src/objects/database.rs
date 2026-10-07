@@ -275,28 +275,14 @@ impl ObjectStore {
     /// The size of an object's content, read from its header (for a delta,
     /// the size it produces) without inflating the whole object.
     pub(crate) fn object_size(&self, oid: &Oid) -> Result<u64> {
-        let corrupt = |reason: &str| Error::InvalidObject {
-            oid: oid.to_hex(),
-            reason: reason.to_owned(),
-        };
-        match fs::read(self.inner.loose.oid_to_path(oid)) {
-            Ok(data) => {
-                let head = crate::infra::compression::inflate_head(&data, 64)?;
-                let header = head
-                    .split(|&b| b == 0)
-                    .next()
-                    .filter(|header| header.len() < head.len())
-                    .ok_or_else(|| corrupt("missing header"))?;
-                return std::str::from_utf8(header)
-                    .ok()
-                    .and_then(|header| header.split_once(' '))
-                    .and_then(|(_, size)| size.parse().ok())
-                    .ok_or_else(|| corrupt("invalid header"));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(Error::Io(e)),
+        // Only the headers are read, however large the object.
+        if let Some(reader) = self.inner.loose.open_stream(oid)? {
+            return Ok(reader.size());
         }
         for pack in self.pack_files()? {
+            if let Some(reader) = pack.stream_entry(oid)? {
+                return Ok(reader.size());
+            }
             let Some(entry) = pack.raw_entry(oid)? else {
                 continue;
             };
@@ -326,6 +312,18 @@ impl ObjectStore {
             return Ok(oid);
         }
         self.inner.loose.write(kind, content)
+    }
+
+    /// Writes an object of `size` bytes read from `content` as a loose
+    /// object, without holding it in memory; see
+    /// [`LooseObjectStore::write_stream`].
+    pub(crate) fn write_stream(
+        &self,
+        kind: ObjectType,
+        size: u64,
+        content: &mut dyn std::io::Read,
+    ) -> Result<Oid> {
+        self.inner.loose.write_stream(kind, size, content)
     }
 }
 

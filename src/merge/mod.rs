@@ -583,7 +583,6 @@ impl Repository {
         ours: &Flat,
         result: &TreeMerge,
     ) -> Result<()> {
-        let store = self.object_store();
         // Refuse unsupported conversions before changing anything.
         for (path, resolution) in &result.paths {
             let written = match resolution {
@@ -619,7 +618,7 @@ impl Repository {
                     }
                     match entry {
                         Some((oid, mode)) => {
-                            worktree.write(&native, &store.read(oid)?.content, *mode)?;
+                            worktree.write_blob(&native, oid, *mode)?;
                             idx.add(worktree.stat_entry(&native, index_path, *oid, *mode)?);
                         }
                         None => {
@@ -633,7 +632,7 @@ impl Repository {
                 } => {
                     if let Some((oid, mode)) = written {
                         if *written != ours_entry {
-                            worktree.write(&native, &store.read(oid)?.content, *mode)?;
+                            worktree.write_blob(&native, oid, *mode)?;
                         }
                     }
                     idx.remove(&index_path);
@@ -732,13 +731,12 @@ impl Repository {
         target: &Flat,
         paths: &[String],
     ) -> Result<()> {
-        let store = self.object_store();
         for path in paths {
             let native = native_path(Path::new(path));
             let index_path = PathBuf::from(path);
             match target.get(path) {
                 Some((oid, mode)) => {
-                    worktree.write(&native, &store.read(oid)?.content, *mode)?;
+                    worktree.write_blob(&native, oid, *mode)?;
                     idx.remove(&index_path);
                     idx.add(worktree.stat_entry(&native, index_path, *oid, *mode)?);
                 }

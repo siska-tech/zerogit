@@ -19,6 +19,73 @@ pub fn compress(data: &[u8]) -> Vec<u8> {
     miniz_oxide::deflate::compress_to_vec_zlib(data, 6)
 }
 
+/// Zlib compression of data given in pieces, written to `W` as it is
+/// produced; [`Deflater::finish`] ends the stream. The output is the same
+/// as [`compress`] gives for all the data at once.
+pub(crate) struct Deflater<W: std::io::Write> {
+    compressor: Box<miniz_oxide::deflate::core::CompressorOxide>,
+    buffer: Vec<u8>,
+    inner: W,
+}
+
+impl<W: std::io::Write> Deflater<W> {
+    pub(crate) fn new(inner: W) -> Self {
+        use miniz_oxide::deflate::core::{create_comp_flags_from_zip_params, CompressorOxide};
+        let flags = create_comp_flags_from_zip_params(6, 1, 0);
+        Deflater {
+            compressor: Box::new(CompressorOxide::new(flags)),
+            buffer: vec![0; 64 << 10],
+            inner,
+        }
+    }
+
+    /// Compresses `input`, or with `finish` set ends the stream after it.
+    fn run(&mut self, mut input: &[u8], finish: bool) -> std::io::Result<()> {
+        use miniz_oxide::deflate::core::{compress as deflate, TDEFLFlush, TDEFLStatus};
+        let flush = if finish {
+            TDEFLFlush::Finish
+        } else {
+            TDEFLFlush::None
+        };
+        loop {
+            let (status, consumed, written) =
+                deflate(&mut self.compressor, input, &mut self.buffer, flush);
+            input = &input[consumed..];
+            self.inner.write_all(&self.buffer[..written])?;
+            match status {
+                TDEFLStatus::Done => return Ok(()),
+                TDEFLStatus::Okay if input.is_empty() && !finish && written < self.buffer.len() => {
+                    return Ok(())
+                }
+                TDEFLStatus::Okay => {}
+                _ => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "zlib compression failed",
+                    ))
+                }
+            }
+        }
+    }
+
+    /// Ends the stream and returns the writer it went to.
+    pub(crate) fn finish(mut self) -> std::io::Result<W> {
+        self.run(&[], true)?;
+        Ok(self.inner)
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for Deflater<W> {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.run(data, false)?;
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 /// Decompresses zlib-compressed data.
 ///
 /// This function validates the zlib header and decompresses the data using
@@ -210,6 +277,24 @@ fn is_valid_zlib_header(cmf: u8, flg: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deflater_matches_compress_in_any_pieces() {
+        use std::io::Write;
+        let data: Vec<u8> = (0..300_000u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8 % 7)
+            .collect();
+        for piece in [1, 1000, 70_000, data.len()] {
+            let mut deflater = Deflater::new(Vec::new());
+            for chunk in data.chunks(piece) {
+                deflater.write_all(chunk).unwrap();
+            }
+            let out = deflater.finish().unwrap();
+            assert_eq!(decompress(&out).unwrap(), data, "{}", piece);
+        }
+        let empty = Deflater::new(Vec::new()).finish().unwrap();
+        assert_eq!(decompress(&empty).unwrap(), b"");
+    }
 
     #[test]
     fn test_decompress_prefix_reports_consumed_bytes() {

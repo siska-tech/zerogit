@@ -1,11 +1,14 @@
 //! Git loose object store implementation.
 
 use std::fs;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::oid::{Oid, OID_HEX_LEN};
 use crate::error::{Error, Result};
-use crate::infra::{compress, decompress, hash_object, read_file, write_file_atomic};
+use crate::infra::hash::Sha1State;
+use crate::infra::{compress, decompress, hash_object, read_file, write_file_atomic, Deflater};
 
 /// The type of a Git object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -349,6 +352,75 @@ impl LooseObjectStore {
 
         Ok(oid)
     }
+
+    /// Writes an object of `size` bytes read from `content`, hashing and
+    /// compressing it as it is read, so that it is never in memory whole.
+    ///
+    /// The object goes to a temporary file in the objects directory, which
+    /// is moved into place once its ID is known. Content that does not have
+    /// `size` bytes (a file that changed while being read, say) is an error,
+    /// and nothing is stored.
+    pub(crate) fn write_stream(
+        &self,
+        object_type: ObjectType,
+        size: u64,
+        content: &mut dyn Read,
+    ) -> Result<Oid> {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        fs::create_dir_all(&self.objects_dir)?;
+        let temp = self.objects_dir.join(format!(
+            "tmp_obj_{}_{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let result = (|| -> Result<Oid> {
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)?;
+            let mut out = Deflater::new(io::BufWriter::with_capacity(64 << 10, file));
+            let mut hash = Sha1State::new();
+            let header = format!("{} {}\0", object_type.as_str(), size);
+            hash.update(header.as_bytes());
+            out.write_all(header.as_bytes())?;
+            let mut buffer = vec![0; 64 << 10];
+            let mut total = 0u64;
+            loop {
+                let n = match content.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e.into()),
+                };
+                total += n as u64;
+                if total > size {
+                    break;
+                }
+                hash.update(&buffer[..n]);
+                out.write_all(&buffer[..n])?;
+            }
+            if total != size {
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("expected {} bytes of content, read {}", size, total),
+                )));
+            }
+            let file = out.finish()?.into_inner().map_err(|e| e.into_error())?;
+            file.sync_all()?;
+            drop(file);
+            let oid = Oid::from_bytes(hash.finalize());
+            let path = self.oid_to_path(&oid);
+            if !path.exists() {
+                if let Some(dir) = path.parent() {
+                    fs::create_dir_all(dir)?;
+                }
+                fs::rename(&temp, &path)?;
+            }
+            Ok(oid)
+        })();
+        let _ = fs::remove_file(&temp);
+        result
+    }
 }
 
 #[cfg(test)]
@@ -572,6 +644,37 @@ mod tests {
         let obj = store.read(&oid).unwrap();
         assert_eq!(obj.object_type, ObjectType::Blob);
         assert_eq!(obj.content, content);
+    }
+
+    #[test]
+    fn write_stream_matches_write_and_checks_the_size() {
+        let temp_dir = TempDir::new().unwrap();
+        let objects_dir = temp_dir.path().join("objects");
+        let store = LooseObjectStore::new(&objects_dir);
+        let content: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let size = content.len() as u64;
+
+        let oid = store
+            .write_stream(ObjectType::Blob, size, &mut &content[..])
+            .unwrap();
+        assert_eq!(oid, Oid::from_bytes(hash_object("blob", &content)));
+        let obj = store.read(&oid).unwrap();
+        assert_eq!(obj.content, content);
+        // Again, with the object already there.
+        let again = store.write_stream(ObjectType::Blob, size, &mut &content[..]);
+        assert_eq!(again.unwrap(), oid);
+
+        // Content shorter or longer than its size stores nothing.
+        let other = &content[1..];
+        for (size, data) in [(size, other), (size - 2, other)] {
+            let result = store.write_stream(ObjectType::Blob, size, &mut &data[..]);
+            assert!(matches!(result, Err(Error::Io(_))), "{}", size);
+        }
+        let entries: Vec<_> = fs::read_dir(&objects_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries.len(), 1, "{:?}", entries);
     }
 
     // S-012: write() is idempotent

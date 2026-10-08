@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-08
+
+履歴の調査と大きなファイル: describe・mailmap・blame、reflogの期限切れ、repack・push・fetchでのdelta（thin pack）、大きなファイルのストリーム処理（`blob_reader()`、`core.bigFileThreshold`を超えるファイルのadd・checkout・status・gc）。`zerogit-remote`は0.6.0として、zerogit 0.10に追従する。
+
+互換性に影響する変更（下記「Changed」）: `gc()`がreflogを期限切れにする（既定90日・到達できないエントリは30日）ため、reflogからだけ到達できた古いオブジェクトも、pruneの期限を過ぎれば消える。`repack()`・`gc()`・`pack_objects()`がdeltaを使い、`zerogit-remote`のpushはthin packを送る。公開APIの削除・シグネチャの変更はない。
+
+既知の差異: 大きな書き換え（1か所で数百行以上の変更）では、行diff（とblame）がGitと異なることがある（#37）。
+
 ### Added
 - `Repository::reflog_expire(expire, expire_unreachable)`と`ReflogExpiry`（`Never`・`Before(time)`・`All`、`ReflogExpiry::parse()`）: `git reflog expire --all`と同じく、`.git/logs/`のすべてのreflogから古いエントリを消し、消した数を返す。`expire`より古いエントリと、`expire_unreachable`より古く、古い値か新しい値が参照の現在の値から到達できないコミットのエントリを消す（HEADは`refs/`のどの参照からも到達できないもの。注釈付きタグはコミットまでたどり、コミットでない・存在しないオブジェクトは到達可能とみなす）。`None`は設定から取る: 参照に最初に一致する`gc.<pattern>.reflogExpire`・`gc.<pattern>.reflogExpireUnreachable`（`*`は`/`にも一致。パターンに設定のないほうは期限なし）、なければ`gc.reflogExpire`・`gc.reflogExpireUnreachable`（既定90日・30日）。パターンに一致しない`refs/stash`は期限切れにしない。値は`never`・`now`（`all`。未来の日時のエントリも含む）・`90.days.ago`・日時。Gitの既定（`--rewrite`なし）と同じく、残るエントリはそのまま保ち、空になったreflogは空のファイルとして残す。参照のロックとreflogのロックをGitと同じく取り、すべてのロックを取ってから書き換えるので、ロックされていれば（`Error::Locked`）何も変更しない (#74)
 - `RepackSummary::new_deltas()`: `repack()`が新しく作ったdeltaの数 (#75)

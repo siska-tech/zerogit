@@ -636,28 +636,28 @@ push(&repo, "origin", &["main"], &PushOptions::new())?;
 
 コア側には、受け取ったpackの検証・保存（`store_pack()`、thin packの補完）、送るpackの作成（`pack_objects()`・`pack_objects_with()`。deltaを使い、pushではサーバーが受け付ければthin packとOFS_DELTAにする）、リモート設定とrefspec（`remotes()`、`add_remote()`、`Refspec`）、upstream（`set_branch_upstream()`）、参照の更新（`update_reference()`）を追加しました。shallow・partial cloneは対象外です。
 
-### ローカル運用の成熟化（v0.6〜v0.8）✅
+### ローカル運用の成熟化（v0.6〜v0.7）✅
 
 Gitと並行して日常的に使えるように、並行性・性能・基本操作を固めました。
 
 - [x] Gitと安全に共存する（v0.6）- index・参照・config・状態ファイルの書き込みにGitと同じロックファイル（`<path>.lock`）を使い、参照の更新はcompare-and-swapにする。コミットにローカルのタイムゾーンを記録し、メッセージを`git commit -m`と同じく整形する（同じ入力でGitと同じOID）。作者・コミッター・日時の指定（`create_commit_with()`）
-- [x] 大きなリポジトリでも速い（v0.7）- statusはindexのstat情報が一致するファイルを読まない（racy-git対応）。4,000ファイル・220 MBで`git status`の1.3倍。indexのcache tree・resolve-undoを保持する
-- [x] 日常の操作がそろう（v0.8）- リビジョン指定（`rev_parse()`: `HEAD~1`、`v1^{}`、`@{u}`、`@{-1}`、`HEAD:path`など）、`reset --soft/--mixed/--hard`（`reset_to()`）、`commit --amend`（`amend_commit()`）、`restore`・`rm`・`mv`、変更を持ち越すcheckout
+- [x] 大きなリポジトリでも速い（v0.6）- statusはindexのstat情報が一致するファイルを読まない（racy-git対応）。4,000ファイル・220 MBで`git status`の1.3倍。indexのcache tree・resolve-undoを保持する
+- [x] 日常の操作がそろう（v0.7）- リビジョン指定（`rev_parse()`: `HEAD~1`、`v1^{}`、`@{u}`、`@{-1}`、`HEAD:path`など）、`reset --soft/--mixed/--hard`（`reset_to()`）、`commit --amend`（`amend_commit()`）、`restore`・`rm`・`mv`、変更を持ち越すcheckout
 
-### Gitとの互換性の拡充（v0.9）✅
+### Gitとの互換性の拡充（v0.8）✅
 
 - [x] merge・rebase・stashでのリネーム検出（#35。ディレクトリのリネームは対象外）
 - [x] 対話的rebase（pick・reword・edit・squash・fixup・drop、#34）
 - [x] SSHトランスポートの実サーバーでの結合テスト（#36）
 
-### 日常の操作をさらにそろえる（v0.10）✅
+### 日常の操作をさらにそろえる（v0.9）✅
 
 - [x] cherry-pick・revert（`cherry_pick()`・`revert()`、#62）
 - [x] gc・repack・prune（`gc()`・`gc_auto()`・`repack()`・`prune()`・`pack_refs()`、#63。reflogの期限切れ`reflog_expire()`は#74、新しいdeltaの計算は#75）
 - [x] clean（`clean()`、#64。`-x`・`-X`・`-d`・pathspec・`-n`。ネストしたリポジトリは消さない）
 - [x] logの並び順・グラフ（`LogOrder`・`reverse()`・`Graph`、#65）
 
-### 履歴の調査（v0.11）
+### 履歴の調査・大きなファイル（v0.10）✅
 
 - [x] describe（`describe()`・`describe_revision()`・`DescribeOptions`、#77。`--tags`・`--all`・`--long`・`--abbrev`・`--always`・`--first-parent`・`--candidates`・`--match`・`--exclude`・`--dirty`）
 - [x] mailmap（`mailmap()`・`Mailmap`、#77。`.mailmap`・`mailmap.blob`・`mailmap.file`。`log()`はコミットをそのまま返すので、表示の際に`Mailmap::resolve_signature()`で適用する）

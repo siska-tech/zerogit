@@ -115,6 +115,11 @@ impl<R: Read> CrcReader<R> {
             crc: Crc32State::new(),
         }
     }
+
+    /// The CRC-32 of what was read so far.
+    pub(crate) fn crc(&self) -> u32 {
+        self.crc.finish()
+    }
 }
 
 impl<R: Read> Read for CrcReader<R> {

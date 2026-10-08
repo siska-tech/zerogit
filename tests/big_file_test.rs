@@ -163,3 +163,184 @@ fn untracked_big_files_are_stashed_and_restored() {
     repo.stash_pop(0, false).unwrap();
     assert_eq!(fs::read(dir.join("big.bin")).unwrap(), big);
 }
+
+/// A repository with a big binary file and a big text file committed on
+/// `main`.
+fn committed() -> tempfile::TempDir {
+    let temp = small_threshold();
+    let dir = temp.path();
+    fs::write(dir.join("big.bin"), noise(6, 300_000)).unwrap();
+    write(dir, "big.txt", &"line\n".repeat(2000));
+    write(dir, "small.txt", "small\n");
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "-q", "-m", "Big"]);
+    temp
+}
+
+fn porcelain(repo: &Repository) -> Vec<String> {
+    let mut lines: Vec<String> = repo
+        .status()
+        .unwrap()
+        .iter()
+        .map(|e| format!("{:?} {}", e.status(), e.path().display()))
+        .collect();
+    lines.sort();
+    lines
+}
+
+#[test]
+fn status_hashes_big_files_as_it_reads_them() {
+    let temp = committed();
+    let dir = temp.path();
+    let repo = Repository::open(dir).unwrap();
+    assert!(porcelain(&repo).is_empty());
+
+    // The same size, one byte changed.
+    let mut changed = noise(6, 300_000);
+    changed[150_000] ^= 1;
+    fs::write(dir.join("big.bin"), &changed).unwrap();
+    assert_eq!(porcelain(&repo), ["Modified big.bin"]);
+    assert_eq!(git(dir, &["status", "--porcelain"]), " M big.bin\n");
+    let diff = repo.diff_index_to_workdir().unwrap();
+    assert_eq!(diff.len(), 1);
+    assert_eq!(
+        diff.deltas()[0].new_oid().unwrap().to_hex(),
+        hash_object(dir, "big.bin")
+    );
+
+    // Back as it was: unchanged again.
+    fs::write(dir.join("big.bin"), noise(6, 300_000)).unwrap();
+    assert!(porcelain(&repo).is_empty());
+}
+
+#[test]
+fn line_diffs_of_big_blobs_are_skipped_without_reading_them() {
+    use zerogit::diff::{BlobDiffContent, DiffOptions, SkipReason};
+    let temp = committed();
+    let dir = temp.path();
+    let repo = Repository::open(dir).unwrap();
+    let oid = |revision: &str| repo.rev_parse(revision).unwrap();
+    let (bin, txt, small) = (
+        oid("HEAD:big.bin"),
+        oid("HEAD:big.txt"),
+        oid("HEAD:small.txt"),
+    );
+    let options = DiffOptions::new().max_input_size(1000);
+    let skipped = BlobDiffContent::Skipped(SkipReason::InputTooLarge { limit: 1000 });
+
+    let diff = repo.diff_blobs(Some(&small), Some(&bin), &options).unwrap();
+    assert_eq!(diff.content(), &skipped);
+    assert!(!diff.is_identical());
+    assert_eq!((diff.old_size(), diff.new_size()), (6, 300_000));
+    let diff = repo.diff_blobs(Some(&txt), Some(&txt), &options).unwrap();
+    assert_eq!(diff.content(), &skipped);
+    assert!(diff.is_identical());
+    let diff = repo.diff_blobs(None, Some(&txt), &options).unwrap();
+    assert!(!diff.is_identical() && !diff.old_exists());
+    // Within the limit, the contents are compared.
+    let diff = repo
+        .diff_blobs(Some(&small), Some(&txt), &DiffOptions::new())
+        .unwrap();
+    assert!(matches!(diff.content(), BlobDiffContent::Text(_)));
+    let diff = repo
+        .diff_blobs(Some(&small), Some(&bin), &DiffOptions::new())
+        .unwrap();
+    assert!(matches!(diff.content(), BlobDiffContent::NonText(_)));
+    // Not a blob.
+    let tree = oid("HEAD^{tree}");
+    assert!(repo.diff_blobs(Some(&tree), Some(&bin), &options).is_err());
+}
+
+#[test]
+fn big_text_files_merge_line_by_line_as_in_git() {
+    // Git 2.55 merges files above core.bigFileThreshold line by line too.
+    let source = committed();
+    let dir = source.path();
+    git(dir, &["checkout", "-q", "-b", "other"]);
+    let mut theirs = "line\n".repeat(2000);
+    theirs.replace_range(0..4, "THEM");
+    write(dir, "big.txt", &theirs);
+    git(dir, &["commit", "-q", "-am", "Theirs"]);
+    git(dir, &["checkout", "-q", "main"]);
+    write(dir, "big.txt", &format!("{}ours\n", "line\n".repeat(2000)));
+    git(dir, &["commit", "-q", "-am", "Ours"]);
+
+    let with_git = twin(dir);
+    git(with_git.path(), &["merge", "-q", "--no-edit", "other"]);
+    let with_zerogit = twin(dir);
+    let repo = Repository::open(with_zerogit.path()).unwrap();
+    let outcome = repo
+        .merge(
+            "other",
+            "Test",
+            "test@example.com",
+            &zerogit::MergeOptions::new(),
+        )
+        .unwrap();
+    assert!(
+        matches!(outcome, zerogit::MergeOutcome::Merged(_)),
+        "{:?}",
+        outcome
+    );
+    let tree = |dir: &Path| git(dir, &["rev-parse", "HEAD^{tree}"]);
+    assert_eq!(tree(with_zerogit.path()), tree(with_git.path()));
+    assert_eq!(
+        worktree_files(with_zerogit.path()),
+        worktree_files(with_git.path())
+    );
+}
+
+#[test]
+fn big_tracked_changes_are_stashed() {
+    let temp = committed();
+    let dir = temp.path();
+    let changed = noise(7, 250_000);
+    fs::write(dir.join("big.bin"), &changed).unwrap();
+    let repo = Repository::open(dir).unwrap();
+    repo.stash_save("Test", "test@example.com", &StashOptions::new())
+        .unwrap()
+        .unwrap();
+    assert_eq!(fs::read(dir.join("big.bin")).unwrap(), noise(6, 300_000));
+    assert_eq!(cat_blob(dir, "stash@{0}:big.bin"), changed);
+    assert_fsck(dir);
+    repo.stash_pop(0, false).unwrap();
+    assert_eq!(fs::read(dir.join("big.bin")).unwrap(), changed);
+}
+
+#[test]
+fn big_objects_are_repacked_as_streams() {
+    let temp = committed();
+    let dir = temp.path();
+    // A second version: one big object loose, then both packed by Git.
+    let second = noise(8, 400_000);
+    fs::write(dir.join("big.bin"), &second).unwrap();
+    git(dir, &["commit", "-q", "-am", "Second"]);
+    let repo = Repository::open(dir).unwrap();
+
+    // Loose objects, written whole into the new pack.
+    repo.gc().unwrap();
+    assert_fsck(dir);
+    assert_eq!(cat_blob(dir, "HEAD:big.bin"), second);
+    assert_eq!(cat_blob(dir, "HEAD~1:big.bin"), noise(6, 300_000));
+
+    // Packed entries, copied from the existing pack.
+    let repo = Repository::open(dir).unwrap();
+    repo.gc().unwrap();
+    assert_fsck(dir);
+    let packs: Vec<_> = fs::read_dir(dir.join(".git/objects/pack"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "idx"))
+        .collect();
+    assert_eq!(packs.len(), 1);
+    git(dir, &["verify-pack", packs[0].to_str().unwrap()]);
+    assert_eq!(cat_blob(dir, "HEAD:big.bin"), second);
+    assert_eq!(cat_blob(dir, "HEAD~1:big.bin"), noise(6, 300_000));
+
+    // A pack written by Git is copied too.
+    git(dir, &["gc", "-q"]);
+    let repo = Repository::open(dir).unwrap();
+    repo.gc().unwrap();
+    assert_fsck(dir);
+    assert_eq!(cat_blob(dir, "HEAD:big.bin"), second);
+}

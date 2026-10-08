@@ -184,12 +184,14 @@ impl Repository {
                 work_state.insert(key, (*entry.oid(), entry.mode()));
                 continue;
             }
-            if let Some(file) = worktree.read(&native_path(entry.path()), Some(entry))? {
-                let oid = file.oid();
-                if entry.intent_to_add() || (oid, file.mode) != (*entry.oid(), entry.mode()) {
-                    self.object_store().write(ObjectType::Blob, &file.content)?;
-                }
-                work_state.insert(key, (oid, file.mode));
+            let native = native_path(entry.path());
+            let Some(current) = worktree.hash(&native, Some(entry))? else {
+                continue;
+            };
+            if !entry.intent_to_add() && current == (*entry.oid(), entry.mode()) {
+                work_state.insert(key, current);
+            } else if let Some(file) = worktree.add(&native, Some(entry))? {
+                work_state.insert(key, (file.oid, file.mode));
             }
         }
         let untracked: Vec<PathBuf> = if options.include_untracked {

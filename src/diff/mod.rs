@@ -406,8 +406,8 @@ impl Repository {
             RenameDetection::Exact => detect_renames(&mut deltas),
             RenameDetection::Similar => {
                 detect_renames(&mut deltas);
-                rename_limits = detect_similar_renames(&mut deltas, options, &mut |oid| {
-                    Ok(self.blob(&oid.to_hex())?.content().to_vec())
+                rename_limits = detect_similar_renames(&mut deltas, options, &mut |oid, limit| {
+                    self.object_store().read_within(oid, limit)
                 })?;
             }
         }
@@ -513,6 +513,24 @@ impl Repository {
         new: Option<&Oid>,
         options: &DiffOptions,
     ) -> Result<BlobDiff> {
+        // A side over the size limit is not read at all: the diff is
+        // skipped whatever the contents.
+        let limit = options.get_max_input_size();
+        let store = self.object_store();
+        let old_sized = old
+            .map(|oid| store.object_size(oid).map(|size| (oid, size)))
+            .transpose()?;
+        let new_sized = new
+            .map(|oid| store.object_size(oid).map(|size| (oid, size)))
+            .transpose()?;
+        let sides = [old_sized, new_sized];
+        if sides.iter().flatten().any(|(_, size)| *size > limit as u64) {
+            // Both must still be blobs.
+            for (oid, _) in sides.iter().flatten() {
+                self.blob_reader(&oid.to_hex())?;
+            }
+            return Ok(BlobDiff::too_large(old_sized, new_sized, limit));
+        }
         let read = |oid: Option<&Oid>| -> Result<Option<Blob>> {
             oid.map(|oid| self.blob(&oid.to_hex())).transpose()
         };

@@ -591,6 +591,7 @@ zerogitで2,000コミット（各3ファイルの変更）を書いた履歴で�
 | 差分の結果 | `Text`（完全な行差分）、`NonText`（NULを含む・不正UTF-8。暗黙の置換はしない）、`Skipped`（サイズ・計算量の上限超過。部分結果は返さない） |
 | リネーム検出 | 既定は完全一致のみ。類似度検出（任意）は通常・実行ファイルのテキストが対象で、類似度は「共通する行のバイト数 ÷ 大きい方のサイズ」。既定しきい値50%、候補ペア10万組、1ファイル1 MiBまで。上限に達した分は追加・削除のまま残り、`TreeDiff::rename_limits()`で識別できる |
 | パス | `DiffDelta::path()`はプラットフォームの`PathBuf`（Windowsでは`\`区切り）。比較は`Path`同士で行う |
+| 大きなファイル | `core.bigFileThreshold`（既定512 MiB）より大きく変換（改行コード・`text`属性）のないファイルは、Gitと同じくストリームで扱う（add・commit・checkout・restore・stash・status・repack。メモリ使用量はファイルの大きさによらない）。diff・mergeはGitと同じく行単位で扱い、内容を読むため、`DiffOptions::max_input_size`・類似度によるリネーム検出の上限を超えるファイルは読まずに省く。push・fetchで送るpackはメモリ上で作る |
 
 破損したpack・idx・deltaは`Error::InvalidPack`/`Error::InvalidPackIndex`、上限超過は`Error::PackLimitExceeded`となり、空の履歴や差分として扱われることはありません。
 
@@ -601,7 +602,7 @@ zerogitで2,000コミット（各3ファイルの変更）を書いた履歴で�
 | `DiffOptions::context_lines` | 3 | `git diff`と同じ |
 | `DiffOptions::max_input_size` | 8 MiB/片側 | 20,000行（1.3 MB）の全置換でも約16 ms。8 MiBは一般的な文書を十分に上回る |
 | `DiffOptions::max_cost` | 5,000万ステップ | 最悪ケース（同じ行が多数繰り返される5,000行文書の全置換）が約1,700万ステップ・約90 ms。2万行の同ケースは約2.7億ステップ・約3.4秒のため省略される |
-| `PackLimits::max_object_size` | 1 GiB | 宣言サイズによる過大な確保を防止 |
+| `PackLimits::max_object_size` | 1 GiB | 宣言サイズによる過大な確保を防止。packに丸ごと格納されたオブジェクトをストリームで扱う処理（`blob_reader()`、checkout・restore、repack）にはかからない |
 | `PackLimits::max_delta_depth` | 10,000 | Gitの`--depth`上限4,095を上回る |
 | `PackLimits::delta_cache_size` | 32 MiB/pack | 多段deltaの再展開を回避 |
 
@@ -661,6 +662,7 @@ Gitと並行して日常的に使えるように、並行性・性能・基本�
 - [x] describe（`describe()`・`describe_revision()`・`DescribeOptions`、#77。`--tags`・`--all`・`--long`・`--abbrev`・`--always`・`--first-parent`・`--candidates`・`--match`・`--exclude`・`--dirty`）
 - [x] mailmap（`mailmap()`・`Mailmap`、#77。`.mailmap`・`mailmap.blob`・`mailmap.file`。`log()`はコミットをそのまま返すので、表示の際に`Mailmap::resolve_signature()`で適用する）
 - [x] blame（`blame()`・`BlameOptions`・`DiffAlgorithm`、#77。ファイル全体のリネームを追う。`--first-parent`・`-L`・`--diff-algorithm`（myers・minimal・histogram）。`-M`・`-C`（行の移動・コピーの検出）は対象外。大きな書き換えを含む履歴ではGitと異なる行がありうる。行diffをGitとそろえる規則は、Gitの出力だけから実験で求め、`docs/diff-compat-research.md`に記録した）
+- [x] 大きなファイルのストリーム処理（`blob_reader()`・`ObjectReader`、#78。1.1 GBのファイルのadd・commit・checkout・restore・status・gcで、ヒープ使用量のピークは0.5 MB以下。`cargo run --release --example measure_large_files -- --write <dir> 1100`で再現できる）
 
 ### 将来の検討事項
 

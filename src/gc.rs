@@ -435,6 +435,16 @@ impl Repository {
             if !seen.insert(oid) {
                 continue;
             }
+            // A start may be a blob (one in the index), perhaps too large
+            // to read whole: its type comes from its header.
+            let known = match known {
+                Some(object_type) => Some(object_type),
+                None => match store.object_type(&oid) {
+                    Ok(object_type) => Some(object_type),
+                    Err(Error::ObjectNotFound(_)) if tolerant => continue,
+                    Err(e) => return Err(e),
+                },
+            };
             if known == Some(ObjectType::Blob) {
                 // The size is looked up only when it is wanted; it also
                 // shows that the blob exists.

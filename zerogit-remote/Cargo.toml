@@ -1,6 +1,6 @@
 [package]
 name = "zerogit-remote"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "Remote operations (fetch, push, clone) for zerogit: Git protocol v2, smart HTTP(S), SSH and local transports"
 license = "MIT OR Apache-2.0"
@@ -11,7 +11,7 @@ categories = ["development-tools"]
 exclude = ["tests/"]
 
 [dependencies]
-zerogit = { path = "..", version = "0.9" }
+zerogit = { path = "..", version = "0.10" }
 ureq = { version = "2", default-features = false, features = ["tls"], optional = true }
 
 [features]
